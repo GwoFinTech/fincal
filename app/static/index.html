@@ -1,344 +1,399 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>FinCal — Earnings Calendar</title>
+  <title>FinCal — 财报日历</title>
   <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>
-    * { font-family: 'Inter', system-ui, sans-serif; }
-    body { background: #0a0a0b; color: #e4e4e7; }
-    ::-webkit-scrollbar { width: 6px; }
-    ::-webkit-scrollbar-track { background: #18181b; }
+    * { font-family: -apple-system, 'Inter', 'Noto Sans CJK SC', system-ui, sans-serif; }
+
+    :root {
+      --bg: #09090b;
+      --surface: #18181b;
+      --surface-raised: #1f1f23;
+      --border: #27272a;
+      --border-light: #3f3f46;
+      --text: #fafafa;
+      --text-secondary: #a1a1aa;
+      --text-muted: #71717a;
+      --primary: #7c3aed;
+      --primary-light: #a78bfa;
+      --success: #22c55e;
+      --success-bg: rgba(34,197,94,0.12);
+      --destructive: #ef4444;
+      --destructive-bg: rgba(239,68,68,0.12);
+      --warning: #f59e0b;
+      --warning-bg: rgba(245,158,11,0.12);
+    }
+
+    body { background: var(--bg); color: var(--text); }
+
+    ::-webkit-scrollbar { width: 5px; }
+    ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 3px; }
 
-    .fade-enter-active, .fade-leave-active { transition: opacity 0.2s; }
-    .fade-enter-from, .fade-leave-to { opacity: 0; }
+    /* ── Design Tokens ── */
+    .surface { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; }
+    .surface-raised { background: var(--surface-raised); border: 1px solid var(--border); border-radius: 12px; }
+    .section-title { font-size: 13px; font-weight: 600; color: var(--text); padding-bottom: 10px; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
 
-    .calendar-cell { min-height: 110px; }
-    .badge { font-size: 0.65rem; padding: 1px 6px; border-radius: 9999px; font-weight: 500; white-space: nowrap; display: inline-flex; align-items: center; gap: 3px; }
-    .badge-US { background: #1e3a5f; color: #60a5fa; }
-    .badge-HK { background: #3b1f2b; color: #f472b6; }
-    .badge-mine { outline: 2px solid #a78bfa; outline-offset: -1px; }
-    .badge-predicted { opacity: 0.7; border: 1px dashed #71717a; }
-    .predicted-tag { font-size: 0.5rem; background: #3f3f46; color: #a1a1aa; padding: 0 2px; border-radius: 2px; line-height: 1.4; }
+    /* ── Badges (tsummt style) ── */
+    .badge { font-size: 11px; padding: 2px 8px; border-radius: 6px; font-weight: 600; white-space: nowrap; display: inline-flex; align-items: center; gap: 3px; }
+    .badge-US { background: rgba(59,130,246,0.15); color: #60a5fa; border: 1px solid rgba(59,130,246,0.3); }
+    .badge-HK { background: rgba(236,72,153,0.15); color: #f472b6; border: 1px solid rgba(236,72,153,0.3); }
+    .badge-mine { outline: 2px solid var(--primary-light); outline-offset: -1px; }
+    .badge-predicted { opacity: 0.65; border: 1px dashed var(--border-light) !important; }
+    .predicted-tag { font-size: 10px; background: var(--surface-raised); color: var(--text-muted); padding: 0 4px; border-radius: 4px; }
+    .fq-tag { font-size: 10px; color: var(--text-muted); font-weight: 500; }
 
-    .beat { color: #4ade80; font-weight: 600; }
-    .miss { color: #f87171; font-weight: 600; }
-    .surprise-dot { width: 5px; height: 5px; border-radius: 50%; display: inline-block; margin-right: 1px; }
-    .surprise-beat { background: #4ade80; }
-    .surprise-miss { background: #f87171; }
+    /* ── Timing tags ── */
+    .before-tag { font-size: 10px; background: rgba(59,130,246,0.15); color: #93c5fd; padding: 0 4px; border-radius: 4px; font-weight: 500; }
+    .after-tag { font-size: 10px; background: rgba(236,72,153,0.15); color: #f9a8d4; padding: 0 4px; border-radius: 4px; font-weight: 500; }
 
-    .before-tag { font-size: 0.5rem; background: #1c3a5c; color: #7dd3fc; padding: 0 3px; border-radius: 2px; }
-    .after-tag { font-size: 0.5rem; background: #3b1f2b; color: #fbb6ce; padding: 0 3px; border-radius: 2px; }
-    .fq-tag { font-size: 0.5rem; color: #a1a1aa; }
+    /* ── Beat/Miss ── */
+    .beat { color: var(--success); font-weight: 600; }
+    .miss { color: var(--destructive); font-weight: 600; }
 
-    .tab-active { border-bottom: 2px solid #8b5cf6; color: #c4b5fd; }
-    .tab-inactive { border-bottom: 2px solid transparent; color: #71717a; }
-    .tab-inactive:hover { color: #a1a1aa; }
+    /* ── Tabs ── */
+    .tab-active { border-bottom: 2px solid var(--primary); color: var(--primary-light); }
+    .tab-inactive { border-bottom: 2px solid transparent; color: var(--text-muted); }
+    .tab-inactive:hover { color: var(--text-secondary); }
 
-    .toast { animation: slideIn 0.3s ease, fadeOut 0.3s ease 2.7s; }
-    @keyframes slideIn { from { transform: translateY(-20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
-    @keyframes fadeOut { from { opacity: 1; } to { opacity: 0; } }
+    /* ── Buttons (tsummt variants) ── */
+    .btn { font-size: 13px; font-weight: 500; padding: 6px 12px; border-radius: 6px; transition: all 0.15s; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+    .btn-primary { background: var(--primary); color: white; }
+    .btn-primary:hover { background: #6d28d9; }
+    .btn-outline { background: transparent; border: 1px solid var(--border); color: var(--text-secondary); }
+    .btn-outline:hover { background: var(--surface-raised); color: var(--text); }
+    .btn-ghost { background: transparent; color: var(--text-muted); }
+    .btn-ghost:hover { background: var(--surface-raised); color: var(--text); }
 
-    .pulse { animation: pulse 2s infinite; }
-    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+    /* ── Calendar ── */
+    .calendar-cell { min-height: 100px; padding: 6px; position: relative; overflow: hidden; cursor: pointer; transition: background 0.15s; }
+    .calendar-cell:hover { background: var(--surface-raised); }
+    .calendar-cell.out { opacity: 0.35; }
+    .calendar-cell.today .day-num { background: var(--primary); color: white; width: 24px; height: 24px; border-radius: 50%; display: flex; align-items: center; justify-content: center; }
+    .calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 1px; background: var(--border); border-radius: 12px; overflow: hidden; }
+    .weekday-header { background: var(--surface); padding: 8px; font-size: 11px; font-weight: 500; color: var(--text-muted); text-align: center; text-transform: uppercase; }
 
-    .detail-panel { background: #18181b; border: 1px solid #27272a; border-radius: 12px; }
-    .detail-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #27272a; }
+    /* ── Detail rows ── */
+    .detail-row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid var(--border); }
     .detail-row:last-child { border-bottom: none; }
-    .detail-label { color: #71717a; font-size: 0.75rem; }
-    .detail-value { color: #e4e4e7; font-size: 0.75rem; font-weight: 500; text-align: right; }
+    .detail-label { color: var(--text-muted); font-size: 12px; }
+    .detail-value { color: var(--text); font-size: 12px; font-weight: 500; text-align: right; }
+
+    /* ── Animations ── */
+    .slide-enter-active { transition: transform 0.25s ease, opacity 0.25s ease; }
+    .slide-leave-active { transition: transform 0.2s ease, opacity 0.2s ease; }
+    .slide-enter-from, .slide-leave-to { opacity: 0; }
+    .slide-enter-from .panel { transform: translateX(100%); }
+    .slide-leave-to .panel { transform: translateX(100%); }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner { width: 16px; height: 16px; border: 2px solid var(--border-light); border-top-color: var(--primary); border-radius: 50%; animation: spin 0.6s linear infinite; }
+
+    .toast-enter-active { animation: slideDown 0.3s ease; }
+    .toast-leave-active { animation: fadeOut 0.3s ease; }
+    @keyframes slideDown { from { transform: translateY(-12px); opacity: 0; } }
+    @keyframes fadeOut { to { opacity: 0; } }
+
+    /* ── Skeleton ── */
+    @keyframes shimmer { 0% { background-position: -200px 0; } 100% { background-position: 200px 0; } }
+    .skeleton { background: linear-gradient(90deg, var(--surface-raised) 25%, var(--border) 50%, var(--surface-raised) 75%); background-size: 400px 100%; animation: shimmer 1.5s infinite; border-radius: 6px; }
   </style>
   <script>
     tailwind.config = {
-      theme: {
-        extend: {
-          colors: {
-            zinc: { 850: '#1f1f23', 950: '#0a0a0b' }
-          }
-        }
-      }
+      theme: { extend: { colors: { zinc: { 850: '#1f1f23', 950: '#09090b' } } } }
     }
   </script>
 </head>
 <body class="min-h-screen">
   <div id="app">
     <!-- Header -->
-    <header class="sticky top-0 z-40 bg-zinc-950/80 backdrop-blur-lg border-b border-zinc-800">
-      <div class="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
-        <div class="flex items-center gap-3">
-          <div class="w-8 h-8 rounded-lg bg-violet-600 flex items-center justify-center text-white font-bold text-sm">FC</div>
-          <h1 class="text-lg font-semibold text-zinc-100">FinCal</h1>
-          <span class="text-xs text-zinc-500 hidden sm:inline">Earnings Calendar</span>
+    <header class="sticky top-0 z-40" style="background:rgba(9,9,11,0.8);backdrop-filter:blur(12px);border-bottom:1px solid var(--border);">
+      <div class="max-w-[1200px] mx-auto px-4 h-10 flex items-center justify-between">
+        <div class="flex items-center gap-2.5">
+          <div class="w-7 h-7 rounded-md flex items-center justify-center text-white font-bold text-xs" style="background:var(--primary);">FC</div>
+          <h1 class="text-sm font-semibold text-zinc-100">FinCal</h1>
+          <span class="text-[11px] text-zinc-600 hidden sm:inline">财报日历</span>
         </div>
-        <div class="flex items-center gap-3">
-          <span v-if="user" class="text-sm text-zinc-400">{{ user.name || user.email }}</span>
-          <button v-if="!user" @click="login" class="text-sm px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white transition">Login</button>
+        <div class="flex items-center gap-2">
+          <span v-if="user" class="text-[12px] text-zinc-400">{{ user.name || user.email }}</span>
+          <button v-if="!user" @click="login" class="btn btn-primary" style="padding:4px 10px;font-size:12px;">登录</button>
         </div>
       </div>
     </header>
 
     <!-- Controls -->
-    <div class="max-w-7xl mx-auto px-4 py-4 flex flex-wrap items-center gap-3">
-      <div class="flex border-b border-zinc-800">
-        <button @click="viewMode='month'" :class="viewMode==='month' ? 'tab-active' : 'tab-inactive'" class="pb-2 px-3 text-sm font-medium transition">Month</button>
-        <button @click="viewMode='week'" :class="viewMode==='week' ? 'tab-active' : 'tab-inactive'" class="pb-2 px-3 text-sm font-medium transition">Week</button>
+    <div class="max-w-[1200px] mx-auto px-4 py-3 flex flex-wrap items-center gap-2">
+      <div class="flex border-b" style="border-color:var(--border);">
+        <button @click="viewMode='month'" :class="viewMode==='month' ? 'tab-active' : 'tab-inactive'" class="pb-1.5 px-2.5 text-[13px] font-medium transition">月</button>
+        <button @click="viewMode='week'" :class="viewMode==='week' ? 'tab-active' : 'tab-inactive'" class="pb-1.5 px-2.5 text-[13px] font-medium transition">周</button>
       </div>
 
-      <div class="flex items-center gap-2">
-        <button @click="prevMonth" class="p-1 rounded hover:bg-zinc-800 text-zinc-400 transition">
-          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+      <div class="flex items-center gap-1.5">
+        <button @click="prevMonth" class="btn btn-ghost" style="padding:4px;">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
         </button>
-        <span class="text-sm font-medium text-zinc-300 min-w-[140px] text-center">{{ monthLabel }}</span>
-        <button @click="nextMonth" class="p-1 rounded hover:bg-zinc-800 text-zinc-400 transition">
-          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+        <span class="text-[13px] font-medium text-zinc-300 min-w-[120px] text-center">{{ monthLabel }}</span>
+        <button @click="nextMonth" class="btn btn-ghost" style="padding:4px;">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
         </button>
-        <button @click="goToday" class="text-xs px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-400 transition">Today</button>
+        <button @click="goToday" class="btn btn-outline" style="padding:3px 8px;font-size:11px;">今天</button>
       </div>
 
       <div class="flex-1"></div>
 
-      <label v-if="user" class="flex items-center gap-2 cursor-pointer text-sm text-zinc-400">
-        <input type="checkbox" v-model="watchlistOnly" @change="loadEarnings" class="accent-violet-500 w-4 h-4 rounded" />
-        Only my watchlist
-        <span v-if="watchlistOnly && watchlist.length === 0" class="text-amber-500 text-xs">⚠ empty</span>
+      <label v-if="user" class="flex items-center gap-1.5 cursor-pointer text-[12px] text-zinc-400">
+        <input type="checkbox" v-model="watchlistOnly" @change="loadEarnings" style="accent-color:var(--primary);width:14px;height:14px;border-radius:4px;" />
+        只看自选
+        <span v-if="watchlistOnly && watchlist.length === 0" class="text-amber-500 text-[11px]">⚠ 空</span>
       </label>
 
-      <button v-if="user" @click="showIcalModal = true" class="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 transition">
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
-        Calendar Sync
+      <button v-if="user" @click="showIcalModal = true" class="btn btn-outline" style="font-size:12px;padding:4px 10px;">
+        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+        订阅日历
       </button>
 
-      <div v-if="user" class="relative">
-        <button @click="showSearch = !showSearch" class="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white transition">
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
-          Add Stock
-        </button>
-      </div>
+      <button v-if="user" @click="showSearch = !showSearch" class="btn btn-primary" style="font-size:12px;padding:4px 10px;">
+        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+        添加
+      </button>
     </div>
 
     <!-- Search panel -->
-    <div v-if="showSearch" class="max-w-7xl mx-auto px-4 pb-4">
-      <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
-        <div class="flex gap-2 mb-3">
-          <input v-model="searchQuery" @input="doSearch" placeholder="Search symbol or company name..." class="flex-1 bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-violet-500" />
-          <button @click="showSearch = false" class="text-zinc-500 hover:text-zinc-300 text-sm px-3">Cancel</button>
-        </div>
-        <div class="flex flex-wrap gap-1.5 mb-3" v-if="searchResults.length === 0 && !searchLoading">
-          <span class="text-xs text-zinc-500">Popular:</span>
-          <button v-for="s in popularSuggestions" :key="s.symbol+s.market" @click="addToWatchlist(s.symbol, s.market)" class="text-xs px-2 py-0.5 rounded-full bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 transition">
-            {{ s.symbol }} <span class="text-zinc-600">{{ s.market }}</span>
-          </button>
-        </div>
-        <div v-if="searchLoading" class="text-sm text-zinc-500 pulse">Searching...</div>
-        <div v-else class="space-y-1 max-h-48 overflow-y-auto">
-          <button v-for="r in searchResults" :key="r.symbol+r.market" @click="addToWatchlist(r.symbol, r.market)" class="w-full text-left px-3 py-2 rounded-lg hover:bg-zinc-800 text-sm flex items-center justify-between group transition">
-            <span>
-              <span class="text-zinc-200 font-medium">{{ r.symbol }}</span>
-              <span class="text-zinc-500 ml-2" v-if="r.company_name">{{ r.company_name }}</span>
-            </span>
-            <span class="badge" :class="'badge-' + r.market">{{ r.market }}</span>
-          </button>
+    <transition name="slide">
+      <div v-if="showSearch" class="max-w-[1200px] mx-auto px-4 pb-3">
+        <div class="surface p-3">
+          <div class="flex gap-2 mb-2">
+            <input v-model="searchQuery" @input="doSearch" placeholder="搜索代码或公司名..." class="flex-1 text-[13px] px-3 py-1.5 rounded-md" style="background:var(--surface-raised);border:1px solid var(--border);color:var(--text);outline:none;" @focus="$event.target.style.borderColor='var(--primary)'" @blur="$event.target.style.borderColor='var(--border)'" />
+            <button @click="showSearch = false" class="btn btn-ghost" style="font-size:12px;">取消</button>
+          </div>
+          <div class="flex flex-wrap gap-1.5 mb-2" v-if="searchResults.length === 0 && !searchLoading">
+            <span class="text-[11px] text-zinc-600">热门:</span>
+            <button v-for="s in popularSuggestions" :key="s.symbol+s.market" @click="addToWatchlist(s.symbol, s.market)" class="text-[11px] px-2 py-0.5 rounded-md btn-outline" style="border:1px solid var(--border);color:var(--text-secondary);">
+              {{ s.symbol }} <span class="text-zinc-600">{{ s.market }}</span>
+            </button>
+          </div>
+          <div v-if="searchLoading" class="flex items-center gap-2 text-[12px] text-zinc-500 py-2"><div class="spinner" style="width:14px;height:14px;"></div> 搜索中...</div>
+          <div v-else class="space-y-0.5 max-h-48 overflow-y-auto">
+            <button v-for="r in searchResults" :key="r.symbol+r.market" @click="addToWatchlist(r.symbol, r.market)" class="w-full text-left px-2.5 py-1.5 rounded-md text-[13px] flex items-center justify-between transition" style="color:var(--text-secondary);" @mouseenter="$event.target.style.background='var(--surface-raised)'" @mouseleave="$event.target.style.background='transparent'">
+              <span><span class="text-zinc-200 font-medium">{{ r.symbol }}</span><span class="text-zinc-500 ml-2 text-[12px]" v-if="r.company_name">{{ r.company_name }}</span></span>
+              <span class="badge" :class="'badge-' + r.market" style="font-size:10px;">{{ r.market }}</span>
+            </button>
+          </div>
         </div>
       </div>
-    </div>
+    </transition>
 
-    <!-- Watchlist sidebar pills -->
-    <div v-if="user && watchlist.length > 0" class="max-w-7xl mx-auto px-4 pb-3">
-      <div class="flex flex-wrap gap-1.5">
-        <span class="text-xs text-zinc-500 py-0.5">My stocks:</span>
-        <span v-for="w in watchlist" :key="w.symbol+w.market" class="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-300 border border-zinc-700 group">
+    <!-- Watchlist pills -->
+    <div v-if="user && watchlist.length > 0" class="max-w-[1200px] mx-auto px-4 pb-2">
+      <div class="flex flex-wrap gap-1.5 items-center">
+        <span class="text-[11px] text-zinc-600">自选:</span>
+        <span v-for="w in watchlist" :key="w.symbol+w.market" class="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-md group" style="background:var(--surface-raised);border:1px solid var(--border);color:var(--text-secondary);">
           {{ w.symbol }}
-          <span class="badge" :class="'badge-' + w.market" style="font-size:0.55rem">{{ w.market }}</span>
-          <button @click="removeFromWatchlist(w.symbol, w.market)" class="text-zinc-600 hover:text-red-400 transition opacity-0 group-hover:opacity-100" title="Remove">&times;</button>
+          <span class="badge" :class="'badge-' + w.market" style="font-size:9px;padding:0 4px;">{{ w.market }}</span>
+          <button @click="removeFromWatchlist(w.symbol, w.market)" class="text-zinc-600 hover:text-red-400 transition opacity-0 group-hover:opacity-100 ml-0.5" style="font-size:14px;line-height:1;">&times;</button>
         </span>
       </div>
     </div>
 
     <!-- Calendar -->
-    <div class="max-w-7xl mx-auto px-4 pb-8">
-      <!-- Loading indicator -->
-      <div v-if="loading" class="mb-3 flex items-center gap-2 text-sm text-violet-400">
-        <svg class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-        Loading...
+    <div class="max-w-[1200px] mx-auto px-4 pb-6">
+      <!-- Loading -->
+      <div v-if="loading" class="mb-2 flex items-center gap-2 text-[12px]" style="color:var(--primary-light);">
+        <div class="spinner"></div> 加载中...
       </div>
-      <!-- Error banner -->
-      <div v-if="error" class="mb-3 px-4 py-2 rounded-lg bg-red-900/30 border border-red-800 text-sm text-red-400 flex items-center justify-between">
+      <!-- Error -->
+      <div v-if="error" class="mb-2 px-3 py-2 rounded-lg text-[12px] flex items-center justify-between" style="background:var(--destructive-bg);border:1px solid rgba(239,68,68,0.3);color:#fca5a5;">
         <span>{{ error }}</span>
-        <button @click="error = null" class="text-red-500 hover:text-red-300">&times;</button>
+        <button @click="error = null" style="color:#f87171;">&times;</button>
       </div>
 
-      <div class="grid gap-px bg-zinc-800 rounded-t-xl overflow-hidden grid-cols-7">
-        <div v-for="d in weekdays" :key="d" class="bg-zinc-900 px-3 py-2 text-xs font-medium text-zinc-500 text-center uppercase">{{ d }}</div>
-      </div>
-
-      <div class="grid gap-px bg-zinc-800 rounded-b-xl overflow-hidden grid-cols-7">
-        <div v-for="(cell, idx) in calendarCells" :key="idx"
-             class="calendar-cell bg-zinc-900 p-1.5 relative overflow-hidden cursor-pointer"
-             :class="{ 'bg-zinc-950': !cell.inMonth }"
-             @click="selectCell(cell)">
-          <div class="flex items-center justify-between mb-1">
-            <span class="text-xs font-medium" :class="cell.isToday ? 'bg-violet-600 text-white w-6 h-6 rounded-full flex items-center justify-center' : (cell.inMonth ? 'text-zinc-400' : 'text-zinc-700')">
-              {{ cell.day }}
-            </span>
-            <span v-if="cell.earnings.length > 0" class="text-[0.55rem] text-zinc-600">{{ cell.earnings.length }}</span>
-          </div>
-          <div class="space-y-0.5 overflow-y-auto" style="max-height: 80px;">
-            <div v-for="e in cell.earnings.slice(0, 5)" :key="e.symbol+e.market"
-                 class="badge cursor-pointer" :class="[('badge-' + e.market), { 'badge-mine': isMine(e), 'badge-predicted': e.is_predicted }]"
-                 :title="e.company_name + (e.is_predicted ? ' (预测)' : '')"
-                 @click.stop="selectEarning(e)">
-              <span v-if="e.before_after === 'before'" class="before-tag">盘前</span>
-              <span v-else-if="e.before_after === 'after'" class="after-tag">盘后</span>
-              {{ e.symbol }}
-              <span v-if="e.fiscal_year && e.fiscal_quarter" class="fq-tag">{{ fqLabel(e.fiscal_year, e.fiscal_quarter) }}</span>
-              <template v-if="e.eps_estimate != null && e.eps_actual != null">
-                <span :class="epsSurplusClass(e)">{{ epsSurplus(e) > 0 ? '↑' : epsSurplus(e) < 0 ? '↓' : '=' }}</span>
-              </template>
-              <span v-if="e.is_predicted" class="predicted-tag">预测</span>
+      <!-- Calendar grid -->
+      <div class="surface" style="padding:0;overflow:hidden;">
+        <div class="calendar-grid" style="border-radius:0;">
+          <div v-for="d in weekdays" :key="d" class="weekday-header">{{ d }}</div>
+        </div>
+        <div class="calendar-grid" style="border-radius:0;border-top:1px solid var(--border);">
+          <div v-for="(cell, idx) in calendarCells" :key="idx"
+               class="calendar-cell"
+               :class="{ 'out': !cell.inMonth, 'today': cell.isToday }"
+               style="background:var(--bg);"
+               @click="selectCell(cell)">
+            <div class="flex items-center justify-between mb-1">
+              <span class="day-num text-[12px] font-medium" :class="cell.inMonth ? 'text-zinc-400' : 'text-zinc-700'">{{ cell.day }}</span>
+              <span v-if="cell.earnings.length > 0" class="text-[10px]" style="color:var(--text-muted);">{{ cell.earnings.length }}</span>
             </div>
-            <div v-if="cell.earnings.length > 5" class="text-[0.6rem] text-zinc-600">
-              +{{ cell.earnings.length - 5 }} more
+            <div class="space-y-0.5 overflow-y-auto" style="max-height: 72px;">
+              <div v-for="e in cell.earnings.slice(0, 4)" :key="e.symbol+e.market"
+                   class="badge cursor-pointer" :class="[('badge-' + e.market), { 'badge-mine': isMine(e), 'badge-predicted': e.is_predicted }]"
+                   style="font-size:10px;padding:1px 5px;"
+                   :title="e.company_name + (e.is_predicted ? ' (预测)' : '')"
+                   @click.stop="selectEarning(e)">
+                <span v-if="e.before_after === 'before'" class="before-tag">盘前</span>
+                <span v-else-if="e.before_after === 'after'" class="after-tag">盘后</span>
+                {{ e.symbol }}
+                <span v-if="e.fiscal_year && e.fiscal_quarter" class="fq-tag">{{ fqLabel(e.fiscal_year, e.fiscal_quarter) }}</span>
+                <template v-if="e.eps_estimate != null && e.eps_actual != null">
+                  <span :class="epsSurplusClass(e)" style="font-size:9px;">{{ epsSurplus(e) > 0 ? '↑' : epsSurplus(e) < 0 ? '↓' : '—' }}</span>
+                </template>
+                <span v-if="e.is_predicted" class="predicted-tag">预</span>
+              </div>
+              <div v-if="cell.earnings.length > 4" class="text-[10px]" style="color:var(--text-muted);">+{{ cell.earnings.length - 4 }}</div>
             </div>
           </div>
         </div>
       </div>
 
       <!-- Legend -->
-      <div class="flex items-center gap-4 mt-3 text-xs text-zinc-500 flex-wrap">
-        <span class="flex items-center gap-1"><span class="badge badge-US">US</span> US Market</span>
-        <span class="flex items-center gap-1"><span class="badge badge-HK">HK</span> HK Market</span>
-        <span class="flex items-center gap-1"><span class="badge badge-mine" style="outline-offset:0">X</span> In my watchlist</span>
+      <div class="flex items-center gap-3 mt-2 text-[11px] flex-wrap" style="color:var(--text-muted);">
+        <span class="flex items-center gap-1"><span class="badge badge-US" style="font-size:9px;padding:0 4px;">US</span> 美股</span>
+        <span class="flex items-center gap-1"><span class="badge badge-HK" style="font-size:9px;padding:0 4px;">HK</span> 港股</span>
         <span class="flex items-center gap-1"><span class="before-tag">盘前</span></span>
         <span class="flex items-center gap-1"><span class="after-tag">盘后</span></span>
-        <span class="flex items-center gap-1"><span class="beat">↑</span> Beat</span>
-        <span class="flex items-center gap-1"><span class="miss">↓</span> Miss</span>
-        <span class="flex items-center gap-1"><span class="badge badge-predicted" style="outline:none;border:1px dashed #71717a">X</span> Predicted</span>
+        <span class="flex items-center gap-1"><span class="beat">↑</span> 超预期</span>
+        <span class="flex items-center gap-1"><span class="miss">↓</span> 不及预期</span>
       </div>
     </div>
 
-    <!-- Detail Panel (slide-in from right) -->
-    <div v-if="selectedEarning" class="fixed inset-0 z-50 flex justify-end" @click.self="selectedEarning = null">
-      <div class="bg-zinc-900 border-l border-zinc-800 w-full max-w-sm overflow-y-auto shadow-2xl" @click.stop>
-        <div class="p-5">
-          <div class="flex items-center justify-between mb-4">
-            <div>
-              <span class="text-xl font-bold text-zinc-100">{{ selectedEarning.symbol }}</span>
-              <span class="badge ml-2" :class="'badge-' + selectedEarning.market">{{ selectedEarning.market }}</span>
-              <span v-if="selectedEarning.is_predicted" class="predicted-tag ml-2">预测</span>
+    <!-- Detail Panel -->
+    <transition name="slide">
+      <div v-if="selectedEarning" class="fixed inset-0 z-50 flex justify-end" @click.self="selectedEarning = null" style="background:rgba(0,0,0,0.5);backdrop-filter:blur(4px);">
+        <div class="panel w-full max-w-sm overflow-y-auto" style="background:var(--surface);border-left:1px solid var(--border);">
+          <div class="p-4">
+            <div class="flex items-center justify-between mb-3">
+              <div class="flex items-center gap-2">
+                <span class="text-lg font-bold text-zinc-100">{{ selectedEarning.symbol }}</span>
+                <span class="badge" :class="'badge-' + selectedEarning.market" style="font-size:10px;">{{ selectedEarning.market }}</span>
+                <span v-if="selectedEarning.fiscal_year && selectedEarning.fiscal_quarter" class="text-[11px] font-medium" style="color:var(--text-muted);">{{ fqLabel(selectedEarning.fiscal_year, selectedEarning.fiscal_quarter) }}</span>
+                <span v-if="selectedEarning.is_predicted" class="predicted-tag">预测</span>
+              </div>
+              <button @click="selectedEarning = null" class="btn btn-ghost" style="padding:4px;">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+              </button>
             </div>
-            <button @click="selectedEarning = null" class="text-zinc-500 hover:text-zinc-300 transition">
-              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
-            </button>
-          </div>
 
-          <p class="text-sm text-zinc-400 mb-4" v-if="selectedEarning.company_name">{{ selectedEarning.company_name }}</p>
+            <p class="text-[12px] mb-3" style="color:var(--text-secondary);" v-if="selectedEarning.company_name">{{ selectedEarning.company_name }}</p>
 
-          <div class="detail-panel p-4 mb-4">
-            <div class="detail-row">
-              <span class="detail-label">Report Date</span>
-              <span class="detail-value">{{ selectedEarning.report_date }}</span>
+            <!-- Info section -->
+            <div class="surface p-3 mb-3">
+              <div class="detail-row">
+                <span class="detail-label">报告日期</span>
+                <span class="detail-value">{{ selectedEarning.report_date }}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">发布时段</span>
+                <span class="detail-value">
+                  <span v-if="selectedEarning.before_after === 'before'" class="before-tag">盘前</span>
+                  <span v-else-if="selectedEarning.before_after === 'after'" class="after-tag">盘后</span>
+                  <span v-else-if="selectedEarning.before_after === 'during'">盘中</span>
+                  <span v-else style="color:var(--text-muted);">待定</span>
+                </span>
+              </div>
+              <div class="detail-row" v-if="selectedEarning.fiscal_year">
+                <span class="detail-label">财季</span>
+                <span class="detail-value">{{ fqLabel(selectedEarning.fiscal_year, selectedEarning.fiscal_quarter) }}</span>
+              </div>
             </div>
-            <div class="detail-row">
-              <span class="detail-label">Timing</span>
-              <span class="detail-value">
-                <span v-if="selectedEarning.before_after === 'before'" class="before-tag">盘前</span>
-                <span v-else-if="selectedEarning.before_after === 'after'" class="after-tag">盘后</span>
-                <span v-else-if="selectedEarning.before_after === 'during'">盘中</span>
-                <span v-else class="text-zinc-600">TBD</span>
-              </span>
-            </div>
-            <div class="detail-row" v-if="selectedEarning.fiscal_year">
-              <span class="detail-label">财季</span>
-              <span class="detail-value">{{ fqLabel(selectedEarning.fiscal_year, selectedEarning.fiscal_quarter) }}</span>
-            </div>
-          </div>
 
-          <h4 class="text-sm font-semibold text-zinc-300 mb-2">Earnings per Share</h4>
-          <div class="detail-panel p-4 mb-4">
-            <div class="detail-row">
-              <span class="detail-label">Estimate</span>
-              <span class="detail-value">{{ selectedEarning.eps_estimate != null ? fmtNum(selectedEarning.eps_estimate) : '—' }}</span>
+            <!-- EPS section -->
+            <div class="section-title flex items-center gap-1.5">
+              <svg class="w-3.5 h-3.5" style="color:var(--text-muted);" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"/></svg>
+              每股收益 (EPS)
             </div>
-            <div class="detail-row">
-              <span class="detail-label">Actual</span>
-              <span class="detail-value">
-                <template v-if="selectedEarning.eps_actual != null">
-                  <span :class="epsSurplusClass(selectedEarning)">{{ fmtNum(selectedEarning.eps_actual) }}</span>
-                </template>
-                <template v-else>Pending</template>
-              </span>
+            <div class="surface p-3 mb-3">
+              <div class="detail-row">
+                <span class="detail-label">一致预期</span>
+                <span class="detail-value">{{ selectedEarning.eps_estimate != null ? fmtNum(selectedEarning.eps_estimate) : '—' }}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">实际值</span>
+                <span class="detail-value">
+                  <template v-if="selectedEarning.eps_actual != null">
+                    <span :class="epsSurplusClass(selectedEarning)">{{ fmtNum(selectedEarning.eps_actual) }}</span>
+                  </template>
+                  <template v-else><span style="color:var(--text-muted);">未公布</span></template>
+                </span>
+              </div>
+              <div class="detail-row" v-if="selectedEarning.eps_estimate != null && selectedEarning.eps_actual != null">
+                <span class="detail-label">惊喜</span>
+                <span class="detail-value" :class="epsSurplusClass(selectedEarning)">
+                  {{ epsSurplus(selectedEarning) > 0 ? '+' : '' }}{{ fmtPct(epsSurplus(selectedEarning)) }}
+                </span>
+              </div>
             </div>
-            <div class="detail-row" v-if="selectedEarning.eps_estimate != null && selectedEarning.eps_actual != null">
-              <span class="detail-label">Surprise</span>
-              <span class="detail-value" :class="epsSurplusClass(selectedEarning)">
-                {{ epsSurplus(selectedEarning) > 0 ? '+' : '' }}{{ fmtPct(epsSurplus(selectedEarning)) }}
-              </span>
-            </div>
-          </div>
 
-          <h4 class="text-sm font-semibold text-zinc-300 mb-2">Revenue</h4>
-          <div class="detail-panel p-4 mb-4">
-            <div class="detail-row">
-              <span class="detail-label">Estimate</span>
-              <span class="detail-value">{{ selectedEarning.revenue_estimate != null ? fmtBigNum(selectedEarning.revenue_estimate) : '—' }}</span>
+            <!-- Revenue section -->
+            <div class="section-title flex items-center gap-1.5">
+              <svg class="w-3.5 h-3.5" style="color:var(--text-muted);" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+              营收 (Revenue)
             </div>
-            <div class="detail-row">
-              <span class="detail-label">Actual</span>
-              <span class="detail-value">
-                <template v-if="selectedEarning.revenue_actual != null">
-                  <span :class="revSurplusClass(selectedEarning)">{{ fmtBigNum(selectedEarning.revenue_actual) }}</span>
-                </template>
-                <template v-else>Pending</template>
-              </span>
-            </div>
-            <div class="detail-row" v-if="selectedEarning.revenue_estimate != null && selectedEarning.revenue_actual != null">
-              <span class="detail-label">Surprise</span>
-              <span class="detail-value" :class="revSurplusClass(selectedEarning)">
-                {{ revSurplus(selectedEarning) > 0 ? '+' : '' }}{{ fmtPct(revSurplus(selectedEarning)) }}
-              </span>
+            <div class="surface p-3 mb-3">
+              <div class="detail-row">
+                <span class="detail-label">一致预期</span>
+                <span class="detail-value">{{ selectedEarning.revenue_estimate != null ? fmtBigNum(selectedEarning.revenue_estimate) : '—' }}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">实际值</span>
+                <span class="detail-value">
+                  <template v-if="selectedEarning.revenue_actual != null">
+                    <span :class="revSurplusClass(selectedEarning)">{{ fmtBigNum(selectedEarning.revenue_actual) }}</span>
+                  </template>
+                  <template v-else><span style="color:var(--text-muted);">未公布</span></template>
+                </span>
+              </div>
+              <div class="detail-row" v-if="selectedEarning.revenue_estimate != null && selectedEarning.revenue_actual != null">
+                <span class="detail-label">惊喜</span>
+                <span class="detail-value" :class="revSurplusClass(selectedEarning)">
+                  {{ revSurplus(selectedEarning) > 0 ? '+' : '' }}{{ fmtPct(revSurplus(selectedEarning)) }}
+                </span>
+              </div>
             </div>
           </div>
         </div>
       </div>
-    </div>
+    </transition>
 
-    <!-- Day Detail Modal (when clicking a cell with multiple) -->
-    <div v-if="selectedDay" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" @click.self="selectedDay = null">
-      <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 max-w-lg w-full mx-4 shadow-2xl max-h-[80vh] overflow-y-auto">
-        <div class="flex items-center justify-between mb-4">
-          <h3 class="text-lg font-semibold text-zinc-100">{{ selectedDay.date.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' }) }}</h3>
-          <button @click="selectedDay = null" class="text-zinc-500 hover:text-zinc-300 transition">
-            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+    <!-- Day Detail Modal -->
+    <div v-if="selectedDay" class="fixed inset-0 z-50 flex items-center justify-center" style="background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);" @click.self="selectedDay = null">
+      <div class="surface p-4 max-w-lg w-full mx-4 max-h-[80vh] overflow-y-auto">
+        <div class="flex items-center justify-between mb-3">
+          <h3 class="text-[15px] font-semibold text-zinc-100">{{ selectedDay.date.toLocaleDateString('zh-CN', { weekday: 'long', month: 'long', day: 'numeric' }) }}</h3>
+          <button @click="selectedDay = null" class="btn btn-ghost" style="padding:4px;">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
           </button>
         </div>
-        <div class="space-y-2">
+        <div class="space-y-1.5">
           <div v-for="e in selectedDay.earnings" :key="e.symbol+e.market"
-               class="flex items-center gap-3 p-3 rounded-lg bg-zinc-800/50 hover:bg-zinc-800 cursor-pointer transition"
+               class="flex items-center gap-2.5 p-2.5 rounded-lg cursor-pointer transition"
+               style="background:var(--surface-raised);"
+               @mouseenter="$event.target.style.background='var(--border)'" @mouseleave="$event.target.style.background='var(--surface-raised)'"
                @click="selectedDay = null; selectEarning(e)">
             <div class="flex-1 min-w-0">
-              <div class="flex items-center gap-2">
-                <span class="text-sm font-semibold text-zinc-200">{{ e.symbol }}</span>
-                <span class="badge" :class="'badge-' + e.market">{{ e.market }}</span>
+              <div class="flex items-center gap-1.5">
+                <span class="text-[13px] font-semibold text-zinc-200">{{ e.symbol }}</span>
+                <span class="badge" :class="'badge-' + e.market" style="font-size:9px;padding:0 4px;">{{ e.market }}</span>
+                <span v-if="e.fiscal_year && e.fiscal_quarter" class="fq-tag">{{ fqLabel(e.fiscal_year, e.fiscal_quarter) }}</span>
                 <span v-if="e.before_after === 'before'" class="before-tag">盘前</span>
                 <span v-else-if="e.before_after === 'after'" class="after-tag">盘后</span>
                 <span v-if="e.is_predicted" class="predicted-tag">预测</span>
               </div>
-              <p class="text-xs text-zinc-500 truncate" v-if="e.company_name">{{ e.company_name }}</p>
+              <p class="text-[11px] truncate" style="color:var(--text-muted);" v-if="e.company_name">{{ e.company_name }}</p>
             </div>
-            <div class="text-right text-xs" v-if="e.eps_estimate != null || e.eps_actual != null">
-              <div v-if="e.eps_actual != null" :class="epsSurplusClass(e)">
+            <div class="text-right text-[12px]" v-if="e.eps_estimate != null || e.eps_actual != null">
+              <div v-if="e.eps_actual != null" :class="epsSurplusClass(e)" class="font-medium">
                 {{ fmtNum(e.eps_actual) }}
               </div>
-              <div v-else class="text-zinc-500">
-                Est: {{ fmtNum(e.eps_estimate) }}
+              <div v-else style="color:var(--text-muted);">
+                预期 {{ fmtNum(e.eps_estimate) }}
               </div>
             </div>
-            <div v-if="e.eps_estimate != null && e.eps_actual != null" class="text-xs">
+            <div v-if="e.eps_estimate != null && e.eps_actual != null" class="text-[11px]">
               <span :class="epsSurplusClass(e)">{{ epsSurplus(e) > 0 ? '+' : '' }}{{ fmtPct(epsSurplus(e)) }}</span>
             </div>
           </div>
@@ -347,36 +402,38 @@
     </div>
 
     <!-- iCal Modal -->
-    <div v-if="showIcalModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" @click.self="showIcalModal = false">
-      <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 max-w-md w-full mx-4 shadow-2xl">
-        <h3 class="text-lg font-semibold text-zinc-100 mb-2">Calendar Subscription</h3>
-        <p class="text-sm text-zinc-400 mb-4">Subscribe to your earnings calendar in Apple Calendar, Google Calendar, or Outlook.</p>
-        <div class="bg-zinc-800 rounded-lg p-3 mb-4">
-          <label class="text-xs text-zinc-500 block mb-1">Subscription URL</label>
+    <div v-if="showIcalModal" class="fixed inset-0 z-50 flex items-center justify-center" style="background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);" @click.self="showIcalModal = false">
+      <div class="surface p-4 max-w-md w-full mx-4">
+        <h3 class="text-[15px] font-semibold text-zinc-100 mb-1.5">日历订阅</h3>
+        <p class="text-[12px] mb-3" style="color:var(--text-secondary);">将财报日同步到 Apple Calendar、Google Calendar 或 Outlook。</p>
+        <div class="surface p-2.5 mb-3" style="background:var(--surface-raised);">
+          <label class="text-[11px] block mb-1" style="color:var(--text-muted);">订阅地址</label>
           <div class="flex gap-2">
-            <input :value="icalUrl" readonly class="flex-1 bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs text-zinc-300 font-mono" />
-            <button @click="copyIcal" class="px-3 py-1.5 rounded bg-violet-600 hover:bg-violet-500 text-white text-xs transition">
-              {{ copied ? 'Copied!' : 'Copy' }}
+            <input :value="icalUrl" readonly class="flex-1 text-[11px] px-2 py-1 rounded" style="background:var(--bg);border:1px solid var(--border);color:var(--text-secondary);font-family:monospace;" />
+            <button @click="copyIcal" class="btn btn-primary" style="font-size:11px;padding:4px 10px;">
+              {{ copied ? '已复制!' : '复制' }}
             </button>
           </div>
         </div>
-        <div class="space-y-2 text-xs text-zinc-500">
-          <p><strong class="text-zinc-400">Apple Calendar:</strong> File → New Calendar Subscription → paste URL</p>
-          <p><strong class="text-zinc-400">Google Calendar:</strong> Other calendars → From URL → paste URL</p>
-          <p><strong class="text-zinc-400">Outlook:</strong> Add calendar → Subscribe from web → paste URL</p>
+        <div class="space-y-1.5 text-[11px]" style="color:var(--text-muted);">
+          <p><strong style="color:var(--text-secondary);">Apple Calendar:</strong> 文件 → 新建日历订阅</p>
+          <p><strong style="color:var(--text-secondary);">Google Calendar:</strong> 其他日历 → 通过 URL 添加</p>
+          <p><strong style="color:var(--text-secondary);">Outlook:</strong> 添加日历 → 从 Web 订阅</p>
         </div>
-        <div class="mt-4 flex justify-end">
-          <button @click="showIcalModal = false" class="text-sm text-zinc-400 hover:text-zinc-200 transition">Close</button>
+        <div class="mt-3 flex justify-end">
+          <button @click="showIcalModal = false" class="btn btn-ghost" style="font-size:12px;">关闭</button>
         </div>
       </div>
     </div>
 
     <!-- Toast -->
-    <div v-if="toast" class="fixed top-20 right-4 z-50 toast">
-      <div class="bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2 text-sm text-zinc-200 shadow-lg">
-        {{ toast }}
+    <transition name="toast">
+      <div v-if="toast" class="fixed top-14 right-4 z-50">
+        <div class="surface px-3 py-2 text-[13px] text-zinc-200" style="background:var(--surface-raised);">
+          {{ toast }}
+        </div>
       </div>
-    </div>
+    </transition>
   </div>
 
   <script>
@@ -403,7 +460,7 @@
       const loading = ref(false);
       const error = ref(null);
 
-      const weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+      const weekdays = ['日', '一', '二', '三', '四', '五', '六'];
 
       const popularSuggestions = [
         {symbol:'AAPL',market:'US'},{symbol:'NVDA',market:'US'},{symbol:'TSLA',market:'US'},
@@ -412,7 +469,7 @@
 
       const monthLabel = computed(() => {
         const d = currentDate.value;
-        return d.toLocaleDateString('en-US', { year: 'numeric', month: 'long' });
+        return d.toLocaleDateString('zh-CN', { year: 'numeric', month: 'long' });
       });
 
       function sameDay(d1, d2) {
@@ -470,7 +527,7 @@
           return res.json();
         } catch (e) {
           error.value = e.message;
-          showToast('请求失败: ' + e.message, 'error');
+          showToast('请求失败: ' + e.message);
           return null;
         }
       }
@@ -516,7 +573,7 @@
         await apiFetch(`/api/watchlist?symbol=${encodeURIComponent(symbol)}&market=${encodeURIComponent(market)}`, { method: 'POST' });
         await loadWatchlist();
         await loadEarnings();
-        showToast('Added ' + symbol + ' to watchlist');
+        showToast('已添加 ' + symbol);
         searchQuery.value = '';
         searchResults.value = [];
         showSearch.value = false;
@@ -526,7 +583,7 @@
         await apiFetch(`/api/watchlist?symbol=${encodeURIComponent(symbol)}&market=${encodeURIComponent(market)}`, { method: 'DELETE' });
         await loadWatchlist();
         await loadEarnings();
-        showToast('Removed ' + symbol + ' from watchlist');
+        showToast('已移除 ' + symbol);
       }
 
       function isMine(earning) {
