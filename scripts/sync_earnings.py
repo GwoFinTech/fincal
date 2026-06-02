@@ -65,7 +65,8 @@ def parse_symbol(counter_id: str) -> tuple[str, str]:
     market = parts[1]
     code = parts[2]
     if market == "HK":
-        code = f"{code}.HK"
+        # Normalize HK codes to 4-digit with leading zero (e.g. 700 → 0700.HK)
+        code = code.zfill(4) + ".HK"
     return (code, market)
 
 

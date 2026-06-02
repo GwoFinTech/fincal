@@ -22,10 +22,10 @@ FUTU_SYMBOLS = {
         "US.SBUX", "US.NKE", "US.DIS", "US.BA", "US.MRVL",
     ],
     "HK": [
-        "HK.0700", "HK.9988", "HK.0005", "HK.1299", "HK.0941",
-        "HK.2318", "HK.0388", "HK.9999", "HK.1810", "HK.2020",
-        "HK.9618", "HK.0883", "HK.0016", "HK.0001", "HK.0002",
-        "HK.0003", "HK.0011", "HK.1398", "HK.3988", "HK.2628",
+        "HK.00700", "HK.09988", "HK.00005", "HK.01299", "HK.00941",
+        "HK.02318", "HK.00388", "HK.09999", "HK.01810", "HK.02020",
+        "HK.09618", "HK.00883", "HK.00016", "HK.00001", "HK.00002",
+        "HK.00003", "HK.00011", "HK.01398", "HK.03988", "HK.02628",
     ],
 }
 
@@ -57,7 +57,10 @@ def sync_earnings_dates():
                 parts = futu_code.split(".")
                 mkt = parts[0]
                 code = parts[1]
-                db_symbol = f"{code}.HK" if mkt == "HK" else code
+                # Normalize HK codes: strip leading zeros first, then pad to 4 digits
+                if mkt == "HK":
+                    code = (code.lstrip("0") or "0").zfill(4) + ".HK"
+                db_symbol = code
 
                 df = data.drop_duplicates(subset=["fiscal_year", "financial_type"], keep="first")
                 cutoff = date.today() - timedelta(days=365)
@@ -114,7 +117,9 @@ def sync_actuals():
                 parts = futu_code.split(".")
                 mkt = parts[0]
                 code = parts[1]
-                db_symbol = f"{code}.HK" if mkt == "HK" else code
+                if mkt == "HK":
+                    code = (code.lstrip("0") or "0").zfill(4) + ".HK"
+                db_symbol = code
 
                 # MainIndex for EPS (fid=14020)
                 ret, main_data = ctx.get_financials_statements(

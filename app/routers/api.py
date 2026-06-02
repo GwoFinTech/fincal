@@ -7,6 +7,14 @@ from .. import db, config
 router = APIRouter(prefix="/api", tags=["api"])
 
 
+def _norm_hk(symbol: str, market: str) -> str:
+    """Normalize HK stock codes to 4-digit zero-padded format."""
+    if market.upper() != "HK":
+        return symbol.upper()
+    code = symbol.upper().replace(".HK", "").strip()
+    return code.zfill(4) + ".HK"
+
+
 @router.get("/me")
 def api_me(user=Depends(get_current_user)):
     """Get current user info + ical token."""
@@ -30,7 +38,11 @@ def api_watchlist(user=Depends(get_current_user)):
             "SELECT symbol, market FROM watchlist WHERE user_id = %s ORDER BY market, symbol",
             (fincal_user["id"],),
         )
-        return [dict(row) for row in cur.fetchall()]
+        rows = [dict(row) for row in cur.fetchall()]
+    # Normalize HK codes for frontend display
+    for r in rows:
+        r["symbol"] = _norm_hk(r["symbol"], r["market"])
+    return rows
 
 
 @router.post("/watchlist")
@@ -40,11 +52,12 @@ def api_add_watchlist(symbol: str, market: str = "US", user=Depends(get_current_
     market = market.upper()
     if market not in ("US", "HK"):
         return {"error": "market must be US or HK"}
+    normalized = _norm_hk(symbol, market)
     with db.db_cursor() as cur:
         cur.execute(
             """INSERT INTO watchlist (user_id, symbol, market) VALUES (%s, %s, %s)
             ON CONFLICT (user_id, symbol, market) DO NOTHING RETURNING *""",
-            (fincal_user["id"], symbol.upper(), market),
+            (fincal_user["id"], normalized, market),
         )
         row = cur.fetchone()
         return dict(row) if row else {"status": "already_exists"}
@@ -54,10 +67,11 @@ def api_add_watchlist(symbol: str, market: str = "US", user=Depends(get_current_
 def api_remove_watchlist(symbol: str, market: str = "US", user=Depends(get_current_user)):
     """Remove a stock from watchlist."""
     fincal_user = ensure_user(user["id"], user["email"], user["name"])
+    normalized = _norm_hk(symbol, market.upper())
     with db.db_cursor() as cur:
         cur.execute(
             "DELETE FROM watchlist WHERE user_id = %s AND symbol = %s AND market = %s",
-            (fincal_user["id"], symbol.upper(), market.upper()),
+            (fincal_user["id"], normalized, market.upper()),
         )
         return {"status": "removed"}
 
@@ -88,8 +102,8 @@ def api_earnings(
             wl = cur.fetchall()
         if not wl:
             return []
-        symbols = [r["symbol"] for r in wl]
-        markets = [r["market"] for r in wl]
+        symbols = [_norm_hk(r["symbol"], r["market"]) for r in wl]
+        markets = list(set(r["market"] for r in wl))
         return fetch_earnings_from_db(symbols=symbols, markets=markets, start=start, end=end)
     else:
         # Popular stocks + user watchlist
@@ -101,10 +115,11 @@ def api_earnings(
                 (fincal_user["id"],),
             )
             for r in cur.fetchall():
-                if r["symbol"] not in all_symbols:
-                    all_symbols.append(r["symbol"])
-                if r["market"] not in all_markets:
-                    all_markets.append(r["market"])
+                norm = _norm_hk(r["symbol"], r["market"])
+                if norm not in all_symbols:
+                    all_symbols.append(norm)
+                    if r["market"] not in all_markets:
+                        all_markets.append(r["market"])
         return fetch_earnings_from_db(symbols=all_symbols, markets=all_markets, start=start, end=end)
 
 
@@ -120,12 +135,18 @@ def api_popular():
 
 @router.get("/search")
 def api_search_stocks(q: str):
-    """Search for stocks to add to watchlist."""
+    """Search for stocks to add to watchlist. Handles both padded and non-padded HK codes."""
     with db.db_cursor() as cur:
+        # Try exact match first, then ILIKE
         cur.execute(
             """SELECT DISTINCT symbol, market, company_name FROM earnings
-            WHERE (symbol ILIKE %s OR company_name ILIKE %s)
+            WHERE (symbol ILIKE %s OR company_name ILIKE %s
+                   OR symbol ILIKE %s OR symbol ILIKE %s)
             ORDER BY market, symbol LIMIT 20""",
-            (f"%{q}%", f"%{q}%"),
+            (f"%{q}%", f"%{q}%", f"%{q.replace('.HK', '')}%", f"%{q.zfill(4)}%"),
         )
-        return [dict(row) for row in cur.fetchall()]
+        rows = [dict(row) for row in cur.fetchall()]
+    # Normalize HK symbols in results
+    for r in rows:
+        r["symbol"] = _norm_hk(r["symbol"], r["market"])
+    return rows
