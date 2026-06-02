@@ -81,6 +81,7 @@ def predict_for_symbol(symbol: str, market: str) -> int:
         }
 
     # Build historical quarter patterns from confirmed data only
+    # year_offset = report_year - fiscal_year (captures cross-year reporting like Q4 in Jan)
     quarter_patterns: dict[int, list] = defaultdict(list)
     for (fy, fq), info in confirmed.items():
         rd = info["report_date"]
@@ -88,6 +89,7 @@ def predict_for_symbol(symbol: str, market: str) -> int:
             "year": rd.year,
             "month": rd.month,
             "day": rd.day,
+            "year_offset": rd.year - fy,
             "before_after": info["before_after"],
         })
 
@@ -128,17 +130,21 @@ def predict_for_symbol(symbol: str, market: str) -> int:
             cur_fy, cur_fq = next_fy, next_fq
             continue
 
-        # Compute predicted month and day from recent history
+        # Compute predicted month, day and year_offset from recent history
         recent = sorted(history, key=lambda h: h["year"])[-4:]
         pred_month = int(statistics.median([h["month"] for h in recent]))
         pred_day = int(statistics.median([h["day"] for h in recent]))
+        pred_year_offset = int(statistics.median([h["year_offset"] for h in recent]))
 
-        # Clamp day
-        max_day = calendar.monthrange(next_fy, pred_month)[1]
+        # Apply year_offset: e.g. Q4 fiscal_year=2025 → report year = 2026
+        pred_year = next_fy + pred_year_offset
+
+        # Clamp day for the target month/year
+        max_day = calendar.monthrange(pred_year, pred_month)[1]
         pred_day = min(pred_day, max_day)
 
         try:
-            pred_date = date(next_fy, pred_month, pred_day)
+            pred_date = date(pred_year, pred_month, pred_day)
         except ValueError:
             cur_fy, cur_fq = next_fy, next_fq
             continue
@@ -157,7 +163,7 @@ def predict_for_symbol(symbol: str, market: str) -> int:
                 """INSERT INTO earnings (symbol, market, company_name, report_date, report_type,
                    fiscal_year, fiscal_quarter, before_after, is_predicted)
                 VALUES (%s, %s, %s, %s, 'Q', %s, %s, %s, TRUE)
-                ON CONFLICT (symbol, market, report_date, report_type, fiscal_year, fiscal_quarter)
+                ON CONFLICT (symbol, market, report_date, report_type)
                 DO UPDATE SET
                     is_predicted = TRUE,
                     before_after = COALESCE(EXCLUDED.before_after, earnings.before_after),
@@ -177,31 +183,28 @@ def predict_for_symbol(symbol: str, market: str) -> int:
 
 
 def mark_confirmed():
-    """Flip is_predicted=FALSE when real data arrives for a previously predicted row."""
+    """Clean up predictions when real data arrives."""
     with db_cursor() as cur:
-        # Rows that have actuals are no longer predicted
+        # 1) Rows that have actuals are no longer predicted
         cur.execute(
             "UPDATE earnings SET is_predicted = FALSE WHERE is_predicted = TRUE AND eps_actual IS NOT NULL"
         )
         n1 = cur.rowcount
 
-        # Rows that have eps_estimate from a real source (sync) should also be confirmed
-        # The sync scripts insert with is_predicted=FALSE (default), so ON CONFLICT
-        # will handle this — but just in case:
+        # 2) Delete predicted rows that overlap with a confirmed row
+        #    on the same (symbol, market, fiscal_year, fiscal_quarter)
         cur.execute(
-            """UPDATE earnings SET is_predicted = FALSE
-            WHERE is_predicted = TRUE AND eps_estimate IS NOT NULL
-            AND id NOT IN (
-                SELECT e1.id FROM earnings e1
-                JOIN earnings e2 ON e1.symbol = e2.symbol AND e1.market = e2.market
-                    AND e1.fiscal_year = e2.fiscal_year AND e1.fiscal_quarter = e2.fiscal_quarter
-                    AND e2.is_predicted = FALSE
+            """DELETE FROM earnings WHERE is_predicted = TRUE AND id IN (
+                SELECT p.id FROM earnings p
+                JOIN earnings c ON p.symbol = c.symbol AND p.market = c.market
+                    AND p.fiscal_year = c.fiscal_year AND p.fiscal_quarter = c.fiscal_quarter
+                    AND c.is_predicted = FALSE
             )"""
         )
         n2 = cur.rowcount
 
     if n1 or n2:
-        logger.info(f"Marked {n1 + n2} predicted rows as confirmed")
+        logger.info(f"Confirmed {n1} rows with actuals, removed {n2} stale predictions")
 
 
 def cleanup_stale_predictions():

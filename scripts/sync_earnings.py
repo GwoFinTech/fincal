@@ -152,14 +152,17 @@ def sync_earnings():
                            fiscal_year, fiscal_quarter,
                            eps_estimate, eps_actual, revenue_estimate, revenue_actual, before_after)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (symbol, market, report_date, report_type, fiscal_year, fiscal_quarter)
+                        ON CONFLICT (symbol, market, report_date, report_type)
                         DO UPDATE SET
                             company_name = EXCLUDED.company_name,
+                            fiscal_year = EXCLUDED.fiscal_year,
+                            fiscal_quarter = EXCLUDED.fiscal_quarter,
                             eps_estimate = COALESCE(EXCLUDED.eps_estimate, earnings.eps_estimate),
                             eps_actual = COALESCE(EXCLUDED.eps_actual, earnings.eps_actual),
                             revenue_estimate = COALESCE(EXCLUDED.revenue_estimate, earnings.revenue_estimate),
                             revenue_actual = COALESCE(EXCLUDED.revenue_actual, earnings.revenue_actual),
                             before_after = COALESCE(EXCLUDED.before_after, earnings.before_after),
+                            is_predicted = FALSE,
                             updated_at = NOW()
                         """,
                         (

@@ -80,9 +80,13 @@ def sync_earnings_dates():
                         """INSERT INTO earnings (symbol, market, company_name, report_date, report_type,
                            fiscal_year, fiscal_quarter, before_after)
                         VALUES (%s, %s, '', %s, 'Q', %s, %s, %s)
-                        ON CONFLICT (symbol, market, report_date, report_type, fiscal_year, fiscal_quarter)
+                        ON CONFLICT (symbol, market, report_date, report_type)
                         DO UPDATE SET
+                            fiscal_year = EXCLUDED.fiscal_year,
+                            fiscal_quarter = EXCLUDED.fiscal_quarter,
                             before_after = COALESCE(EXCLUDED.before_after, earnings.before_after),
+                            is_predicted = FALSE,
+                            company_name = CASE WHEN earnings.company_name = '' THEN EXCLUDED.company_name ELSE earnings.company_name END,
                             updated_at = NOW()
                         """,
                         (symbol, market, pub_date_str, fy, fq, pub_type),

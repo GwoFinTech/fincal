@@ -68,7 +68,8 @@ def init_db():
                 revenue_actual NUMERIC,
                 before_after TEXT,
                 updated_at TIMESTAMPTZ DEFAULT NOW(),
-                UNIQUE(symbol, market, report_date, report_type, fiscal_year, fiscal_quarter)
+                is_predicted BOOLEAN DEFAULT FALSE,
+                UNIQUE(symbol, market, report_date, report_type)
             );
         """)
         cur.execute("""
