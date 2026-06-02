@@ -1,6 +1,7 @@
 """iCal subscription endpoint — no auth required, uses token."""
 from fastapi import APIRouter, Response
 from .. import db, config
+from ..symbol import normalize
 from ..ical import generate_ical
 
 router = APIRouter(tags=["ical"])
@@ -27,7 +28,7 @@ def ical_feed(token: str):
         symbols = POPULAR_STOCKS_US + POPULAR_STOCKS_HK
         markets = ["US", "HK"]
     else:
-        symbols = list(set(r["symbol"] for r in watchlist))
+        symbols = [normalize(r["symbol"], r["market"]) for r in watchlist]
         markets = list(set(r["market"] for r in watchlist))
 
     earnings = fetch_earnings_from_db(

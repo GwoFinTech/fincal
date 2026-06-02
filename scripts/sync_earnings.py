@@ -11,6 +11,7 @@ from datetime import date, timedelta
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.db import db_cursor
+from app.symbol import from_lb_counter_id, normalize
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -21,7 +22,7 @@ def fetch_calendar(market: str, start: str, end: str) -> list[dict]:
     all_pages = []
     cursor_start = start
     max_iterations = 50
-    
+
     for i in range(max_iterations):
         cmd = [
             "longbridge", "finance-calendar", "report",
@@ -45,29 +46,16 @@ def fetch_calendar(market: str, start: str, end: str) -> list[dict]:
         if not pages:
             break
         all_pages.extend(pages)
-        
+
         next_date = data.get("next_date", "")
         if not next_date or next_date >= end:
             break
         cursor_start = next_date
-        
-        # Log progress
+
         last_page_date = pages[-1].get("date", "?")
         logger.info(f"  {market} iteration {i}: got {len(pages)} pages, last_date={last_page_date}, next={next_date}")
 
     return all_pages
-
-
-def parse_symbol(counter_id: str) -> tuple[str, str]:
-    parts = counter_id.split("/")
-    if len(parts) != 3:
-        return ("", "")
-    market = parts[1]
-    code = parts[2]
-    if market == "HK":
-        # Normalize HK codes to 4-digit with leading zero (e.g. 700 → 0700.HK)
-        code = code.zfill(4) + ".HK"
-    return (code, market)
 
 
 def parse_date_type(date_type: str) -> str | None:
@@ -110,7 +98,6 @@ def parse_report_date(date_str: str) -> str | None:
 def sync_earnings():
     """Full sync with wide date range."""
     today = date.today()
-    # Cover from 6 months ago to 12 months forward for full coverage
     start = (today - timedelta(days=180)).isoformat()
     end = (today + timedelta(days=365)).isoformat()
 
@@ -123,7 +110,8 @@ def sync_earnings():
 
         for page in pages:
             for info in page.get("infos", []):
-                symbol, mkt = parse_symbol(info.get("counter_id", ""))
+                # Use unified parser from app.symbol
+                symbol, mkt = from_lb_counter_id(info.get("counter_id", ""))
                 if not symbol:
                     continue
 

@@ -23,16 +23,20 @@ from app.db import db_cursor
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-POPULAR_SYMBOLS = [
-    "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "NFLX",
-    "AMD", "INTC", "JPM", "V", "MA", "HD", "COST", "ABBV", "CRM", "PYPL",
-    "QCOM", "AVGO", "WMT", "TSM", "ORCL", "ADBE", "SBUX", "NKE", "DIS",
-    "BA", "MRVL", "BRK.B",
-    "0700.HK", "9988.HK", "0005.HK", "1299.HK", "0941.HK",
-    "2318.HK", "0388.HK", "9999.HK", "1810.HK", "2020.HK",
-    "9618.HK", "0883.HK", "0016.HK", "0001.HK", "0002.HK",
-    "0003.HK", "0011.HK", "1398.HK", "3988.HK", "2628.HK",
-]
+POPULAR_SYMBOLS = {
+    "US": [
+        "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "NFLX",
+        "AMD", "INTC", "JPM", "V", "MA", "HD", "COST", "ABBV", "CRM", "PYPL",
+        "QCOM", "AVGO", "WMT", "TSM", "ORCL", "ADBE", "SBUX", "NKE", "DIS",
+        "BA", "MRVL",
+    ],
+    "HK": [
+        "0700.HK", "9988.HK", "0005.HK", "1299.HK", "0941.HK",
+        "2318.HK", "0388.HK", "9999.HK", "1810.HK", "2020.HK",
+        "9618.HK", "0883.HK", "0016.HK", "0001.HK", "0002.HK",
+        "0003.HK", "0011.HK", "1398.HK", "3988.HK", "2628.HK",
+    ],
+}
 
 # How many future quarters ahead to predict (max 4 = ~1 year)
 MAX_PREDICT_AHEAD = 4
@@ -216,16 +220,18 @@ if __name__ == "__main__":
     init_db()
     mark_confirmed()
     cleanup_stale_predictions()
-    run_predictions = lambda: None  # defined below
 
     # Run predictions
     logger.info("Predicting future earnings dates...")
     total = 0
-    for i, symbol in enumerate(POPULAR_SYMBOLS):
-        market = "HK" if symbol.endswith(".HK") else "US"
+    all_symbols = []
+    for mkt, syms in POPULAR_SYMBOLS.items():
+        for s in syms:
+            all_symbols.append((s, mkt))
+    for i, (symbol, market) in enumerate(all_symbols):
         count = predict_for_symbol(symbol, market)
         total += count
         if (i + 1) % 10 == 0:
-            logger.info(f"  Processed {i+1}/{len(POPULAR_SYMBOLS)} symbols, {total} predictions so far")
+            logger.info(f"  Processed {i+1}/{len(all_symbols)} symbols, {total} predictions so far")
 
     logger.info(f"Prediction complete: {total} future earnings dates predicted")
