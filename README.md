@@ -13,6 +13,16 @@ fincal aggregates earnings report dates from [Longbridge](https://longbridge.com
 - **Pluggable Watchlist Source** — read symbols from an external database or any HTTP API ([docs](docs/watchlist-source.md))
 - **Data Sources** — Longbridge CLI (primary) + Futu OpenD (actuals & date confirmation), with automatic fallback
 
+## Authentication
+
+fincal uses **Traefik forwardAuth** for user authentication — the reverse proxy delegates login to an external auth service, which injects user identity via HTTP headers (`X-User-Id`, `X-User-Email`, `X-User-Name`).
+
+We recommend pairing fincal with **[kazusa-home-portal](https://github.com/GwoFinTech/kazusa-home-portal)**, which provides Google OAuth login, a service dashboard, and Traefik forwardAuth middleware out of the box. Set `AUTH_MIDDLEWARE=kazusa-auth@docker` in your `.env` to connect.
+
+Any forwardAuth-compatible service works — set `AUTH_MIDDLEWARE` to your middleware name and `AUTH_LOGIN_URL` to your login page.
+
+For single-user or local-only setups, leave `AUTH_LOGIN_URL` empty to run without authentication.
+
 ## Quick Start
 
 ### Prerequisites
