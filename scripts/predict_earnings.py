@@ -218,9 +218,75 @@ def cleanup_stale_predictions():
         logger.info(f"Cleaned up {n} stale predictions")
 
 
+def merge_duplicate_symbols():
+    """Merge XXX.US → XXX and 5-digit HK codes (8XXXX) into 4-digit canonical.
+
+    Prevents stale duplicate rows if a sync run introduces non-canonical symbols.
+    """
+    with db_cursor() as cur:
+        # 1) Merge XXX.US → XXX for US market
+        cur.execute("SELECT DISTINCT symbol FROM earnings WHERE symbol LIKE '%.US' AND market = 'US'")
+        us_dups = [r["symbol"] for r in cur.fetchall()]
+        merged = 0
+        for us_sym in us_dups:
+            bare = us_sym.replace(".US", "")
+            cur.execute(
+                """INSERT INTO earnings (symbol, market, company_name, report_date, report_type,
+                   fiscal_year, fiscal_quarter, eps_estimate, eps_actual, revenue_estimate, revenue_actual, before_after, is_predicted)
+                SELECT %s, market, company_name, report_date, report_type,
+                   fiscal_year, fiscal_quarter, eps_estimate, eps_actual, revenue_estimate, revenue_actual, before_after, is_predicted
+                FROM earnings WHERE symbol = %s AND market = 'US'
+                ON CONFLICT (symbol, market, report_date, report_type) DO UPDATE SET
+                    company_name = CASE WHEN earnings.company_name = '' THEN EXCLUDED.company_name ELSE earnings.company_name END,
+                    eps_estimate = COALESCE(EXCLUDED.eps_estimate, earnings.eps_estimate),
+                    eps_actual = COALESCE(EXCLUDED.eps_actual, earnings.eps_actual),
+                    revenue_estimate = COALESCE(EXCLUDED.revenue_estimate, earnings.revenue_estimate),
+                    revenue_actual = COALESCE(EXCLUDED.revenue_actual, earnings.revenue_actual),
+                    before_after = COALESCE(EXCLUDED.before_after, earnings.before_after),
+                    fiscal_year = EXCLUDED.fiscal_year,
+                    fiscal_quarter = EXCLUDED.fiscal_quarter,
+                    is_predicted = EXCLUDED.is_predicted,
+                    updated_at = NOW()""",
+                (bare, us_sym),
+            )
+            cur.execute("DELETE FROM earnings WHERE symbol = %s AND market = 'US'", (us_sym,))
+            merged += 1
+        if merged:
+            logger.info(f"Merged {merged} .US duplicate symbols")
+
+        # 2) Merge 5-digit HK codes (8XXXX.HK) → 4-digit (XXXX.HK)
+        cur.execute("SELECT DISTINCT symbol FROM earnings WHERE symbol ~ '^\\d{5}\\.HK$'")
+        hk5 = [r["symbol"] for r in cur.fetchall()]
+        for sym in hk5:
+            bare = (sym.split(".")[0].lstrip("8") or "0").zfill(4) + ".HK"
+            cur.execute(
+                """INSERT INTO earnings (symbol, market, company_name, report_date, report_type,
+                   fiscal_year, fiscal_quarter, eps_estimate, eps_actual, revenue_estimate, revenue_actual, before_after, is_predicted)
+                SELECT %s, market, company_name, report_date, report_type,
+                   fiscal_year, fiscal_quarter, eps_estimate, eps_actual, revenue_estimate, revenue_actual, before_after, is_predicted
+                FROM earnings WHERE symbol = %s AND market = 'HK'
+                ON CONFLICT (symbol, market, report_date, report_type) DO UPDATE SET
+                    company_name = CASE WHEN earnings.company_name = '' THEN EXCLUDED.company_name ELSE earnings.company_name END,
+                    eps_estimate = COALESCE(EXCLUDED.eps_estimate, earnings.eps_estimate),
+                    eps_actual = COALESCE(EXCLUDED.eps_actual, earnings.eps_actual),
+                    revenue_estimate = COALESCE(EXCLUDED.revenue_estimate, earnings.revenue_estimate),
+                    revenue_actual = COALESCE(EXCLUDED.revenue_actual, earnings.revenue_actual),
+                    before_after = COALESCE(EXCLUDED.before_after, earnings.before_after),
+                    fiscal_year = EXCLUDED.fiscal_year,
+                    fiscal_quarter = EXCLUDED.fiscal_quarter,
+                    is_predicted = EXCLUDED.is_predicted,
+                    updated_at = NOW()""",
+                (bare, sym),
+            )
+            cur.execute("DELETE FROM earnings WHERE symbol = %s AND market = 'HK'", (sym,))
+        if hk5:
+            logger.info(f"Merged {len(hk5)} 5-digit HK symbols")
+
+
 if __name__ == "__main__":
     from app.db import init_db
     init_db()
+    merge_duplicate_symbols()
     mark_confirmed()
     cleanup_stale_predictions()
 

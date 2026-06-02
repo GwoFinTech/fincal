@@ -81,7 +81,7 @@ def seed_demo_data():
             cur.execute(
                 """INSERT INTO earnings (symbol, market, company_name, report_date, report_type, fiscal_year, fiscal_quarter, eps_estimate, eps_actual, revenue_estimate, revenue_actual, before_after)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (symbol, market, report_date, report_type, fiscal_year, fiscal_quarter)
+                ON CONFLICT (symbol, market, report_date, report_type)
                 DO UPDATE SET company_name=EXCLUDED.company_name, eps_estimate=EXCLUDED.eps_estimate, before_after=EXCLUDED.before_after, updated_at=NOW()
                 """,
                 row,
