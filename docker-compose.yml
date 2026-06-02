@@ -23,6 +23,13 @@ services:
       - "traefik.http.routers.fincal.service=fincal-svc"
       # Shared service
       - "traefik.http.services.fincal-svc.loadbalancer.server.port=8000"
+      # Homepage portal
+      - "homepage.enable=true"
+      - "homepage.title=fincal"
+      - "homepage.description=财务日历 — 财报、分红、IPO 日历"
+      - "homepage.icon=📅"
+      - "homepage.category=finance"
+      - "homepage.url=https://fincal.kazusa.feng.moe"
     networks:
       - traefik_traefik-net
     extra_hosts:
