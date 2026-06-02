@@ -161,6 +161,17 @@
 
     <!-- Calendar -->
     <div class="max-w-7xl mx-auto px-4 pb-8">
+      <!-- Loading indicator -->
+      <div v-if="loading" class="mb-3 flex items-center gap-2 text-sm text-violet-400">
+        <svg class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+        Loading...
+      </div>
+      <!-- Error banner -->
+      <div v-if="error" class="mb-3 px-4 py-2 rounded-lg bg-red-900/30 border border-red-800 text-sm text-red-400 flex items-center justify-between">
+        <span>{{ error }}</span>
+        <button @click="error = null" class="text-red-500 hover:text-red-300">&times;</button>
+      </div>
+
       <div class="grid gap-px bg-zinc-800 rounded-t-xl overflow-hidden grid-cols-7">
         <div v-for="d in weekdays" :key="d" class="bg-zinc-900 px-3 py-2 text-xs font-medium text-zinc-500 text-center uppercase">{{ d }}</div>
       </div>
@@ -389,6 +400,8 @@
       const toast = ref('');
       const selectedEarning = ref(null);
       const selectedDay = ref(null);
+      const loading = ref(false);
+      const error = ref(null);
 
       const weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
@@ -428,7 +441,11 @@
         let cursor = new Date(startDate);
         while (cursor <= endDate) {
           const cellDate = new Date(cursor);
-          const cellEarnings = earnings.value.filter(e => sameDay(new Date(e.report_date + 'T00:00:00'), cellDate));
+          const cellEarnings = earnings.value.filter(e => {
+            const parts = e.report_date.split('-');
+            const d = new Date(+parts[0], +parts[1] - 1, +parts[2]);
+            return sameDay(d, cellDate);
+          });
           const inMonth = cellDate.getMonth() === month;
           cells.push({
             date: cellDate,
@@ -443,10 +460,19 @@
       });
 
       async function apiFetch(path, opts = {}) {
-        const res = await fetch(path, { ...opts, headers: { 'Content-Type': 'application/json', ...opts.headers } });
-        if (res.status === 401) { user.value = null; return null; }
-        if (!res.ok) return null;
-        return res.json();
+        try {
+          const res = await fetch(path, { ...opts, headers: { 'Content-Type': 'application/json', ...opts.headers } });
+          if (res.status === 401) { user.value = null; return null; }
+          if (!res.ok) {
+            const text = await res.text().catch(() => '');
+            throw new Error(text || `HTTP ${res.status}`);
+          }
+          return res.json();
+        } catch (e) {
+          error.value = e.message;
+          showToast('请求失败: ' + e.message, 'error');
+          return null;
+        }
       }
 
       async function loadUser() {
@@ -460,12 +486,18 @@
       }
 
       async function loadEarnings() {
-        const d = currentDate.value;
-        const start = new Date(d.getFullYear(), d.getMonth() - 1, 1).toISOString().slice(0, 10);
-        const end = new Date(d.getFullYear(), d.getMonth() + 2, 0).toISOString().slice(0, 10);
-        const params = new URLSearchParams({ start, end, watchlistOnly: watchlistOnly.value });
-        const data = await apiFetch(`/api/earnings?${params}`);
-        if (data) earnings.value = data;
+        loading.value = true;
+        error.value = null;
+        try {
+          const d = currentDate.value;
+          const start = new Date(d.getFullYear(), d.getMonth() - 1, 1).toISOString().slice(0, 10);
+          const end = new Date(d.getFullYear(), d.getMonth() + 2, 0).toISOString().slice(0, 10);
+          const params = new URLSearchParams({ start, end, watchlistOnly: watchlistOnly.value });
+          const data = await apiFetch(`/api/earnings?${params}`);
+          if (data) earnings.value = data;
+        } finally {
+          loading.value = false;
+        }
       }
 
       let searchTimer;
@@ -591,6 +623,7 @@
         showSearch, showIcalModal, searchQuery, searchResults, searchLoading,
         icalUrl, copied, toast, weekdays, monthLabel, calendarCells,
         popularSuggestions, selectedEarning, selectedDay,
+        loading, error,
         prevMonth, nextMonth, goToday, login, copyIcal,
         doSearch, addToWatchlist, removeFromWatchlist, isMine, showToast,
         selectCell, selectEarning,

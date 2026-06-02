@@ -1,24 +1,35 @@
 import psycopg2
 import psycopg2.extras
+from psycopg_pool import ConnectionPool
 from contextlib import contextmanager
 from . import config
 
+_pool = None
+
+
+def _get_pool() -> ConnectionPool:
+    global _pool
+    if _pool is None:
+        _pool = ConnectionPool(
+            conninfo=f"host={config.DB_HOST} port={config.DB_PORT} dbname={config.DB_NAME} user={config.DB_USER} password={config.DB_PASSWORD}",
+            min_size=2,
+            max_size=10,
+            kwargs={"cursor_factory": psycopg2.extras.RealDictCursor},
+        )
+    return _pool
+
 
 def get_conn():
-    return psycopg2.connect(
-        host=config.DB_HOST,
-        port=config.DB_PORT,
-        database=config.DB_NAME,
-        user=config.DB_USER,
-        password=config.DB_PASSWORD,
-    )
+    """Get a connection from the pool (for backward compat with scripts)."""
+    return _get_pool().getconn()
 
 
 @contextmanager
 def db_cursor():
-    conn = get_conn()
+    pool = _get_pool()
+    conn = pool.getconn()
     try:
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur = conn.cursor()
         yield cur
         conn.commit()
     except Exception:
@@ -26,7 +37,7 @@ def db_cursor():
         raise
     finally:
         cur.close()
-        conn.close()
+        pool.putconn(conn)
 
 
 def init_db():

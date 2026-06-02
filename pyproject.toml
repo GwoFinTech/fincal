@@ -6,6 +6,7 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
     "psycopg2-binary>=2.9",
+    "psycopg-pool>=3.2",
     "futu-api>=10.6.6608",
 ]
 

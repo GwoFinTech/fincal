@@ -1,5 +1,4 @@
 """iCal (.ics) feed generation for user watchlist."""
-import uuid
 from datetime import date, datetime
 from . import config
 
@@ -57,7 +56,7 @@ def generate_ical(earnings: list[dict], user_email: str = "") -> str:
         desc = "\\\\n".join(p for p in desc_parts if p)
 
         dt_str = report_date.strftime("%Y%m%d")
-        uid = f"fincal-{symbol}-{market}-{dt_str}-{uuid.uuid4().hex[:8]}@{config.APP_NAME}"
+        uid = f"fincal-{symbol}-{market}-{dt_str}@{config.APP_NAME}"
 
         lines.append("BEGIN:VEVENT")
         lines.append(f"UID:{uid}")
