@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Fetch earnings calendar dates + actual EPS/revenue from Futu OpenD."""
+"""Fetch earnings calendar dates + actual EPS/revenue from Futu OpenD.
+Uses batched DB writes for earnings dates."""
 import signal
 import logging
 import sys
@@ -9,12 +10,11 @@ from datetime import date, timedelta
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.db import db_cursor
-from app.symbol import from_futu_code
+from app.symbol import from_futu_code, to_futu_code
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-# Internal canonical symbols — to_futu_code() handles conversion
 POPULAR_SYMBOLS = [
     "AAPL.US", "MSFT.US", "GOOGL.US", "AMZN.US", "NVDA.US", "META.US",
     "TSLA.US", "NFLX.US", "AMD.US", "INTC.US", "JPM.US", "V.US",
@@ -31,23 +31,19 @@ F10_TO_QUARTER = {1: 1, 2: 2, 3: 3, 4: 4}
 PUB_TYPE_MAP = {1: "before", 2: "after", 3: "during"}
 
 
-def _get_futu_code(symbol: str) -> str:
-    """Convert internal symbol to Futu API format using app.symbol."""
-    from app.symbol import to_futu_code
-    return to_futu_code(symbol)
-
-
 def sync_earnings_dates():
-    """Fetch earnings calendar dates from Futu."""
+    """Fetch earnings calendar dates from Futu, batched inserts."""
     try:
         from futu import OpenQuoteContext, RET_OK
     except ImportError:
         logger.warning("futu-api not installed")
         return
 
+    batch = []
     total = 0
+
     for symbol in POPULAR_SYMBOLS:
-        futu_code = _get_futu_code(symbol)
+        futu_code = to_futu_code(symbol)
         market = symbol.rsplit(".", 1)[-1]
         try:
             signal.alarm(15)
@@ -75,28 +71,37 @@ def sync_earnings_dates():
                     continue
                 pub_type = PUB_TYPE_MAP.get(int(row.get("pub_type", 0)))
 
-                with db_cursor() as cur:
-                    cur.execute(
-                        """INSERT INTO earnings (symbol, market, company_name, report_date, report_type,
-                           fiscal_year, fiscal_quarter, before_after)
-                        VALUES (%s, %s, '', %s, 'Q', %s, %s, %s)
-                        ON CONFLICT (symbol, market, report_date, report_type)
-                        DO UPDATE SET
-                            fiscal_year = EXCLUDED.fiscal_year,
-                            fiscal_quarter = EXCLUDED.fiscal_quarter,
-                            before_after = COALESCE(EXCLUDED.before_after, earnings.before_after),
-                            is_predicted = FALSE,
-                            company_name = CASE WHEN earnings.company_name = '' THEN EXCLUDED.company_name ELSE earnings.company_name END,
-                            updated_at = NOW()
-                        """,
-                        (symbol, market, pub_date_str, fy, fq, pub_type),
-                    )
+                batch.append((symbol, market, "", pub_date_str, "Q", fy, fq, pub_type))
                 total += 1
             ctx.close()
         except Exception as e:
             signal.alarm(0)
             logger.debug(f"Failed {futu_code}: {e}")
             continue
+
+    # Batch upsert all earnings dates
+    if batch:
+        from psycopg2.extras import execute_values
+        with db_cursor() as cur:
+            execute_values(
+                cur,
+                """INSERT INTO earnings (symbol, market, company_name, report_date, report_type,
+                   fiscal_year, fiscal_quarter, before_after)
+                VALUES %s
+                ON CONFLICT (symbol, market, report_date, report_type)
+                DO UPDATE SET
+                    fiscal_year = EXCLUDED.fiscal_year,
+                    fiscal_quarter = EXCLUDED.fiscal_quarter,
+                    before_after = COALESCE(EXCLUDED.before_after, earnings.before_after),
+                    is_predicted = FALSE,
+                    company_name = CASE WHEN earnings.company_name = '' THEN EXCLUDED.company_name ELSE earnings.company_name END,
+                    updated_at = NOW()
+                """,
+                batch,
+                page_size=200,
+            )
+        logger.info(f"Flushed {len(batch)} earnings dates")
+
     logger.info(f"Futu earnings dates: {total} records")
 
 
@@ -109,7 +114,7 @@ def sync_actuals():
 
     total = 0
     for symbol in POPULAR_SYMBOLS:
-        futu_code = _get_futu_code(symbol)
+        futu_code = to_futu_code(symbol)
         market = symbol.rsplit(".", 1)[-1]
         try:
             signal.alarm(20)

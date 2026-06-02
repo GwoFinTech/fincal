@@ -535,7 +535,9 @@
 
       function epsSurplus(e) {
         if (e.eps_estimate == null || e.eps_actual == null) return 0;
-        return e.eps_actual - e.eps_estimate;
+        const diff = e.eps_actual - e.eps_estimate;
+        if (Math.abs(e.eps_estimate) < 0.0001) return diff > 0 ? 1 : diff < 0 ? -1 : 0;
+        return diff / Math.abs(e.eps_estimate);
       }
       function epsSurplusClass(e) {
         const s = epsSurplus(e);
@@ -543,11 +545,13 @@
       }
       function revSurplus(e) {
         if (e.revenue_estimate == null || e.revenue_actual == null) return 0;
-        return e.revenue_actual - e.revenue_estimate;
+        const diff = e.revenue_actual - e.revenue_estimate;
+        if (Math.abs(e.revenue_estimate) < 0.0001) return diff > 0 ? 1 : diff < 0 ? -1 : 0;
+        return diff / Math.abs(e.revenue_estimate);
       }
       function revSurplusClass(e) {
         const s = revSurplus(e);
-        return s > 0 ? 'beat' : s < 0 ? 'miss' : '';
+        return s > 0.001 ? 'beat' : s < -0.001 ? 'miss' : '';
       }
 
       function fmtNum(n) {

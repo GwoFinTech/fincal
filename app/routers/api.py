@@ -1,9 +1,10 @@
 """API routes for watchlist management and earnings data."""
+import json
 from fastapi import APIRouter, Depends
 from datetime import date, timedelta
 from ..auth import get_current_user, ensure_user
 from .. import db, config
-from ..symbol import normalize, sort_key
+from ..symbol import normalize, sort_key, from_lb_counter_id
 
 router = APIRouter(prefix="/api", tags=["api"])
 
@@ -132,4 +133,59 @@ def api_search_stocks(q: str):
             ORDER BY market, symbol LIMIT 20""",
             (f"%{q}%", f"%{q}%"),
         )
-        return [dict(row) for row in cur.fetchall()]
+        results = [dict(row) for row in cur.fetchall()]
+
+    # Fallback: if no results in DB, try Longbridge search
+    if not results:
+        try:
+            import subprocess
+            cmd = ["longbridge", "stock-search", "--q", q, "--count", "10", "--format", "json"]
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if proc.returncode == 0:
+                data = json.loads(proc.stdout)
+                for item in data.get("list", []):
+                    cid = item.get("counter_id", "")
+                    name = item.get("name", "")
+                    symbol, market = from_lb_counter_id(cid)
+                    if symbol and market:
+                        results.append({"symbol": symbol, "market": market, "company_name": name})
+        except Exception:
+            pass
+
+    return results
+
+
+@router.get("/export")
+def api_export(start: str, end: str, format: str = "csv"):
+    """Export earnings data as CSV or JSON."""
+    from ..earnings import POPULAR_STOCKS_US, POPULAR_STOCKS_HK
+    from fastapi.responses import StreamingResponse
+    import csv, io, json as json_mod
+
+    symbols = POPULAR_STOCKS_US + POPULAR_STOCKS_HK
+    markets = ["US", "HK"]
+    data = fetch_earnings_from_db(symbols=symbols, markets=markets, start=start, end=end)
+
+    if format == "json":
+        return data
+
+    # CSV output
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["symbol", "market", "company_name", "report_date", "fiscal_year",
+                     "fiscal_quarter", "before_after", "eps_estimate", "eps_actual",
+                     "revenue_estimate", "revenue_actual", "is_predicted"])
+    for r in data:
+        writer.writerow([
+            r.get("symbol"), r.get("market"), r.get("company_name", ""),
+            r.get("report_date"), r.get("fiscal_year"), r.get("fiscal_quarter"),
+            r.get("before_after", ""), r.get("eps_estimate", ""),
+            r.get("eps_actual", ""), r.get("revenue_estimate", ""),
+            r.get("revenue_actual", ""), r.get("is_predicted", False),
+        ])
+    output.seek(0)
+    return StreamingResponse(
+        output,
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=fincal-earnings-{start}-{end}.csv"},
+    )

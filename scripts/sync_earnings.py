@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Full sync of earnings data from Longbridge finance-calendar into fincal DB.
-Covers wide date ranges and uses pagination to get all records."""
+Covers wide date ranges and uses pagination to get all records.
+Uses batch inserts for performance."""
 import subprocess
 import json
 import logging
@@ -15,6 +16,8 @@ from app.symbol import from_lb_counter_id, normalize
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
+
+BATCH_SIZE = 200
 
 
 def fetch_calendar(market: str, start: str, end: str) -> list[dict]:
@@ -95,8 +98,37 @@ def parse_report_date(date_str: str) -> str | None:
         return None
 
 
+def flush_batch(cur, rows: list[tuple]):
+    """Batch upsert using execute_values."""
+    if not rows:
+        return
+    from psycopg2.extras import execute_values
+    execute_values(
+        cur,
+        """INSERT INTO earnings (symbol, market, company_name, report_date, report_type,
+           fiscal_year, fiscal_quarter,
+           eps_estimate, eps_actual, revenue_estimate, revenue_actual, before_after)
+        VALUES %s
+        ON CONFLICT (symbol, market, report_date, report_type)
+        DO UPDATE SET
+            company_name = EXCLUDED.company_name,
+            fiscal_year = EXCLUDED.fiscal_year,
+            fiscal_quarter = EXCLUDED.fiscal_quarter,
+            eps_estimate = COALESCE(EXCLUDED.eps_estimate, earnings.eps_estimate),
+            eps_actual = COALESCE(EXCLUDED.eps_actual, earnings.eps_actual),
+            revenue_estimate = COALESCE(EXCLUDED.revenue_estimate, earnings.revenue_estimate),
+            revenue_actual = COALESCE(EXCLUDED.revenue_actual, earnings.revenue_actual),
+            before_after = COALESCE(EXCLUDED.before_after, earnings.before_after),
+            is_predicted = FALSE,
+            updated_at = NOW()
+        """,
+        rows,
+        page_size=BATCH_SIZE,
+    )
+
+
 def sync_earnings():
-    """Full sync with wide date range."""
+    """Full sync with wide date range, batched inserts."""
     today = date.today()
     start = (today - timedelta(days=180)).isoformat()
     end = (today + timedelta(days=365)).isoformat()
@@ -108,9 +140,9 @@ def sync_earnings():
         pages = fetch_calendar(market, start, end)
         logger.info(f"  Total pages received: {len(pages)}")
 
+        batch = []
         for page in pages:
             for info in page.get("infos", []):
-                # Use unified parser from app.symbol
                 symbol, mkt = from_lb_counter_id(info.get("counter_id", ""))
                 if not symbol:
                     continue
@@ -132,8 +164,17 @@ def sync_earnings():
                 except (ValueError, TypeError):
                     pass
 
+                # Try to get fiscal_year from API response
                 fiscal_year = None
-                if fiscal_quarter:
+                fy_from_api = ext.get("fiscal_year") or ext.get("year")
+                if fy_from_api:
+                    try:
+                        fiscal_year = int(fy_from_api)
+                    except (ValueError, TypeError):
+                        pass
+
+                # Fallback: heuristic from report date
+                if not fiscal_year and fiscal_quarter:
                     rd_month = int(report_date[5:7])
                     if mkt == "US":
                         if fiscal_quarter <= 2:
@@ -146,34 +187,27 @@ def sync_earnings():
                         else:
                             fiscal_year = int(report_date[:4]) - 1 if rd_month <= 3 else int(report_date[:4])
 
-                with db_cursor() as cur:
-                    cur.execute(
-                        """INSERT INTO earnings (symbol, market, company_name, report_date, report_type,
-                           fiscal_year, fiscal_quarter,
-                           eps_estimate, eps_actual, revenue_estimate, revenue_actual, before_after)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (symbol, market, report_date, report_type)
-                        DO UPDATE SET
-                            company_name = EXCLUDED.company_name,
-                            fiscal_year = EXCLUDED.fiscal_year,
-                            fiscal_quarter = EXCLUDED.fiscal_quarter,
-                            eps_estimate = COALESCE(EXCLUDED.eps_estimate, earnings.eps_estimate),
-                            eps_actual = COALESCE(EXCLUDED.eps_actual, earnings.eps_actual),
-                            revenue_estimate = COALESCE(EXCLUDED.revenue_estimate, earnings.revenue_estimate),
-                            revenue_actual = COALESCE(EXCLUDED.revenue_actual, earnings.revenue_actual),
-                            before_after = COALESCE(EXCLUDED.before_after, earnings.before_after),
-                            is_predicted = FALSE,
-                            updated_at = NOW()
-                        """,
-                        (
-                            symbol, mkt, company_name, report_date, "Q",
-                            fiscal_year, fiscal_quarter,
-                            kv.get("eps_estimate"), kv.get("eps_actual"),
-                            kv.get("revenue_estimate"), kv.get("revenue_actual"),
-                            date_type,
-                        ),
-                    )
+                batch.append((
+                    symbol, mkt, company_name, report_date, "Q",
+                    fiscal_year, fiscal_quarter,
+                    kv.get("eps_estimate"), kv.get("eps_actual"),
+                    kv.get("revenue_estimate"), kv.get("revenue_actual"),
+                    date_type,
+                ))
                 total += 1
+
+                # Flush when batch is full
+                if len(batch) >= BATCH_SIZE:
+                    with db_cursor() as cur:
+                        flush_batch(cur, batch)
+                    logger.info(f"  Flushed {len(batch)} records (total: {total})")
+                    batch = []
+
+        # Flush remaining
+        if batch:
+            with db_cursor() as cur:
+                flush_batch(cur, batch)
+            logger.info(f"  Flushed final {len(batch)} records")
 
     logger.info(f"=== Sync complete: {total} records processed ===")
 
