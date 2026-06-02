@@ -18,11 +18,20 @@
     .fade-enter-active, .fade-leave-active { transition: opacity 0.2s; }
     .fade-enter-from, .fade-leave-to { opacity: 0; }
 
-    .calendar-cell { min-height: 100px; }
-    .badge { font-size: 0.65rem; padding: 1px 6px; border-radius: 9999px; font-weight: 500; white-space: nowrap; }
+    .calendar-cell { min-height: 110px; }
+    .badge { font-size: 0.65rem; padding: 1px 6px; border-radius: 9999px; font-weight: 500; white-space: nowrap; display: inline-flex; align-items: center; gap: 3px; }
     .badge-US { background: #1e3a5f; color: #60a5fa; }
     .badge-HK { background: #3b1f2b; color: #f472b6; }
     .badge-mine { outline: 2px solid #a78bfa; outline-offset: -1px; }
+
+    .beat { color: #4ade80; font-weight: 600; }
+    .miss { color: #f87171; font-weight: 600; }
+    .surprise-dot { width: 5px; height: 5px; border-radius: 50%; display: inline-block; margin-right: 1px; }
+    .surprise-beat { background: #4ade80; }
+    .surprise-miss { background: #f87171; }
+
+    .before-tag { font-size: 0.55rem; background: #1c3a5c; color: #7dd3fc; padding: 0 3px; border-radius: 2px; }
+    .after-tag { font-size: 0.55rem; background: #3b1f2b; color: #fbb6ce; padding: 0 3px; border-radius: 2px; }
 
     .tab-active { border-bottom: 2px solid #8b5cf6; color: #c4b5fd; }
     .tab-inactive { border-bottom: 2px solid transparent; color: #71717a; }
@@ -34,6 +43,12 @@
 
     .pulse { animation: pulse 2s infinite; }
     @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+    .detail-panel { background: #18181b; border: 1px solid #27272a; border-radius: 12px; }
+    .detail-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #27272a; }
+    .detail-row:last-child { border-bottom: none; }
+    .detail-label { color: #71717a; font-size: 0.75rem; }
+    .detail-value { color: #e4e4e7; font-size: 0.75rem; font-weight: 500; text-align: right; }
   </style>
   <script>
     tailwind.config = {
@@ -66,13 +81,11 @@
 
     <!-- Controls -->
     <div class="max-w-7xl mx-auto px-4 py-4 flex flex-wrap items-center gap-3">
-      <!-- View toggle -->
       <div class="flex border-b border-zinc-800">
         <button @click="viewMode='month'" :class="viewMode==='month' ? 'tab-active' : 'tab-inactive'" class="pb-2 px-3 text-sm font-medium transition">Month</button>
         <button @click="viewMode='week'" :class="viewMode==='week' ? 'tab-active' : 'tab-inactive'" class="pb-2 px-3 text-sm font-medium transition">Week</button>
       </div>
 
-      <!-- Month nav -->
       <div class="flex items-center gap-2">
         <button @click="prevMonth" class="p-1 rounded hover:bg-zinc-800 text-zinc-400 transition">
           <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
@@ -86,19 +99,16 @@
 
       <div class="flex-1"></div>
 
-      <!-- Watchlist filter -->
       <label v-if="user" class="flex items-center gap-2 cursor-pointer text-sm text-zinc-400">
         <input type="checkbox" v-model="watchlistOnly" @change="loadEarnings" class="accent-violet-500 w-4 h-4 rounded" />
         Only my watchlist
       </label>
 
-      <!-- Subscription button -->
       <button v-if="user" @click="showIcalModal = true" class="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 transition">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
         Calendar Sync
       </button>
 
-      <!-- Add to watchlist -->
       <div v-if="user" class="relative">
         <button @click="showSearch = !showSearch" class="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white transition">
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
@@ -147,39 +157,172 @@
 
     <!-- Calendar -->
     <div class="max-w-7xl mx-auto px-4 pb-8">
-      <!-- Weekday headers -->
-      <div class="grid gap-px bg-zinc-800 rounded-t-xl overflow-hidden" :class="viewMode === 'month' ? 'grid-cols-7' : 'grid-cols-7'">
+      <div class="grid gap-px bg-zinc-800 rounded-t-xl overflow-hidden grid-cols-7">
         <div v-for="d in weekdays" :key="d" class="bg-zinc-900 px-3 py-2 text-xs font-medium text-zinc-500 text-center uppercase">{{ d }}</div>
       </div>
 
-      <!-- Calendar grid -->
-      <div class="grid gap-px bg-zinc-800 rounded-b-xl overflow-hidden" :class="viewMode === 'month' ? 'grid-cols-7' : 'grid-cols-7'">
+      <div class="grid gap-px bg-zinc-800 rounded-b-xl overflow-hidden grid-cols-7">
         <div v-for="(cell, idx) in calendarCells" :key="idx"
-             class="calendar-cell bg-zinc-900 p-1.5 relative overflow-hidden"
-             :class="{ 'bg-zinc-950': !cell.inMonth }">
+             class="calendar-cell bg-zinc-900 p-1.5 relative overflow-hidden cursor-pointer"
+             :class="{ 'bg-zinc-950': !cell.inMonth }"
+             @click="selectCell(cell)">
           <div class="flex items-center justify-between mb-1">
             <span class="text-xs font-medium" :class="cell.isToday ? 'bg-violet-600 text-white w-6 h-6 rounded-full flex items-center justify-center' : (cell.inMonth ? 'text-zinc-400' : 'text-zinc-700')">
               {{ cell.day }}
             </span>
+            <span v-if="cell.earnings.length > 0" class="text-[0.55rem] text-zinc-600">{{ cell.earnings.length }}</span>
           </div>
           <div class="space-y-0.5 overflow-y-auto" style="max-height: 80px;">
-            <div v-for="e in cell.earnings" :key="e.symbol+e.market"
-                 class="badge cursor-default" :class="[('badge-' + e.market), { 'badge-mine': isMine(e) }]"
-                 :title="e.company_name + ' (' + e.market + ')'">
+            <div v-for="e in cell.earnings.slice(0, 5)" :key="e.symbol+e.market"
+                 class="badge cursor-pointer" :class="[('badge-' + e.market), { 'badge-mine': isMine(e) }]"
+                 :title="e.company_name"
+                 @click.stop="selectEarning(e)">
+              <span v-if="e.before_after === 'before'" class="before-tag">B</span>
+              <span v-else-if="e.before_after === 'after'" class="after-tag">A</span>
               {{ e.symbol }}
+              <template v-if="e.eps_estimate != null && e.eps_actual != null">
+                <span :class="epsSurplusClass(e)">{{ epsSurplus(e) > 0 ? '↑' : epsSurplus(e) < 0 ? '↓' : '=' }}</span>
+              </template>
             </div>
-            <div v-if="cell.earnings.length > 4" class="text-[0.6rem] text-zinc-600">
-              +{{ cell.earnings.length - 4 }} more
+            <div v-if="cell.earnings.length > 5" class="text-[0.6rem] text-zinc-600">
+              +{{ cell.earnings.length - 5 }} more
             </div>
           </div>
         </div>
       </div>
 
       <!-- Legend -->
-      <div class="flex items-center gap-4 mt-3 text-xs text-zinc-500">
+      <div class="flex items-center gap-4 mt-3 text-xs text-zinc-500 flex-wrap">
         <span class="flex items-center gap-1"><span class="badge badge-US">US</span> US Market</span>
         <span class="flex items-center gap-1"><span class="badge badge-HK">HK</span> HK Market</span>
         <span class="flex items-center gap-1"><span class="badge badge-mine" style="outline-offset:0">X</span> In my watchlist</span>
+        <span class="flex items-center gap-1"><span class="before-tag">B</span> Before Open</span>
+        <span class="flex items-center gap-1"><span class="after-tag">A</span> After Close</span>
+        <span class="flex items-center gap-1"><span class="beat">↑</span> Beat</span>
+        <span class="flex items-center gap-1"><span class="miss">↓</span> Miss</span>
+      </div>
+    </div>
+
+    <!-- Detail Panel (slide-in from right) -->
+    <div v-if="selectedEarning" class="fixed inset-0 z-50 flex justify-end" @click.self="selectedEarning = null">
+      <div class="bg-zinc-900 border-l border-zinc-800 w-full max-w-sm overflow-y-auto shadow-2xl" @click.stop>
+        <div class="p-5">
+          <div class="flex items-center justify-between mb-4">
+            <div>
+              <span class="text-xl font-bold text-zinc-100">{{ selectedEarning.symbol }}</span>
+              <span class="badge ml-2" :class="'badge-' + selectedEarning.market">{{ selectedEarning.market }}</span>
+            </div>
+            <button @click="selectedEarning = null" class="text-zinc-500 hover:text-zinc-300 transition">
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+            </button>
+          </div>
+
+          <p class="text-sm text-zinc-400 mb-4" v-if="selectedEarning.company_name">{{ selectedEarning.company_name }}</p>
+
+          <div class="detail-panel p-4 mb-4">
+            <div class="detail-row">
+              <span class="detail-label">Report Date</span>
+              <span class="detail-value">{{ selectedEarning.report_date }}</span>
+            </div>
+            <div class="detail-row">
+              <span class="detail-label">Timing</span>
+              <span class="detail-value">
+                <span v-if="selectedEarning.before_after === 'before'" class="before-tag">Before Open</span>
+                <span v-else-if="selectedEarning.before_after === 'after'" class="after-tag">After Close</span>
+                <span v-else-if="selectedEarning.before_after === 'during'">During Market</span>
+                <span v-else class="text-zinc-600">TBD</span>
+              </span>
+            </div>
+            <div class="detail-row" v-if="selectedEarning.fiscal_year">
+              <span class="detail-label">Fiscal Period</span>
+              <span class="detail-value">FY{{ selectedEarning.fiscal_year }} Q{{ selectedEarning.fiscal_quarter }}</span>
+            </div>
+          </div>
+
+          <h4 class="text-sm font-semibold text-zinc-300 mb-2">Earnings per Share</h4>
+          <div class="detail-panel p-4 mb-4">
+            <div class="detail-row">
+              <span class="detail-label">Estimate</span>
+              <span class="detail-value">{{ selectedEarning.eps_estimate != null ? fmtNum(selectedEarning.eps_estimate) : '—' }}</span>
+            </div>
+            <div class="detail-row">
+              <span class="detail-label">Actual</span>
+              <span class="detail-value">
+                <template v-if="selectedEarning.eps_actual != null">
+                  <span :class="epsSurplusClass(selectedEarning)">{{ fmtNum(selectedEarning.eps_actual) }}</span>
+                </template>
+                <template v-else>Pending</template>
+              </span>
+            </div>
+            <div class="detail-row" v-if="selectedEarning.eps_estimate != null && selectedEarning.eps_actual != null">
+              <span class="detail-label">Surprise</span>
+              <span class="detail-value" :class="epsSurplusClass(selectedEarning)">
+                {{ epsSurplus(selectedEarning) > 0 ? '+' : '' }}{{ fmtPct(epsSurplus(selectedEarning)) }}
+              </span>
+            </div>
+          </div>
+
+          <h4 class="text-sm font-semibold text-zinc-300 mb-2">Revenue</h4>
+          <div class="detail-panel p-4 mb-4">
+            <div class="detail-row">
+              <span class="detail-label">Estimate</span>
+              <span class="detail-value">{{ selectedEarning.revenue_estimate != null ? fmtBigNum(selectedEarning.revenue_estimate) : '—' }}</span>
+            </div>
+            <div class="detail-row">
+              <span class="detail-label">Actual</span>
+              <span class="detail-value">
+                <template v-if="selectedEarning.revenue_actual != null">
+                  <span :class="revSurplusClass(selectedEarning)">{{ fmtBigNum(selectedEarning.revenue_actual) }}</span>
+                </template>
+                <template v-else>Pending</template>
+              </span>
+            </div>
+            <div class="detail-row" v-if="selectedEarning.revenue_estimate != null && selectedEarning.revenue_actual != null">
+              <span class="detail-label">Surprise</span>
+              <span class="detail-value" :class="revSurplusClass(selectedEarning)">
+                {{ revSurplus(selectedEarning) > 0 ? '+' : '' }}{{ fmtPct(revSurplus(selectedEarning)) }}
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Day Detail Modal (when clicking a cell with multiple) -->
+    <div v-if="selectedDay" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" @click.self="selectedDay = null">
+      <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 max-w-lg w-full mx-4 shadow-2xl max-h-[80vh] overflow-y-auto">
+        <div class="flex items-center justify-between mb-4">
+          <h3 class="text-lg font-semibold text-zinc-100">{{ selectedDay.date.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' }) }}</h3>
+          <button @click="selectedDay = null" class="text-zinc-500 hover:text-zinc-300 transition">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <div class="space-y-2">
+          <div v-for="e in selectedDay.earnings" :key="e.symbol+e.market"
+               class="flex items-center gap-3 p-3 rounded-lg bg-zinc-800/50 hover:bg-zinc-800 cursor-pointer transition"
+               @click="selectedDay = null; selectEarning(e)">
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-2">
+                <span class="text-sm font-semibold text-zinc-200">{{ e.symbol }}</span>
+                <span class="badge" :class="'badge-' + e.market">{{ e.market }}</span>
+                <span v-if="e.before_after === 'before'" class="before-tag">B</span>
+                <span v-else-if="e.before_after === 'after'" class="after-tag">A</span>
+              </div>
+              <p class="text-xs text-zinc-500 truncate" v-if="e.company_name">{{ e.company_name }}</p>
+            </div>
+            <div class="text-right text-xs" v-if="e.eps_estimate != null || e.eps_actual != null">
+              <div v-if="e.eps_actual != null" :class="epsSurplusClass(e)">
+                {{ fmtNum(e.eps_actual) }}
+              </div>
+              <div v-else class="text-zinc-500">
+                Est: {{ fmtNum(e.eps_estimate) }}
+              </div>
+            </div>
+            <div v-if="e.eps_estimate != null && e.eps_actual != null" class="text-xs">
+              <span :class="epsSurplusClass(e)">{{ epsSurplus(e) > 0 ? '+' : '' }}{{ fmtPct(epsSurplus(e)) }}</span>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -188,7 +331,6 @@
       <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 max-w-md w-full mx-4 shadow-2xl">
         <h3 class="text-lg font-semibold text-zinc-100 mb-2">Calendar Subscription</h3>
         <p class="text-sm text-zinc-400 mb-4">Subscribe to your earnings calendar in Apple Calendar, Google Calendar, or Outlook.</p>
-
         <div class="bg-zinc-800 rounded-lg p-3 mb-4">
           <label class="text-xs text-zinc-500 block mb-1">Subscription URL</label>
           <div class="flex gap-2">
@@ -198,13 +340,11 @@
             </button>
           </div>
         </div>
-
         <div class="space-y-2 text-xs text-zinc-500">
           <p><strong class="text-zinc-400">Apple Calendar:</strong> File → New Calendar Subscription → paste URL</p>
           <p><strong class="text-zinc-400">Google Calendar:</strong> Other calendars → From URL → paste URL</p>
           <p><strong class="text-zinc-400">Outlook:</strong> Add calendar → Subscribe from web → paste URL</p>
         </div>
-
         <div class="mt-4 flex justify-end">
           <button @click="showIcalModal = false" class="text-sm text-zinc-400 hover:text-zinc-200 transition">Close</button>
         </div>
@@ -238,6 +378,8 @@
       const icalUrl = ref('');
       const copied = ref(false);
       const toast = ref('');
+      const selectedEarning = ref(null);
+      const selectedDay = ref(null);
 
       const weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
@@ -262,15 +404,12 @@
         const today = new Date();
 
         let startDate, endDate;
-
         if (viewMode.value === 'month') {
           const firstDay = new Date(year, month, 1);
           const lastDay = new Date(year, month + 1, 0);
-          const startOffset = firstDay.getDay();
-          startDate = new Date(year, month, 1 - startOffset);
+          startDate = new Date(year, month, 1 - firstDay.getDay());
           endDate = new Date(year, month + 1, 0 + (6 - lastDay.getDay()));
         } else {
-          // Week view: show week containing currentDate
           const dayOfWeek = d.getDay();
           startDate = new Date(year, month, d.getDate() - dayOfWeek);
           endDate = new Date(year, month, d.getDate() + (6 - dayOfWeek));
@@ -303,10 +442,7 @@
 
       async function loadUser() {
         const data = await apiFetch('/api/me');
-        if (data) {
-          user.value = data;
-          icalUrl.value = data.ical_url;
-        }
+        if (data) { user.value = data; icalUrl.value = data.ical_url; }
       }
 
       async function loadWatchlist() {
@@ -339,7 +475,7 @@
         await apiFetch(`/api/watchlist?symbol=${encodeURIComponent(symbol)}&market=${encodeURIComponent(market)}`, { method: 'POST' });
         await loadWatchlist();
         await loadEarnings();
-        showToast(`Added ${symbol} to watchlist`);
+        showToast('Added ' + symbol + ' to watchlist');
         searchQuery.value = '';
         searchResults.value = [];
         showSearch.value = false;
@@ -349,11 +485,57 @@
         await apiFetch(`/api/watchlist?symbol=${encodeURIComponent(symbol)}&market=${encodeURIComponent(market)}`, { method: 'DELETE' });
         await loadWatchlist();
         await loadEarnings();
-        showToast(`Removed ${symbol} from watchlist`);
+        showToast('Removed ' + symbol + ' from watchlist');
       }
 
       function isMine(earning) {
         return watchlist.value.some(w => w.symbol === earning.symbol && w.market === earning.market);
+      }
+
+      function epsSurplus(e) {
+        if (e.eps_estimate == null || e.eps_actual == null) return 0;
+        return e.eps_actual - e.eps_estimate;
+      }
+      function epsSurplusClass(e) {
+        const s = epsSurplus(e);
+        return s > 0.001 ? 'beat' : s < -0.001 ? 'miss' : '';
+      }
+      function revSurplus(e) {
+        if (e.revenue_estimate == null || e.revenue_actual == null) return 0;
+        return e.revenue_actual - e.revenue_estimate;
+      }
+      function revSurplusClass(e) {
+        const s = revSurplus(e);
+        return s > 0 ? 'beat' : s < 0 ? 'miss' : '';
+      }
+
+      function fmtNum(n) {
+        if (n == null) return '—';
+        return Number(n).toFixed(2);
+      }
+      function fmtPct(ratio) {
+        if (ratio == null) return '—';
+        return (ratio * 100).toFixed(1) + '%';
+      }
+      function fmtBigNum(n) {
+        if (n == null) return '—';
+        const v = Number(n);
+        if (Math.abs(v) >= 1e12) return (v / 1e12).toFixed(2) + 'T';
+        if (Math.abs(v) >= 1e9) return (v / 1e9).toFixed(2) + 'B';
+        if (Math.abs(v) >= 1e6) return (v / 1e6).toFixed(1) + 'M';
+        return v.toLocaleString();
+      }
+
+      function selectCell(cell) {
+        if (cell.earnings.length === 0) return;
+        if (cell.earnings.length === 1) {
+          selectedEarning.value = cell.earnings[0];
+        } else {
+          selectedDay.value = cell;
+        }
+      }
+      function selectEarning(e) {
+        selectedEarning.value = e;
       }
 
       function prevMonth() {
@@ -364,9 +546,7 @@
         const d = currentDate.value;
         currentDate.value = new Date(d.getFullYear(), d.getMonth() + (viewMode.value === 'week' ? 0 : 1), viewMode.value === 'week' ? d.getDate() + 7 : 1);
       }
-      function goToday() {
-        currentDate.value = new Date();
-      }
+      function goToday() { currentDate.value = new Date(); }
 
       function login() {
         window.location.href = 'https://kazusa.feng.moe/auth/login?redirect=' + encodeURIComponent(window.location.href);
@@ -395,9 +575,12 @@
         user, earnings, watchlist, viewMode, currentDate, watchlistOnly,
         showSearch, showIcalModal, searchQuery, searchResults, searchLoading,
         icalUrl, copied, toast, weekdays, monthLabel, calendarCells,
-        popularSuggestions,
+        popularSuggestions, selectedEarning, selectedDay,
         prevMonth, nextMonth, goToday, login, copyIcal,
         doSearch, addToWatchlist, removeFromWatchlist, isMine, showToast,
+        selectCell, selectEarning,
+        epsSurplus, epsSurplusClass, revSurplus, revSurplusClass,
+        fmtNum, fmtPct, fmtBigNum,
       };
     }
   }).mount('#app');
