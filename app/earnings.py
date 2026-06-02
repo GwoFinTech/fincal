@@ -7,14 +7,14 @@ logger = logging.getLogger(__name__)
 
 
 def _get_popular_stocks():
-    """Read popular stocks from tsummt.watchlist, fallback to hardcoded."""
+    """Read popular stocks from configured watchlist source, fallback to hardcoded."""
     try:
-        from .tsummt_watchlist import get_symbols_by_market
-        syms = get_symbols_by_market()
+        from .watchlist import get_source
+        syms = get_source().get_symbols_by_market()
         if syms["US"] or syms["HK"]:
             return syms["US"], syms["HK"]
     except Exception as e:
-        logger.warning(f"Failed to load tsummt watchlist: {e}")
+        logger.warning(f"Failed to load watchlist: {e}")
     # Fallback
     return (
         ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA"],

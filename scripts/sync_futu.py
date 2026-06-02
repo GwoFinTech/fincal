@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.db import db_cursor
 from app.symbol import from_futu_code, to_futu_code
-from app.tsummt_watchlist import get_futu_symbols
+from app.watchlist import get_source
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -31,7 +31,7 @@ def sync_earnings_dates():
     batch = []
     total = 0
 
-    for symbol in get_futu_symbols():
+    for symbol in get_source().get_futu_symbols():
         futu_code = to_futu_code(symbol)
         market = symbol.rsplit(".", 1)[-1]
         try:
@@ -102,7 +102,7 @@ def sync_actuals():
         return
 
     total = 0
-    for symbol in get_futu_symbols():
+    for symbol in get_source().get_futu_symbols():
         futu_code = to_futu_code(symbol)
         market = symbol.rsplit(".", 1)[-1]
         try:

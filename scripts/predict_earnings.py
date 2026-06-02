@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.db import db_cursor
 from app.symbol import normalize
-from app.tsummt_watchlist import get_symbols_by_market
+from app.watchlist import get_source
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -281,7 +281,7 @@ if __name__ == "__main__":
     logger.info("Predicting future earnings dates...")
     total = 0
     all_symbols = []
-    for mkt, syms in get_symbols_by_market().items():
+    for mkt, syms in get_source().get_symbols_by_market().items():
         for s in syms:
             all_symbols.append((s, mkt))
     for i, (symbol, market) in enumerate(all_symbols):

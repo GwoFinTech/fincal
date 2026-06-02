@@ -19,6 +19,11 @@ DB_PASSWORD = os.getenv("DB_PASSWORD", "")
 # tsummt DB (for shared watchlist)
 TSUMMT_DB = os.getenv("TSUMMT_DB", "tsummt")
 
+# Watchlist data source: "tsummt" (direct DB) or "http" (remote API)
+WATCHLIST_SOURCE = os.getenv("WATCHLIST_SOURCE", "tsummt")
+WATCHLIST_HTTP_URL = os.getenv("WATCHLIST_HTTP_URL", "")
+WATCHLIST_HTTP_FIELD = os.getenv("WATCHLIST_HTTP_FIELD", "code")
+
 # Futu OpenD connection
 FUTU_HOST = os.getenv("FUTU_HOST", "172.17.0.1")
 FUTU_PORT = int(os.getenv("FUTU_PORT", "11111"))
