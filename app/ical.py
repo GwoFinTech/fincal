@@ -45,13 +45,16 @@ def generate_ical(earnings: list[dict], user_email: str = "") -> str:
             time_label = ""
 
         fq_str = f"Q{fq}" if fq else ""
-        summary = f"{symbol} ({market}) {fq_str} Earnings"
+        is_pred = e.get("is_predicted", False)
+        pred_marker = " [预测]" if is_pred else ""
+        summary = f"{symbol} ({market}) {fq_str} Earnings{pred_marker}"
         desc_parts = [f"Company: {company}" if company else "",
                       f"Fiscal: FY{fy} {fq_str}" if fy else "",
                       f"Timing: {time_label}" if time_label else "",
+                      f"⚠ Predicted date (not confirmed)" if is_pred else "",
                       f"EPS Est: {e.get('eps_estimate')}" if e.get('eps_estimate') else "",
                       f"EPS Actual: {e.get('eps_actual')}" if e.get('eps_actual') else ""]
-        desc = "\\n".join(p for p in desc_parts if p)
+        desc = "\\\\n".join(p for p in desc_parts if p)
 
         dt_str = report_date.strftime("%Y%m%d")
         uid = f"fincal-{symbol}-{market}-{dt_str}-{uuid.uuid4().hex[:8]}@{config.APP_NAME}"
@@ -68,7 +71,7 @@ def generate_ical(earnings: list[dict], user_email: str = "") -> str:
             lines.append(f"DTSTART;VALUE=DATE:{dt_str}")
             lines.append(f"DTEND;VALUE=DATE:{dt_str}")
 
-        lines.append(f"STATUS:CONFIRMED")
+        lines.append(f"STATUS:{'TENTATIVE' if is_pred else 'CONFIRMED'}")
         lines.append("END:VEVENT")
 
     lines.append("END:VCALENDAR")

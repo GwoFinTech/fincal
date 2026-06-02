@@ -23,6 +23,8 @@
     .badge-US { background: #1e3a5f; color: #60a5fa; }
     .badge-HK { background: #3b1f2b; color: #f472b6; }
     .badge-mine { outline: 2px solid #a78bfa; outline-offset: -1px; }
+    .badge-predicted { opacity: 0.7; border: 1px dashed #71717a; }
+    .predicted-tag { font-size: 0.5rem; background: #3f3f46; color: #a1a1aa; padding: 0 2px; border-radius: 2px; line-height: 1.4; }
 
     .beat { color: #4ade80; font-weight: 600; }
     .miss { color: #f87171; font-weight: 600; }
@@ -174,8 +176,8 @@
           </div>
           <div class="space-y-0.5 overflow-y-auto" style="max-height: 80px;">
             <div v-for="e in cell.earnings.slice(0, 5)" :key="e.symbol+e.market"
-                 class="badge cursor-pointer" :class="[('badge-' + e.market), { 'badge-mine': isMine(e) }]"
-                 :title="e.company_name"
+                 class="badge cursor-pointer" :class="[('badge-' + e.market), { 'badge-mine': isMine(e), 'badge-predicted': e.is_predicted }]"
+                 :title="e.company_name + (e.is_predicted ? ' (预测)' : '')"
                  @click.stop="selectEarning(e)">
               <span v-if="e.before_after === 'before'" class="before-tag">B</span>
               <span v-else-if="e.before_after === 'after'" class="after-tag">A</span>
@@ -183,6 +185,7 @@
               <template v-if="e.eps_estimate != null && e.eps_actual != null">
                 <span :class="epsSurplusClass(e)">{{ epsSurplus(e) > 0 ? '↑' : epsSurplus(e) < 0 ? '↓' : '=' }}</span>
               </template>
+              <span v-if="e.is_predicted" class="predicted-tag">预测</span>
             </div>
             <div v-if="cell.earnings.length > 5" class="text-[0.6rem] text-zinc-600">
               +{{ cell.earnings.length - 5 }} more
@@ -200,6 +203,7 @@
         <span class="flex items-center gap-1"><span class="after-tag">A</span> After Close</span>
         <span class="flex items-center gap-1"><span class="beat">↑</span> Beat</span>
         <span class="flex items-center gap-1"><span class="miss">↓</span> Miss</span>
+        <span class="flex items-center gap-1"><span class="badge badge-predicted" style="outline:none;border:1px dashed #71717a">X</span> Predicted</span>
       </div>
     </div>
 
@@ -211,6 +215,7 @@
             <div>
               <span class="text-xl font-bold text-zinc-100">{{ selectedEarning.symbol }}</span>
               <span class="badge ml-2" :class="'badge-' + selectedEarning.market">{{ selectedEarning.market }}</span>
+              <span v-if="selectedEarning.is_predicted" class="predicted-tag ml-2">预测</span>
             </div>
             <button @click="selectedEarning = null" class="text-zinc-500 hover:text-zinc-300 transition">
               <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
@@ -307,6 +312,7 @@
                 <span class="badge" :class="'badge-' + e.market">{{ e.market }}</span>
                 <span v-if="e.before_after === 'before'" class="before-tag">B</span>
                 <span v-else-if="e.before_after === 'after'" class="after-tag">A</span>
+                <span v-if="e.is_predicted" class="predicted-tag">预测</span>
               </div>
               <p class="text-xs text-zinc-500 truncate" v-if="e.company_name">{{ e.company_name }}</p>
             </div>
