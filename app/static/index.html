@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FinCal — Earnings Calendar</title>
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    * { font-family: 'Inter', system-ui, sans-serif; }
+    body { background: #0a0a0b; color: #e4e4e7; }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #18181b; }
+    ::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 3px; }
+
+    .fade-enter-active, .fade-leave-active { transition: opacity 0.2s; }
+    .fade-enter-from, .fade-leave-to { opacity: 0; }
+
+    .calendar-cell { min-height: 100px; }
+    .badge { font-size: 0.65rem; padding: 1px 6px; border-radius: 9999px; font-weight: 500; white-space: nowrap; }
+    .badge-US { background: #1e3a5f; color: #60a5fa; }
+    .badge-HK { background: #3b1f2b; color: #f472b6; }
+    .badge-mine { outline: 2px solid #a78bfa; outline-offset: -1px; }
+
+    .tab-active { border-bottom: 2px solid #8b5cf6; color: #c4b5fd; }
+    .tab-inactive { border-bottom: 2px solid transparent; color: #71717a; }
+    .tab-inactive:hover { color: #a1a1aa; }
+
+    .toast { animation: slideIn 0.3s ease, fadeOut 0.3s ease 2.7s; }
+    @keyframes slideIn { from { transform: translateY(-20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+    @keyframes fadeOut { from { opacity: 1; } to { opacity: 0; } }
+
+    .pulse { animation: pulse 2s infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+  </style>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            zinc: { 850: '#1f1f23', 950: '#0a0a0b' }
+          }
+        }
+      }
+    }
+  </script>
+</head>
+<body class="min-h-screen">
+  <div id="app">
+    <!-- Header -->
+    <header class="sticky top-0 z-40 bg-zinc-950/80 backdrop-blur-lg border-b border-zinc-800">
+      <div class="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
+        <div class="flex items-center gap-3">
+          <div class="w-8 h-8 rounded-lg bg-violet-600 flex items-center justify-center text-white font-bold text-sm">FC</div>
+          <h1 class="text-lg font-semibold text-zinc-100">FinCal</h1>
+          <span class="text-xs text-zinc-500 hidden sm:inline">Earnings Calendar</span>
+        </div>
+        <div class="flex items-center gap-3">
+          <span v-if="user" class="text-sm text-zinc-400">{{ user.name || user.email }}</span>
+          <button v-if="!user" @click="login" class="text-sm px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white transition">Login</button>
+        </div>
+      </div>
+    </header>
+
+    <!-- Controls -->
+    <div class="max-w-7xl mx-auto px-4 py-4 flex flex-wrap items-center gap-3">
+      <!-- View toggle -->
+      <div class="flex border-b border-zinc-800">
+        <button @click="viewMode='month'" :class="viewMode==='month' ? 'tab-active' : 'tab-inactive'" class="pb-2 px-3 text-sm font-medium transition">Month</button>
+        <button @click="viewMode='week'" :class="viewMode==='week' ? 'tab-active' : 'tab-inactive'" class="pb-2 px-3 text-sm font-medium transition">Week</button>
+      </div>
+
+      <!-- Month nav -->
+      <div class="flex items-center gap-2">
+        <button @click="prevMonth" class="p-1 rounded hover:bg-zinc-800 text-zinc-400 transition">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+        </button>
+        <span class="text-sm font-medium text-zinc-300 min-w-[140px] text-center">{{ monthLabel }}</span>
+        <button @click="nextMonth" class="p-1 rounded hover:bg-zinc-800 text-zinc-400 transition">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+        </button>
+        <button @click="goToday" class="text-xs px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-400 transition">Today</button>
+      </div>
+
+      <div class="flex-1"></div>
+
+      <!-- Watchlist filter -->
+      <label v-if="user" class="flex items-center gap-2 cursor-pointer text-sm text-zinc-400">
+        <input type="checkbox" v-model="watchlistOnly" @change="loadEarnings" class="accent-violet-500 w-4 h-4 rounded" />
+        Only my watchlist
+      </label>
+
+      <!-- Subscription button -->
+      <button v-if="user" @click="showIcalModal = true" class="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 transition">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+        Calendar Sync
+      </button>
+
+      <!-- Add to watchlist -->
+      <div v-if="user" class="relative">
+        <button @click="showSearch = !showSearch" class="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white transition">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+          Add Stock
+        </button>
+      </div>
+    </div>
+
+    <!-- Search panel -->
+    <div v-if="showSearch" class="max-w-7xl mx-auto px-4 pb-4">
+      <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
+        <div class="flex gap-2 mb-3">
+          <input v-model="searchQuery" @input="doSearch" placeholder="Search symbol or company name..." class="flex-1 bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-violet-500" />
+          <button @click="showSearch = false" class="text-zinc-500 hover:text-zinc-300 text-sm px-3">Cancel</button>
+        </div>
+        <div class="flex flex-wrap gap-1.5 mb-3" v-if="searchResults.length === 0 && !searchLoading">
+          <span class="text-xs text-zinc-500">Popular:</span>
+          <button v-for="s in popularSuggestions" :key="s.symbol+s.market" @click="addToWatchlist(s.symbol, s.market)" class="text-xs px-2 py-0.5 rounded-full bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 transition">
+            {{ s.symbol }} <span class="text-zinc-600">{{ s.market }}</span>
+          </button>
+        </div>
+        <div v-if="searchLoading" class="text-sm text-zinc-500 pulse">Searching...</div>
+        <div v-else class="space-y-1 max-h-48 overflow-y-auto">
+          <button v-for="r in searchResults" :key="r.symbol+r.market" @click="addToWatchlist(r.symbol, r.market)" class="w-full text-left px-3 py-2 rounded-lg hover:bg-zinc-800 text-sm flex items-center justify-between group transition">
+            <span>
+              <span class="text-zinc-200 font-medium">{{ r.symbol }}</span>
+              <span class="text-zinc-500 ml-2" v-if="r.company_name">{{ r.company_name }}</span>
+            </span>
+            <span class="badge" :class="'badge-' + r.market">{{ r.market }}</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Watchlist sidebar pills -->
+    <div v-if="user && watchlist.length > 0" class="max-w-7xl mx-auto px-4 pb-3">
+      <div class="flex flex-wrap gap-1.5">
+        <span class="text-xs text-zinc-500 py-0.5">My stocks:</span>
+        <span v-for="w in watchlist" :key="w.symbol+w.market" class="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-300 border border-zinc-700 group">
+          {{ w.symbol }}
+          <span class="badge" :class="'badge-' + w.market" style="font-size:0.55rem">{{ w.market }}</span>
+          <button @click="removeFromWatchlist(w.symbol, w.market)" class="text-zinc-600 hover:text-red-400 transition opacity-0 group-hover:opacity-100" title="Remove">&times;</button>
+        </span>
+      </div>
+    </div>
+
+    <!-- Calendar -->
+    <div class="max-w-7xl mx-auto px-4 pb-8">
+      <!-- Weekday headers -->
+      <div class="grid gap-px bg-zinc-800 rounded-t-xl overflow-hidden" :class="viewMode === 'month' ? 'grid-cols-7' : 'grid-cols-7'">
+        <div v-for="d in weekdays" :key="d" class="bg-zinc-900 px-3 py-2 text-xs font-medium text-zinc-500 text-center uppercase">{{ d }}</div>
+      </div>
+
+      <!-- Calendar grid -->
+      <div class="grid gap-px bg-zinc-800 rounded-b-xl overflow-hidden" :class="viewMode === 'month' ? 'grid-cols-7' : 'grid-cols-7'">
+        <div v-for="(cell, idx) in calendarCells" :key="idx"
+             class="calendar-cell bg-zinc-900 p-1.5 relative overflow-hidden"
+             :class="{ 'bg-zinc-950': !cell.inMonth }">
+          <div class="flex items-center justify-between mb-1">
+            <span class="text-xs font-medium" :class="cell.isToday ? 'bg-violet-600 text-white w-6 h-6 rounded-full flex items-center justify-center' : (cell.inMonth ? 'text-zinc-400' : 'text-zinc-700')">
+              {{ cell.day }}
+            </span>
+          </div>
+          <div class="space-y-0.5 overflow-y-auto" style="max-height: 80px;">
+            <div v-for="e in cell.earnings" :key="e.symbol+e.market"
+                 class="badge cursor-default" :class="[('badge-' + e.market), { 'badge-mine': isMine(e) }]"
+                 :title="e.company_name + ' (' + e.market + ')'">
+              {{ e.symbol }}
+            </div>
+            <div v-if="cell.earnings.length > 4" class="text-[0.6rem] text-zinc-600">
+              +{{ cell.earnings.length - 4 }} more
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Legend -->
+      <div class="flex items-center gap-4 mt-3 text-xs text-zinc-500">
+        <span class="flex items-center gap-1"><span class="badge badge-US">US</span> US Market</span>
+        <span class="flex items-center gap-1"><span class="badge badge-HK">HK</span> HK Market</span>
+        <span class="flex items-center gap-1"><span class="badge badge-mine" style="outline-offset:0">X</span> In my watchlist</span>
+      </div>
+    </div>
+
+    <!-- iCal Modal -->
+    <div v-if="showIcalModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" @click.self="showIcalModal = false">
+      <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 max-w-md w-full mx-4 shadow-2xl">
+        <h3 class="text-lg font-semibold text-zinc-100 mb-2">Calendar Subscription</h3>
+        <p class="text-sm text-zinc-400 mb-4">Subscribe to your earnings calendar in Apple Calendar, Google Calendar, or Outlook.</p>
+
+        <div class="bg-zinc-800 rounded-lg p-3 mb-4">
+          <label class="text-xs text-zinc-500 block mb-1">Subscription URL</label>
+          <div class="flex gap-2">
+            <input :value="icalUrl" readonly class="flex-1 bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs text-zinc-300 font-mono" />
+            <button @click="copyIcal" class="px-3 py-1.5 rounded bg-violet-600 hover:bg-violet-500 text-white text-xs transition">
+              {{ copied ? 'Copied!' : 'Copy' }}
+            </button>
+          </div>
+        </div>
+
+        <div class="space-y-2 text-xs text-zinc-500">
+          <p><strong class="text-zinc-400">Apple Calendar:</strong> File → New Calendar Subscription → paste URL</p>
+          <p><strong class="text-zinc-400">Google Calendar:</strong> Other calendars → From URL → paste URL</p>
+          <p><strong class="text-zinc-400">Outlook:</strong> Add calendar → Subscribe from web → paste URL</p>
+        </div>
+
+        <div class="mt-4 flex justify-end">
+          <button @click="showIcalModal = false" class="text-sm text-zinc-400 hover:text-zinc-200 transition">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Toast -->
+    <div v-if="toast" class="fixed top-20 right-4 z-50 toast">
+      <div class="bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2 text-sm text-zinc-200 shadow-lg">
+        {{ toast }}
+      </div>
+    </div>
+  </div>
+
+  <script>
+  const { createApp, ref, computed, onMounted, watch } = Vue;
+
+  createApp({
+    setup() {
+      const user = ref(null);
+      const earnings = ref([]);
+      const watchlist = ref([]);
+      const viewMode = ref('month');
+      const currentDate = ref(new Date());
+      const watchlistOnly = ref(false);
+      const showSearch = ref(false);
+      const showIcalModal = ref(false);
+      const searchQuery = ref('');
+      const searchResults = ref([]);
+      const searchLoading = ref(false);
+      const icalUrl = ref('');
+      const copied = ref(false);
+      const toast = ref('');
+
+      const weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+      const popularSuggestions = [
+        {symbol:'AAPL',market:'US'},{symbol:'NVDA',market:'US'},{symbol:'TSLA',market:'US'},
+        {symbol:'0700.HK',market:'HK'},{symbol:'9988.HK',market:'HK'},{symbol:'1810.HK',market:'HK'},
+      ];
+
+      const monthLabel = computed(() => {
+        const d = currentDate.value;
+        return d.toLocaleDateString('en-US', { year: 'numeric', month: 'long' });
+      });
+
+      function sameDay(d1, d2) {
+        return d1.getFullYear() === d2.getFullYear() && d1.getMonth() === d2.getMonth() && d1.getDate() === d2.getDate();
+      }
+
+      const calendarCells = computed(() => {
+        const d = currentDate.value;
+        const year = d.getFullYear();
+        const month = d.getMonth();
+        const today = new Date();
+
+        let startDate, endDate;
+
+        if (viewMode.value === 'month') {
+          const firstDay = new Date(year, month, 1);
+          const lastDay = new Date(year, month + 1, 0);
+          const startOffset = firstDay.getDay();
+          startDate = new Date(year, month, 1 - startOffset);
+          endDate = new Date(year, month + 1, 0 + (6 - lastDay.getDay()));
+        } else {
+          // Week view: show week containing currentDate
+          const dayOfWeek = d.getDay();
+          startDate = new Date(year, month, d.getDate() - dayOfWeek);
+          endDate = new Date(year, month, d.getDate() + (6 - dayOfWeek));
+        }
+
+        const cells = [];
+        let cursor = new Date(startDate);
+        while (cursor <= endDate) {
+          const cellDate = new Date(cursor);
+          const cellEarnings = earnings.value.filter(e => sameDay(new Date(e.report_date + 'T00:00:00'), cellDate));
+          const inMonth = cellDate.getMonth() === month;
+          cells.push({
+            date: cellDate,
+            day: cellDate.getDate(),
+            inMonth: viewMode.value === 'week' ? true : inMonth,
+            isToday: sameDay(cellDate, today),
+            earnings: cellEarnings,
+          });
+          cursor.setDate(cursor.getDate() + 1);
+        }
+        return cells;
+      });
+
+      async function apiFetch(path, opts = {}) {
+        const res = await fetch(path, { ...opts, headers: { 'Content-Type': 'application/json', ...opts.headers } });
+        if (res.status === 401) { user.value = null; return null; }
+        if (!res.ok) return null;
+        return res.json();
+      }
+
+      async function loadUser() {
+        const data = await apiFetch('/api/me');
+        if (data) {
+          user.value = data;
+          icalUrl.value = data.ical_url;
+        }
+      }
+
+      async function loadWatchlist() {
+        const data = await apiFetch('/api/watchlist');
+        if (data) watchlist.value = data;
+      }
+
+      async function loadEarnings() {
+        const d = currentDate.value;
+        const start = new Date(d.getFullYear(), d.getMonth() - 1, 1).toISOString().slice(0, 10);
+        const end = new Date(d.getFullYear(), d.getMonth() + 2, 0).toISOString().slice(0, 10);
+        const params = new URLSearchParams({ start, end, watchlistOnly: watchlistOnly.value });
+        const data = await apiFetch(`/api/earnings?${params}`);
+        if (data) earnings.value = data;
+      }
+
+      let searchTimer;
+      async function doSearch() {
+        if (searchQuery.value.length < 1) { searchResults.value = []; return; }
+        searchLoading.value = true;
+        clearTimeout(searchTimer);
+        searchTimer = setTimeout(async () => {
+          const data = await apiFetch(`/api/search?q=${encodeURIComponent(searchQuery.value)}`);
+          searchResults.value = data || [];
+          searchLoading.value = false;
+        }, 300);
+      }
+
+      async function addToWatchlist(symbol, market) {
+        await apiFetch(`/api/watchlist?symbol=${encodeURIComponent(symbol)}&market=${encodeURIComponent(market)}`, { method: 'POST' });
+        await loadWatchlist();
+        await loadEarnings();
+        showToast(`Added ${symbol} to watchlist`);
+        searchQuery.value = '';
+        searchResults.value = [];
+        showSearch.value = false;
+      }
+
+      async function removeFromWatchlist(symbol, market) {
+        await apiFetch(`/api/watchlist?symbol=${encodeURIComponent(symbol)}&market=${encodeURIComponent(market)}`, { method: 'DELETE' });
+        await loadWatchlist();
+        await loadEarnings();
+        showToast(`Removed ${symbol} from watchlist`);
+      }
+
+      function isMine(earning) {
+        return watchlist.value.some(w => w.symbol === earning.symbol && w.market === earning.market);
+      }
+
+      function prevMonth() {
+        const d = currentDate.value;
+        currentDate.value = new Date(d.getFullYear(), d.getMonth() - (viewMode.value === 'week' ? 0 : 1), viewMode.value === 'week' ? d.getDate() - 7 : 1);
+      }
+      function nextMonth() {
+        const d = currentDate.value;
+        currentDate.value = new Date(d.getFullYear(), d.getMonth() + (viewMode.value === 'week' ? 0 : 1), viewMode.value === 'week' ? d.getDate() + 7 : 1);
+      }
+      function goToday() {
+        currentDate.value = new Date();
+      }
+
+      function login() {
+        window.location.href = 'https://kazusa.feng.moe/auth/login?redirect=' + encodeURIComponent(window.location.href);
+      }
+
+      function copyIcal() {
+        navigator.clipboard.writeText(icalUrl.value);
+        copied.value = true;
+        setTimeout(() => copied.value = false, 2000);
+      }
+
+      function showToast(msg) {
+        toast.value = msg;
+        setTimeout(() => toast.value = '', 3000);
+      }
+
+      watch(currentDate, loadEarnings);
+
+      onMounted(async () => {
+        await loadUser();
+        if (user.value) await loadWatchlist();
+        await loadEarnings();
+      });
+
+      return {
+        user, earnings, watchlist, viewMode, currentDate, watchlistOnly,
+        showSearch, showIcalModal, searchQuery, searchResults, searchLoading,
+        icalUrl, copied, toast, weekdays, monthLabel, calendarCells,
+        popularSuggestions,
+        prevMonth, nextMonth, goToday, login, copyIcal,
+        doSearch, addToWatchlist, removeFromWatchlist, isMine, showToast,
+      };
+    }
+  }).mount('#app');
+  </script>
+</body>
+</html>

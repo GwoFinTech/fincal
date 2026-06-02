@@ -1,0 +1,33 @@
+version: "3.8"
+
+services:
+  fincal:
+    build: .
+    container_name: fincal
+    restart: unless-stopped
+    env_file: .env
+    labels:
+      - "traefik.enable=true"
+      # iCal feed route — no auth (higher priority = more specific)
+      - "traefik.http.routers.fincal-ical.rule=Host(`fincal.kazusa.feng.moe`) && PathPrefix(`/ical/`)"
+      - "traefik.http.routers.fincal-ical.entrypoints=websecure"
+      - "traefik.http.routers.fincal-ical.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.fincal-ical.priority=100"
+      - "traefik.http.routers.fincal-ical.service=fincal-svc"
+      # Main route — with forwardAuth
+      - "traefik.http.routers.fincal.rule=Host(`fincal.kazusa.feng.moe`)"
+      - "traefik.http.routers.fincal.entrypoints=websecure"
+      - "traefik.http.routers.fincal.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.fincal.middlewares=kazusa-auth@docker"
+      - "traefik.http.routers.fincal.priority=10"
+      - "traefik.http.routers.fincal.service=fincal-svc"
+      # Shared service
+      - "traefik.http.services.fincal-svc.loadbalancer.server.port=8000"
+    networks:
+      - traefik_traefik-net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+networks:
+  traefik_traefik-net:
+    external: true
