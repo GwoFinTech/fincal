@@ -32,8 +32,9 @@
     .surprise-beat { background: #4ade80; }
     .surprise-miss { background: #f87171; }
 
-    .before-tag { font-size: 0.55rem; background: #1c3a5c; color: #7dd3fc; padding: 0 3px; border-radius: 2px; }
-    .after-tag { font-size: 0.55rem; background: #3b1f2b; color: #fbb6ce; padding: 0 3px; border-radius: 2px; }
+    .before-tag { font-size: 0.5rem; background: #1c3a5c; color: #7dd3fc; padding: 0 3px; border-radius: 2px; }
+    .after-tag { font-size: 0.5rem; background: #3b1f2b; color: #fbb6ce; padding: 0 3px; border-radius: 2px; }
+    .fq-tag { font-size: 0.5rem; color: #a1a1aa; }
 
     .tab-active { border-bottom: 2px solid #8b5cf6; color: #c4b5fd; }
     .tab-inactive { border-bottom: 2px solid transparent; color: #71717a; }
@@ -180,9 +181,10 @@
                  class="badge cursor-pointer" :class="[('badge-' + e.market), { 'badge-mine': isMine(e), 'badge-predicted': e.is_predicted }]"
                  :title="e.company_name + (e.is_predicted ? ' (预测)' : '')"
                  @click.stop="selectEarning(e)">
-              <span v-if="e.before_after === 'before'" class="before-tag">B</span>
-              <span v-else-if="e.before_after === 'after'" class="after-tag">A</span>
+              <span v-if="e.before_after === 'before'" class="before-tag">盘前</span>
+              <span v-else-if="e.before_after === 'after'" class="after-tag">盘后</span>
               {{ e.symbol }}
+              <span v-if="e.fiscal_year && e.fiscal_quarter" class="fq-tag">{{ fqLabel(e.fiscal_year, e.fiscal_quarter) }}</span>
               <template v-if="e.eps_estimate != null && e.eps_actual != null">
                 <span :class="epsSurplusClass(e)">{{ epsSurplus(e) > 0 ? '↑' : epsSurplus(e) < 0 ? '↓' : '=' }}</span>
               </template>
@@ -200,8 +202,8 @@
         <span class="flex items-center gap-1"><span class="badge badge-US">US</span> US Market</span>
         <span class="flex items-center gap-1"><span class="badge badge-HK">HK</span> HK Market</span>
         <span class="flex items-center gap-1"><span class="badge badge-mine" style="outline-offset:0">X</span> In my watchlist</span>
-        <span class="flex items-center gap-1"><span class="before-tag">B</span> Before Open</span>
-        <span class="flex items-center gap-1"><span class="after-tag">A</span> After Close</span>
+        <span class="flex items-center gap-1"><span class="before-tag">盘前</span></span>
+        <span class="flex items-center gap-1"><span class="after-tag">盘后</span></span>
         <span class="flex items-center gap-1"><span class="beat">↑</span> Beat</span>
         <span class="flex items-center gap-1"><span class="miss">↓</span> Miss</span>
         <span class="flex items-center gap-1"><span class="badge badge-predicted" style="outline:none;border:1px dashed #71717a">X</span> Predicted</span>
@@ -233,15 +235,15 @@
             <div class="detail-row">
               <span class="detail-label">Timing</span>
               <span class="detail-value">
-                <span v-if="selectedEarning.before_after === 'before'" class="before-tag">Before Open</span>
-                <span v-else-if="selectedEarning.before_after === 'after'" class="after-tag">After Close</span>
-                <span v-else-if="selectedEarning.before_after === 'during'">During Market</span>
+                <span v-if="selectedEarning.before_after === 'before'" class="before-tag">盘前</span>
+                <span v-else-if="selectedEarning.before_after === 'after'" class="after-tag">盘后</span>
+                <span v-else-if="selectedEarning.before_after === 'during'">盘中</span>
                 <span v-else class="text-zinc-600">TBD</span>
               </span>
             </div>
             <div class="detail-row" v-if="selectedEarning.fiscal_year">
-              <span class="detail-label">Fiscal Period</span>
-              <span class="detail-value">FY{{ selectedEarning.fiscal_year }} Q{{ selectedEarning.fiscal_quarter }}</span>
+              <span class="detail-label">财季</span>
+              <span class="detail-value">{{ fqLabel(selectedEarning.fiscal_year, selectedEarning.fiscal_quarter) }}</span>
             </div>
           </div>
 
@@ -311,8 +313,8 @@
               <div class="flex items-center gap-2">
                 <span class="text-sm font-semibold text-zinc-200">{{ e.symbol }}</span>
                 <span class="badge" :class="'badge-' + e.market">{{ e.market }}</span>
-                <span v-if="e.before_after === 'before'" class="before-tag">B</span>
-                <span v-else-if="e.before_after === 'after'" class="after-tag">A</span>
+                <span v-if="e.before_after === 'before'" class="before-tag">盘前</span>
+                <span v-else-if="e.before_after === 'after'" class="after-tag">盘后</span>
                 <span v-if="e.is_predicted" class="predicted-tag">预测</span>
               </div>
               <p class="text-xs text-zinc-500 truncate" v-if="e.company_name">{{ e.company_name }}</p>
@@ -533,6 +535,12 @@
         return v.toLocaleString();
       }
 
+      function fqLabel(fy, fq) {
+        if (!fy || !fq) return '';
+        const short = String(fy).slice(-2);
+        return short + 'Q' + fq;
+      }
+
       function selectCell(cell) {
         if (cell.earnings.length === 0) return;
         if (cell.earnings.length === 1) {
@@ -587,7 +595,7 @@
         doSearch, addToWatchlist, removeFromWatchlist, isMine, showToast,
         selectCell, selectEarning,
         epsSurplus, epsSurplusClass, revSurplus, revSurplusClass,
-        fmtNum, fmtPct, fmtBigNum,
+        fmtNum, fmtPct, fmtBigNum, fqLabel,
       };
     }
   }).mount('#app');
