@@ -16,6 +16,9 @@ DB_NAME = os.getenv("DB_NAME", "fincal")
 DB_USER = os.getenv("DB_USER", "postgres")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "")
 
+# tsummt DB (for shared watchlist)
+TSUMMT_DB = os.getenv("TSUMMT_DB", "tsummt")
+
 # Futu OpenD connection
 FUTU_HOST = os.getenv("FUTU_HOST", "172.17.0.1")
 FUTU_PORT = int(os.getenv("FUTU_PORT", "11111"))

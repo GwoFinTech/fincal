@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Fetch earnings calendar dates + actual EPS/revenue from Futu OpenD.
-Uses batched DB writes for earnings dates."""
+Uses batched DB writes for earnings dates. Reads symbol list from tsummt.watchlist."""
 import signal
 import logging
 import sys
@@ -11,21 +11,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.db import db_cursor
 from app.symbol import from_futu_code, to_futu_code
+from app.tsummt_watchlist import get_futu_symbols
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
-
-POPULAR_SYMBOLS = [
-    "AAPL.US", "MSFT.US", "GOOGL.US", "AMZN.US", "NVDA.US", "META.US",
-    "TSLA.US", "NFLX.US", "AMD.US", "INTC.US", "JPM.US", "V.US",
-    "MA.US", "HD.US", "COST.US", "ABBV.US", "CRM.US", "PYPL.US",
-    "QCOM.US", "AVGO.US", "WMT.US", "TSM.US", "ORCL.US", "ADBE.US",
-    "SBUX.US", "NKE.US", "DIS.US", "BA.US", "MRVL.US",
-    "0700.HK", "9988.HK", "0005.HK", "1299.HK", "0941.HK",
-    "2318.HK", "0388.HK", "9999.HK", "1810.HK", "2020.HK",
-    "9618.HK", "0883.HK", "0016.HK", "0001.HK", "0002.HK",
-    "0003.HK", "0011.HK", "1398.HK", "3988.HK", "2628.HK",
-]
 
 F10_TO_QUARTER = {1: 1, 2: 2, 3: 3, 4: 4}
 PUB_TYPE_MAP = {1: "before", 2: "after", 3: "during"}
@@ -42,7 +31,7 @@ def sync_earnings_dates():
     batch = []
     total = 0
 
-    for symbol in POPULAR_SYMBOLS:
+    for symbol in get_futu_symbols():
         futu_code = to_futu_code(symbol)
         market = symbol.rsplit(".", 1)[-1]
         try:
@@ -113,7 +102,7 @@ def sync_actuals():
         return
 
     total = 0
-    for symbol in POPULAR_SYMBOLS:
+    for symbol in get_futu_symbols():
         futu_code = to_futu_code(symbol)
         market = symbol.rsplit(".", 1)[-1]
         try:

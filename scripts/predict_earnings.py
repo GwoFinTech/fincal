@@ -19,24 +19,11 @@ import statistics
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.db import db_cursor
+from app.symbol import normalize
+from app.tsummt_watchlist import get_symbols_by_market
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
-
-POPULAR_SYMBOLS = {
-    "US": [
-        "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "NFLX",
-        "AMD", "INTC", "JPM", "V", "MA", "HD", "COST", "ABBV", "CRM", "PYPL",
-        "QCOM", "AVGO", "WMT", "TSM", "ORCL", "ADBE", "SBUX", "NKE", "DIS",
-        "BA", "MRVL",
-    ],
-    "HK": [
-        "0700.HK", "9988.HK", "0005.HK", "1299.HK", "0941.HK",
-        "2318.HK", "0388.HK", "9999.HK", "1810.HK", "2020.HK",
-        "9618.HK", "0883.HK", "0016.HK", "0001.HK", "0002.HK",
-        "0003.HK", "0011.HK", "1398.HK", "3988.HK", "2628.HK",
-    ],
-}
 
 # How many future quarters ahead to predict (max 4 = ~1 year)
 MAX_PREDICT_AHEAD = 4
@@ -294,7 +281,7 @@ if __name__ == "__main__":
     logger.info("Predicting future earnings dates...")
     total = 0
     all_symbols = []
-    for mkt, syms in POPULAR_SYMBOLS.items():
+    for mkt, syms in get_symbols_by_market().items():
         for s in syms:
             all_symbols.append((s, mkt))
     for i, (symbol, market) in enumerate(all_symbols):

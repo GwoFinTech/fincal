@@ -5,20 +5,23 @@ from . import config
 
 logger = logging.getLogger(__name__)
 
-# Popular large-cap stocks for the default calendar view
-POPULAR_STOCKS_US = [
-    "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "BRK.B",
-    "JPM", "V", "UNH", "XOM", "JNJ", "PG", "MA", "HD", "COST", "ABBV",
-    "CRM", "AMD", "NFLX", "ORCL", "ADBE", "INTC", "PYPL", "QCOM",
-    "SBUX", "NKE", "DIS", "BA",
-]
 
-POPULAR_STOCKS_HK = [
-    "0700.HK", "9988.HK", "0005.HK", "1299.HK", "0941.HK",
-    "2318.HK", "0388.HK", "9999.HK", "1810.HK", "2020.HK",
-    "9618.HK", "0883.HK", "0016.HK", "0001.HK", "0002.HK",
-    "0003.HK", "0011.HK", "1398.HK", "3988.HK", "2628.HK",
-]
+def _get_popular_stocks():
+    """Read popular stocks from tsummt.watchlist, fallback to hardcoded."""
+    try:
+        from .tsummt_watchlist import get_symbols_by_market
+        syms = get_symbols_by_market()
+        if syms["US"] or syms["HK"]:
+            return syms["US"], syms["HK"]
+    except Exception as e:
+        logger.warning(f"Failed to load tsummt watchlist: {e}")
+    # Fallback
+    return (
+        ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA"],
+        ["0700.HK", "9988.HK", "1810.HK"],
+    )
+
+POPULAR_STOCKS_US, POPULAR_STOCKS_HK = _get_popular_stocks()
 
 
 def fetch_earnings_from_db(
