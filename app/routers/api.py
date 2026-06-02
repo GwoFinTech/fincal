@@ -9,6 +9,14 @@ from ..symbol import normalize, sort_key, from_lb_counter_id
 router = APIRouter(prefix="/api", tags=["api"])
 
 
+@router.get("/config")
+def api_config():
+    """Public config (no auth required)."""
+    return {
+        "auth_login_url": config.AUTH_LOGIN_URL,
+    }
+
+
 @router.get("/me")
 def api_me(user=Depends(get_current_user)):
     """Get current user info + ical token."""

@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   fincal:
     build: .
@@ -8,28 +6,21 @@ services:
     env_file: .env
     labels:
       - "traefik.enable=true"
-      # iCal feed route — no auth (higher priority = more specific)
-      - "traefik.http.routers.fincal-ical.rule=Host(`fincal.kazusa.feng.moe`) && PathPrefix(`/ical/`)"
-      - "traefik.http.routers.fincal-ical.entrypoints=websecure"
-      - "traefik.http.routers.fincal-ical.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.fincal-ical.priority=100"
-      - "traefik.http.routers.fincal-ical.service=fincal-svc"
+      # Public routes — no auth (higher priority)
+      - "traefik.http.routers.fincal-public.rule=Host(`${DOMAIN}`) && (PathPrefix(`/ical/`) || Path(`/api/config`))"
+      - "traefik.http.routers.fincal-public.entrypoints=websecure"
+      - "traefik.http.routers.fincal-public.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.fincal-public.priority=100"
+      - "traefik.http.routers.fincal-public.service=fincal-svc"
       # Main route — with forwardAuth
-      - "traefik.http.routers.fincal.rule=Host(`fincal.kazusa.feng.moe`)"
+      - "traefik.http.routers.fincal.rule=Host(`${DOMAIN}`)"
       - "traefik.http.routers.fincal.entrypoints=websecure"
       - "traefik.http.routers.fincal.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.fincal.middlewares=kazusa-auth@docker"
+      - "traefik.http.routers.fincal.middlewares=${AUTH_MIDDLEWARE}"
       - "traefik.http.routers.fincal.priority=10"
       - "traefik.http.routers.fincal.service=fincal-svc"
       # Shared service
       - "traefik.http.services.fincal-svc.loadbalancer.server.port=8000"
-      # Homepage portal
-      - "homepage.enable=true"
-      - "homepage.title=fincal"
-      - "homepage.description=财务日历 — 财报、分红、IPO 日历"
-      - "homepage.icon=📅"
-      - "homepage.category=finance"
-      - "homepage.url=https://fincal.kazusa.feng.moe"
     networks:
       - traefik_traefik-net
     extra_hosts:

@@ -123,7 +123,7 @@
         </div>
         <div class="flex items-center gap-2">
           <span v-if="user" class="text-[12px] text-zinc-400">{{ user.name || user.email }}</span>
-          <button v-if="!user" @click="login" class="btn btn-primary" style="padding:4px 10px;font-size:12px;">登录</button>
+          <button v-if="!user && appConfig.auth_login_url" @click="login" class="btn btn-primary" style="padding:4px 10px;font-size:12px;">登录</button>
         </div>
       </div>
     </header>
@@ -442,6 +442,7 @@
   createApp({
     setup() {
       const user = ref(null);
+      const appConfig = ref({ auth_login_url: '' });
       const earnings = ref([]);
       const watchlist = ref([]);
       const viewMode = ref('month');
@@ -657,7 +658,10 @@
       function goToday() { currentDate.value = new Date(); }
 
       function login() {
-        window.location.href = 'https://kazusa.feng.moe/auth/login?redirect=' + encodeURIComponent(window.location.href);
+        const url = appConfig.value.auth_login_url;
+        if (url) {
+          window.location.href = url + (url.includes('?') ? '&' : '?') + 'redirect=' + encodeURIComponent(window.location.href);
+        }
       }
 
       function copyIcal() {
@@ -674,6 +678,11 @@
       watch(currentDate, loadEarnings);
 
       onMounted(async () => {
+        // Load public config first (no auth needed)
+        try {
+          const resp = await fetch('/api/config');
+          if (resp.ok) appConfig.value = await resp.json();
+        } catch {}
         await loadUser();
         if (user.value) await loadWatchlist();
         await loadEarnings();
