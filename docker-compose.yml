@@ -1,0 +1,38 @@
+services:
+  fincal:
+    build: .
+    container_name: fincal
+    restart: unless-stopped
+    env_file: .env
+    labels:
+      - "traefik.enable=true"
+      # Public routes — no auth (higher priority)
+      - "traefik.http.routers.fincal-public.rule=Host(`${DOMAIN}`) && (PathPrefix(`/ical/`) || Path(`/api/config`))"
+      - "traefik.http.routers.fincal-public.entrypoints=websecure"
+      - "traefik.http.routers.fincal-public.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.fincal-public.priority=100"
+      - "traefik.http.routers.fincal-public.service=fincal-svc"
+      # Main route — with forwardAuth
+      - "traefik.http.routers.fincal.rule=Host(`${DOMAIN}`)"
+      - "traefik.http.routers.fincal.entrypoints=websecure"
+      - "traefik.http.routers.fincal.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.fincal.middlewares=${AUTH_MIDDLEWARE}"
+      - "traefik.http.routers.fincal.priority=10"
+      - "traefik.http.routers.fincal.service=fincal-svc"
+      # Shared service
+      - "traefik.http.services.fincal-svc.loadbalancer.server.port=8000"
+      # Homepage portal (kazusa-home-portal discovery)
+      - "homepage.enable=true"
+      - "homepage.title=fincal"
+      - "homepage.description=Financial earnings calendar with iCal subscription"
+      - "homepage.icon=📅"
+      - "homepage.category=finance"
+      - "homepage.url=https://${DOMAIN}"
+    networks:
+      - traefik_traefik-net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+networks:
+  traefik_traefik-net:
+    external: true
