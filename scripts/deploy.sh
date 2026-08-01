@@ -7,6 +7,7 @@ DST="/opt/fincal/"
 echo "=== Syncing fincal: $SRC → $DST ==="
 rsync -av --delete \
   --exclude='.env' \
+  --exclude='.git' \
   --exclude='.venv' \
   --exclude='__pycache__' \
   --exclude='*.pyc' \
