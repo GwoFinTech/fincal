@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.db import db_cursor
 from app import config
-from app.symbol import from_futu_code, to_futu_code
+from app.symbol import normalize, to_futu_code
 from app.watchlist import get_source
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -52,6 +52,23 @@ def create_futu_context():
         return None
 
 
+def canonical_earnings_symbol(symbol: str) -> tuple[str, str]:
+    """Convert a watchlist symbol to the earnings table's canonical key.
+
+    The shared watchlist keeps US tickers as ``AAPL.US`` while the earnings
+    table's established US convention is the bare ticker (``AAPL``). Writing
+    the watchlist spelling directly made every Futu run create transient
+    ``*.US`` duplicates, which prediction cleanup then had to merge.
+    """
+    raw = symbol.strip().upper()
+    market = raw.rsplit(".", 1)[-1] if "." in raw else "US"
+    if market == "HK":
+        return normalize(raw, "HK"), market
+    if market == "US":
+        return raw.removesuffix(".US"), market
+    raise ValueError(f"unsupported_market:{market}")
+
+
 def sync_earnings_dates(ctx) -> int:
     """Fetch earnings calendar dates from Futu, single shared context."""
     batch = []
@@ -59,9 +76,9 @@ def sync_earnings_dates(ctx) -> int:
     cutoff = date.today() - timedelta(days=365)
     symbols = get_source().get_futu_symbols()
 
-    for symbol in symbols:
-        futu_code = to_futu_code(symbol)
-        market = symbol.rsplit(".", 1)[-1]
+    for source_symbol in symbols:
+        symbol, market = canonical_earnings_symbol(source_symbol)
+        futu_code = to_futu_code(source_symbol)
         try:
             signal.alarm(15)
             ret, data = ctx.get_financials_earnings_price_history(futu_code)
@@ -122,9 +139,9 @@ def sync_actuals(ctx) -> int:
     total = 0
     symbols = get_source().get_futu_symbols()
 
-    for symbol in symbols:
-        futu_code = to_futu_code(symbol)
-        market = symbol.rsplit(".", 1)[-1]
+    for source_symbol in symbols:
+        symbol, market = canonical_earnings_symbol(source_symbol)
+        futu_code = to_futu_code(source_symbol)
         try:
             # MainIndex for EPS (fid=14020)
             signal.alarm(20)

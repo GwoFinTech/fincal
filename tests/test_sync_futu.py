@@ -38,3 +38,15 @@ class FutuContextStartupTests(TestCase):
         futu_module.OpenQuoteContext.assert_called_once_with(
             host=sync_futu.config.FUTU_HOST, port=sync_futu.config.FUTU_PORT
         )
+
+
+class EarningsSymbolTests(TestCase):
+    def test_us_watchlist_suffix_is_not_written_to_earnings_key(self):
+        self.assertEqual(sync_futu.canonical_earnings_symbol("aapl.us"), ("AAPL", "US"))
+
+    def test_hk_symbol_keeps_four_digit_earnings_convention(self):
+        self.assertEqual(sync_futu.canonical_earnings_symbol("700.hk"), ("0700.HK", "HK"))
+
+    def test_unknown_market_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "unsupported_market:CN"):
+            sync_futu.canonical_earnings_symbol("600519.cn")
