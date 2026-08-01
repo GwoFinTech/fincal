@@ -35,7 +35,9 @@ WATCHLIST_HTTP_FIELD = os.getenv("WATCHLIST_HTTP_FIELD", "code")
 
 # Futu OpenD connection (optional - used for earnings date sync)
 FUTU_HOST = os.getenv("FUTU_HOST", "127.0.0.1")
-FUTU_PORT = int(os.getenv("FUTU_PORT", "11111"))
+# The host's OpenD relay listens on 11112.  Production containers override
+# this through .env, but the default must also work for host-run sync scripts.
+FUTU_PORT = int(os.getenv("FUTU_PORT", "11112"))
 
 # Longbridge CLI (optional - primary earnings data source)
 LONGBRIDGE_APP_KEY = os.getenv("LONGBRIDGE_APP_KEY", "")

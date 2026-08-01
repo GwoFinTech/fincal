@@ -115,7 +115,7 @@ All configuration is via environment variables. See [`.env.example`](.env.exampl
 | `WATCHLIST_SOURCE` | `tsummt` | `tsummt` or `http` ([docs](docs/watchlist-source.md)) |
 | `ICAL_BASE_URL` | — | Public URL for iCal feeds |
 | `FUTU_HOST` | `127.0.0.1` | Futu OpenD host |
-| `FUTU_PORT` | `11111` | Futu OpenD port |
+| `FUTU_PORT` | `11112` | Futu OpenD port |
 
 ## Watchlist Source
 
@@ -151,6 +151,14 @@ DB_HOST=localhost uv run uvicorn app.main:app --reload
 DB_HOST=localhost python scripts/sync_earnings.py
 DB_HOST=localhost python scripts/predict_earnings.py
 ```
+
+### Weekly sync behavior
+
+The Longbridge sync is required. Futu is an optional enrichment source: before
+constructing its client, the script performs a 3-second TCP preflight against
+`FUTU_HOST:FUTU_PORT`. When OpenD is unavailable, the Futu stage is logged as
+skipped and the Longbridge/prediction stages continue instead of waiting for
+the OpenD client's indefinite reconnect loop.
 
 ## Tech Stack
 
