@@ -10,7 +10,6 @@ rsync -av --delete \
   --exclude='.venv' \
   --exclude='__pycache__' \
   --exclude='*.pyc' \
-  --exclude='uv.lock' \
   "$SRC" "$DST"
 
 echo "=== Rebuilding & deploying ==="

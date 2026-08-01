@@ -6,11 +6,13 @@ import signal
 import logging
 import sys
 import os
+import socket
 from datetime import date, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.db import db_cursor
+from app import config
 from app.symbol import from_futu_code, to_futu_code
 from app.watchlist import get_source
 
@@ -19,6 +21,35 @@ logger = logging.getLogger(__name__)
 
 F10_TO_QUARTER = {1: 1, 2: 2, 3: 3, 4: 4}
 PUB_TYPE_MAP = {1: "before", 2: "after", 3: "during"}
+
+
+def create_futu_context():
+    """Return a connected OpenD context, or ``None`` when it is unavailable.
+
+    ``OpenQuoteContext`` retries a refused connection indefinitely.  A cheap
+    TCP preflight prevents a weekly sync from consuming the scheduler's full
+    one-hour allowance when OpenD is down or pointed at the wrong port.
+    """
+    try:
+        with socket.create_connection((config.FUTU_HOST, config.FUTU_PORT), timeout=3):
+            pass
+    except OSError as exc:
+        logger.warning(
+            "Futu OpenD unavailable at %s:%s; skipping optional Futu sync: %s",
+            config.FUTU_HOST,
+            config.FUTU_PORT,
+            exc,
+        )
+        return None
+
+    from futu import OpenQuoteContext
+    try:
+        ctx = OpenQuoteContext(host=config.FUTU_HOST, port=config.FUTU_PORT)
+        logger.info("Connected to Futu OpenD at %s:%s (shared context)", config.FUTU_HOST, config.FUTU_PORT)
+        return ctx
+    except Exception as exc:
+        logger.warning("Failed to create Futu OpenD context: %s", exc)
+        return None
 
 
 def sync_earnings_dates(ctx) -> int:
@@ -170,12 +201,8 @@ if __name__ == "__main__":
     from app.db import init_db
     init_db()
 
-    try:
-        from futu import OpenQuoteContext
-        ctx = OpenQuoteContext(host="127.0.0.1", port=11111)
-        logger.info("Connected to Futu OpenD (shared context)")
-    except Exception as e:
-        logger.warning(f"Failed to connect to Futu: {e}")
+    ctx = create_futu_context()
+    if ctx is None:
         sys.exit(0)  # Non-fatal — skip Futu sync
 
     try:
