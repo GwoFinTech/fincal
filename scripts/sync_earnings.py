@@ -38,12 +38,11 @@ def fetch_calendar(market: str, start: str, end: str) -> list[dict]:
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
             if result.returncode != 0:
-                logger.warning(f"Longbridge CLI error (iteration {i}): {result.stderr[:200]}")
-                break
+                raise RuntimeError(f"longbridge_cli_failed:{market}:{i}:{result.stderr[:200]}")
             data = json.loads(result.stdout)
-        except Exception as e:
-            logger.error(f"Fetch error iteration {i}: {e}")
-            break
+        except Exception as exc:
+            logger.error(f"Fetch error iteration {i}: {exc}")
+            raise RuntimeError(f"longbridge_fetch_failed:{market}:{i}") from exc
 
         pages = data.get("list", [])
         if not pages:

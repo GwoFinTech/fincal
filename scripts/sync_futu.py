@@ -69,10 +69,18 @@ def canonical_earnings_symbol(symbol: str) -> tuple[str, str]:
     raise ValueError(f"unsupported_market:{market}")
 
 
-def sync_earnings_dates(ctx) -> int:
+def futu_audit_outcome(date_failures: int, actual_failures: int) -> tuple[str, str | None]:
+    """Classify a stage honestly while allowing other stages to continue."""
+    if date_failures or actual_failures:
+        return "failed", "futu_symbol_fetch_failed"
+    return "success", None
+
+
+def sync_earnings_dates(ctx) -> tuple[int, int]:
     """Fetch earnings calendar dates from Futu, single shared context."""
     batch = []
     total = 0
+    failed_symbols = 0
     cutoff = date.today() - timedelta(days=365)
     symbols = get_source().get_futu_symbols()
 
@@ -84,6 +92,8 @@ def sync_earnings_dates(ctx) -> int:
             ret, data = ctx.get_financials_earnings_price_history(futu_code)
             signal.alarm(0)
             if ret != 0:  # RET_OK = 0
+                failed_symbols += 1
+                logger.warning("Dates request failed for %s: ret=%s", futu_code, ret)
                 continue
 
             df = data.drop_duplicates(subset=["fiscal_year", "financial_type"], keep="first")
@@ -104,7 +114,8 @@ def sync_earnings_dates(ctx) -> int:
                 total += 1
         except Exception as e:
             signal.alarm(0)
-            logger.debug(f"Dates failed {futu_code}: {e}")
+            failed_symbols += 1
+            logger.warning("Dates failed %s: %s", futu_code, e)
             continue
 
     # Batch upsert all earnings dates
@@ -130,25 +141,30 @@ def sync_earnings_dates(ctx) -> int:
             )
         logger.info(f"Flushed {len(batch)} earnings dates")
 
-    logger.info(f"Futu earnings dates: {total} records")
-    return total
+    logger.info("Futu earnings dates: %s records; %s symbol failures", total, failed_symbols)
+    return total, failed_symbols
 
 
-def sync_actuals(ctx) -> int:
+def sync_actuals(ctx) -> tuple[int, int]:
     """Fetch actual EPS (fid=14020) and revenue (fid=8002) via shared context."""
     total = 0
+    failed_symbols = 0
     symbols = get_source().get_futu_symbols()
 
     for source_symbol in symbols:
         symbol, market = canonical_earnings_symbol(source_symbol)
         futu_code = to_futu_code(source_symbol)
         try:
+            symbol_failed = False
             # MainIndex for EPS (fid=14020)
             signal.alarm(20)
             ret, main_data = ctx.get_financials_statements(
                 futu_code, statement_type=4, financial_type=9, num=4
             )
             signal.alarm(0)
+            if ret != 0:
+                symbol_failed = True
+                logger.warning("EPS request failed for %s: ret=%s", futu_code, ret)
             if ret == 0 and main_data.get("report_list"):
                 for report in main_data["report_list"]:
                     fy = report.get("fiscal_year")
@@ -180,6 +196,9 @@ def sync_actuals(ctx) -> int:
                 futu_code, statement_type=1, financial_type=9, num=4
             )
             signal.alarm(0)
+            if ret != 0:
+                symbol_failed = True
+                logger.warning("Revenue request failed for %s: ret=%s", futu_code, ret)
             if ret == 0 and income_data.get("report_list"):
                 for report in income_data["report_list"]:
                     fy = report.get("fiscal_year")
@@ -204,14 +223,17 @@ def sync_actuals(ctx) -> int:
                                 """,
                                 (rev_val, symbol, market, fy, fq),
                             )
+            if symbol_failed:
+                failed_symbols += 1
             total += 1
         except Exception as e:
             signal.alarm(0)
-            logger.debug(f"Actuals failed {futu_code}: {e}")
+            failed_symbols += 1
+            logger.warning("Actuals failed %s: %s", futu_code, e)
             continue
 
-    logger.info(f"Futu actuals synced: {total} symbols")
-    return total
+    logger.info("Futu actuals synced: %s symbols; %s symbol failures", total, failed_symbols)
+    return total, failed_symbols
 
 
 if __name__ == "__main__":
@@ -228,13 +250,22 @@ if __name__ == "__main__":
     symbols = get_source().get_futu_symbols()
     run_id = start_run("futu", "futu", symbol_count=len(symbols))
     try:
-        date_count = sync_earnings_dates(ctx)
-        actual_count = sync_actuals(ctx)
+        date_count, date_failures = sync_earnings_dates(ctx)
+        actual_count, actual_failures = sync_actuals(ctx)
     except Exception:
         finish_run(run_id, status="failed", error_code="futu_sync_failed")
         raise
     else:
-        finish_run(run_id, status="success", record_count=date_count, details={"actual_symbols": actual_count})
+        status, error_code = futu_audit_outcome(date_failures, actual_failures)
+        finish_run(
+            run_id, status=status, record_count=date_count,
+            details={
+                "actual_symbols": actual_count,
+                "date_failed_symbols": date_failures,
+                "actual_failed_symbols": actual_failures,
+            },
+            error_code=error_code,
+        )
     finally:
         ctx.close()
         logger.info("Futu context closed")
