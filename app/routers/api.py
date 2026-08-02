@@ -123,6 +123,36 @@ def api_earnings(
         return fetch_earnings_from_db(symbols=all_symbols, markets=all_markets, start=start, end=end)
 
 
+@router.get("/earnings/{earning_id}/decision")
+def api_earning_decision(earning_id: int, user=Depends(get_current_user)):
+    """Decision-support facts with source-specific unavailable states, never synthetic values."""
+    from ..phase3 import build_decision_metrics, revision_trend
+
+    # Require the same authenticated boundary as the calendar before exposing provider facts.
+    ensure_user(user["id"], user["email"], user["name"])
+    with db.db_cursor() as cur:
+        cur.execute("SELECT * FROM earnings WHERE id=%s", (earning_id,))
+        earning = cur.fetchone()
+        if not earning:
+            return {"status": "not_found"}
+        earning = dict(earning)
+        cur.execute("SELECT id,fiscal_year,fiscal_quarter,report_date,eps_actual,revenue_actual,eps_estimate FROM earnings WHERE symbol=%s AND market=%s ORDER BY report_date", (earning["symbol"], earning["market"]))
+        history = [dict(row) for row in cur.fetchall()]
+        cur.execute("SELECT captured_at,eps_estimate,revenue_estimate,source FROM earnings_estimate_snapshots WHERE earning_id=%s ORDER BY captured_at", (earning_id,))
+        snapshots = [dict(row) for row in cur.fetchall()]
+        cur.execute("SELECT currency_symbol,target_price,strong_buy,buy,hold,underperform,sell,recommendation,provider_updated_at,fetched_at,source FROM earnings_institution_ratings WHERE symbol=%s AND market=%s AND source='longbridge'", (earning["symbol"], earning["market"]))
+        rating = cur.fetchone()
+        cur.execute("SELECT status,reason,source,checked_at FROM earnings_guidance_status WHERE symbol=%s AND market=%s AND source='longbridge'", (earning["symbol"], earning["market"]))
+        guidance = cur.fetchone()
+    return {
+        "status": "available", "revision_trend": revision_trend(snapshots),
+        "institution_rating": dict(rating) if rating else {"status": "unavailable", "source": "longbridge"},
+        "guidance": dict(guidance) if guidance else {"status": "unavailable", "reason": "longbridge_guidance_endpoint_unavailable", "source": "longbridge"},
+        **build_decision_metrics(history, earning_id),
+        "provenance": {"revision_trend": "earnings_estimate_snapshots / Longbridge finance-calendar", "institution_rating": "Longbridge institution-rating", "actual_growth": "earnings actuals (Longbridge/Futu as recorded)", "price_reaction": "unavailable: no reliable provider configured"},
+    }
+
+
 @router.get("/popular")
 def api_popular():
     """Get the list of popular stocks shown by default."""

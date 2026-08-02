@@ -373,6 +373,28 @@
               <div class="detail-row"><span class="detail-label">采集时间</span><span class="detail-value">{{ fmtDateTime(selectedEarning.consensus_fetched_at) }}</span></div>
               <p class="mt-2 text-[11px] leading-4" style="color:var(--text-muted);">数据来源：Longbridge 季度分析师一致预期；GAAP 与调整后口径不可直接混用。</p>
             </div>
+
+            <div v-if="decision" class="section-title">财报决策指标</div>
+            <div v-if="decision" class="surface p-3 mb-3">
+              <div class="detail-row"><span class="detail-label">EPS 同比 / 环比（实际）</span><span class="detail-value">{{ fmtPct(decision.actual_growth.eps_yoy) }} / {{ fmtPct(decision.actual_growth.eps_qoq) }}</span></div>
+              <div class="detail-row"><span class="detail-label">营收同比 / 环比（实际）</span><span class="detail-value">{{ fmtPct(decision.actual_growth.revenue_yoy) }} / {{ fmtPct(decision.actual_growth.revenue_qoq) }}</span></div>
+              <div class="detail-row"><span class="detail-label">EPS 超预期 / 不及预期连续</span><span class="detail-value">{{ decision.beat_miss_streak.kind === 'beat' ? '超预期' : decision.beat_miss_streak.kind === 'miss' ? '不及预期' : '—' }} {{ decision.beat_miss_streak.count || '' }}{{ decision.beat_miss_streak.count ? '季' : '' }}</span></div>
+              <div class="detail-row"><span class="detail-label">财报后价格反应</span><span class="detail-value" style="color:var(--text-muted);">暂无可靠可用数据源</span></div>
+              <p class="mt-2 text-[11px] leading-4" style="color:var(--text-muted);">增长及连续表现仅由已记录实际值与当时一致预期计算；不构成投资建议。</p>
+            </div>
+            <div v-if="decision" class="section-title">预期修正趋势</div>
+            <div v-if="decision" class="surface p-3 mb-3">
+              <template v-if="decision.revision_trend.status === 'available'"><div class="detail-row"><span class="detail-label">EPS（首笔 → 最新）</span><span class="detail-value">{{ fmtNum(decision.revision_trend.eps.first) }} → {{ fmtNum(decision.revision_trend.eps.latest) }}（{{ decision.revision_trend.eps.direction === 'up' ? '上修' : decision.revision_trend.eps.direction === 'down' ? '下修' : '持平' }}）</span></div><div class="detail-row"><span class="detail-label">营收（首笔 → 最新）</span><span class="detail-value">{{ fmtBigNum(decision.revision_trend.revenue.first) }} → {{ fmtBigNum(decision.revision_trend.revenue.latest) }}</span></div></template>
+              <p v-else class="text-[12px]" style="color:var(--text-muted);">快照历史不足，暂无法判断修正方向。</p>
+              <p class="mt-2 text-[11px] leading-4" style="color:var(--text-muted);">来源：Longbridge 财报日历快照；比较首笔与最新已采集一致预期。</p>
+            </div>
+            <div v-if="decision" class="section-title">机构评级与业绩指引</div>
+            <div v-if="decision" class="surface p-3 mb-3">
+              <template v-if="decision.institution_rating.status !== 'unavailable'"><div class="detail-row"><span class="detail-label">平均目标价</span><span class="detail-value">{{ decision.institution_rating.currency_symbol || '' }}{{ fmtNum(decision.institution_rating.target_price) }}</span></div><div class="detail-row"><span class="detail-label">强烈买入 / 买入 / 持有</span><span class="detail-value">{{ decision.institution_rating.strong_buy }} / {{ decision.institution_rating.buy }} / {{ decision.institution_rating.hold }}</span></div><div class="detail-row"><span class="detail-label">跑输 / 卖出</span><span class="detail-value">{{ decision.institution_rating.underperform }} / {{ decision.institution_rating.sell }}</span></div></template>
+              <p v-else class="text-[12px]" style="color:var(--text-muted);">机构评级暂不可用。</p>
+              <div class="detail-row"><span class="detail-label">业绩指引</span><span class="detail-value" style="color:var(--text-muted);">Longbridge 暂无可靠可用接口，未填充数值</span></div>
+              <p class="mt-2 text-[11px] leading-4" style="color:var(--text-muted);">机构评级来源：Longbridge institution-rating；目标价与评级分布会随提供方更新。</p>
+            </div>
           </div>
         </div>
       </div>
@@ -498,6 +520,7 @@
       const copied = ref(false);
       const toast = ref('');
       const selectedEarning = ref(null);
+      const decision = ref(null);
       const selectedDay = ref(null);
       const loading = ref(false);
       const error = ref(null);
@@ -722,16 +745,21 @@
         return short + 'Q' + fq;
       }
 
-      function selectCell(cell) {
+      async function selectEarning(e) {
+        selectedEarning.value = e;
+        decision.value = null;
+        if (e.id) {
+          const data = await apiFetch(`/api/earnings/${e.id}/decision`);
+          if (selectedEarning.value === e && data && data.status === 'available') decision.value = data;
+        }
+      }
+      async function selectCell(cell) {
         if (cell.earnings.length === 0) return;
         if (cell.earnings.length === 1) {
-          selectedEarning.value = cell.earnings[0];
+          await selectEarning(cell.earnings[0]);
         } else {
           selectedDay.value = cell;
         }
-      }
-      function selectEarning(e) {
-        selectedEarning.value = e;
       }
 
       function prevMonth() {
@@ -779,7 +807,7 @@
         user, earnings, watchlist, viewMode, currentDate, watchlistOnly,
         showSearch, showIcalModal, searchQuery, searchResults, searchLoading,
         icalUrl, copied, toast, weekdays, monthLabel, calendarCells,
-        popularSuggestions, selectedEarning, selectedDay,
+        popularSuggestions, selectedEarning, decision, selectedDay,
         loading, error, showAdmin, adminLoading, adminSource, managedWatchlist, syncRuns, managedForm,
         prevMonth, nextMonth, goToday, login, copyIcal, openAdmin, saveManaged, editManaged, deleteManaged, resetManaged, fmtDateTime,
         doSearch, addToWatchlist, removeFromWatchlist, isMine, showToast,

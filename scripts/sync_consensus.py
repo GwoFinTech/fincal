@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.db import db_cursor, init_db
 from app.symbol import normalize
+from app.phase3 import rating_row
 from app.sync_audit import finish_run, start_run
 from app.watchlist import get_source
 
@@ -105,7 +106,7 @@ def forecast_eps_rows(symbol, market, data):
     return rows
 
 
-def persist(consensus, forecasts):
+def persist(consensus, forecasts, ratings, symbols):
     from psycopg2.extras import execute_values
 
     with db_cursor() as cur:
@@ -132,20 +133,40 @@ def persist(consensus, forecasts):
                 forecasts,
                 page_size=200,
             )
+        if ratings:
+            rating_values = [row[:-1] + (json.dumps(row[-1]),) for row in ratings]
+            execute_values(cur, """INSERT INTO earnings_institution_ratings
+                (symbol,market,currency_symbol,target_price,strong_buy,buy,hold,underperform,sell,recommendation,provider_updated_at,payload)
+                VALUES %s ON CONFLICT (symbol,market,source) DO UPDATE SET
+                    currency_symbol=EXCLUDED.currency_symbol, target_price=EXCLUDED.target_price,
+                    strong_buy=EXCLUDED.strong_buy, buy=EXCLUDED.buy, hold=EXCLUDED.hold,
+                    underperform=EXCLUDED.underperform, sell=EXCLUDED.sell, recommendation=EXCLUDED.recommendation,
+                    provider_updated_at=EXCLUDED.provider_updated_at, payload=EXCLUDED.payload, fetched_at=NOW()""",
+                rating_values, page_size=200)
+        if symbols:
+            # The installed Longbridge CLI exposes no documented financial-guidance endpoint.
+            # Persist the negative capability so clients never mistake absent data for zero guidance.
+            execute_values(cur, """INSERT INTO earnings_guidance_status (symbol,market,status,reason,source,payload)
+                VALUES %s ON CONFLICT (symbol,market,source) DO UPDATE SET
+                    status=EXCLUDED.status, reason=EXCLUDED.reason, payload=EXCLUDED.payload, checked_at=NOW()""",
+                [(symbol, market, "unavailable", "longbridge_guidance_endpoint_unavailable", "longbridge", json.dumps({"checked_command": "longbridge --help"})) for symbol, market in symbols],
+                page_size=200)
 
 
 def sync():
-    consensus, forecasts, failures = [], [], []
-    for market, symbols in get_source().get_symbols_by_market().items():
-        for symbol in symbols:
+    consensus, forecasts, ratings, failures, symbols = [], [], [], [], []
+    for market, market_symbols in get_source().get_symbols_by_market().items():
+        for symbol in market_symbols:
+            symbols.append((normalize(symbol, market), market))
             try:
                 consensus.extend(consensus_rows(symbol, market, provider_json("consensus", symbol, market, pace_seconds=3)))
                 forecasts.extend(forecast_eps_rows(symbol, market, provider_json("forecast-eps", symbol, market, pace_seconds=0.5)))
+                ratings.append(rating_row(normalize(symbol, market), market, provider_json("institution-rating", symbol, market, pace_seconds=0.5)))
             except Exception as exc:
                 failures.append(symbol)
                 log.warning("consensus sync failed for %s: %s", symbol, exc)
-    persist(consensus, forecasts)
-    return len(consensus), len(forecasts), failures
+    persist(consensus, forecasts, ratings, symbols)
+    return len(consensus), len(forecasts), len(ratings), failures
 
 
 if __name__ == "__main__":
@@ -154,12 +175,12 @@ if __name__ == "__main__":
     symbol_count = sum(len(symbols) for symbols in source.get_symbols_by_market().values())
     run = start_run("consensus", "longbridge", symbol_count=symbol_count)
     try:
-        consensus_count, forecast_count, failed = sync()
+        consensus_count, forecast_count, rating_count, failed = sync()
         finish_run(
             run,
             status="failed" if failed else "success",
-            record_count=consensus_count + forecast_count,
-            details={"consensus_records": consensus_count, "forecast_eps_records": forecast_count, "failed_symbols": failed},
+            record_count=consensus_count + forecast_count + rating_count,
+            details={"consensus_records": consensus_count, "forecast_eps_records": forecast_count, "institution_rating_records": rating_count, "guidance_status": "unavailable", "failed_symbols": failed},
             error_code="consensus_symbol_fetch_failed" if failed else None,
         )
         if failed:

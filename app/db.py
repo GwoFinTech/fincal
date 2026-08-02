@@ -125,6 +125,21 @@ def init_db():
             UNIQUE(symbol, market, forecast_start_date, forecast_end_date, source)
         )""")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_earnings_forecast_eps_lookup ON earnings_forecast_eps(symbol, market, forecast_start_date DESC)")
+        cur.execute("""CREATE TABLE IF NOT EXISTS earnings_institution_ratings (
+            id BIGSERIAL PRIMARY KEY, symbol TEXT NOT NULL, market TEXT NOT NULL, currency_symbol TEXT,
+            target_price NUMERIC, strong_buy INTEGER NOT NULL DEFAULT 0, buy INTEGER NOT NULL DEFAULT 0,
+            hold INTEGER NOT NULL DEFAULT 0, underperform INTEGER NOT NULL DEFAULT 0, sell INTEGER NOT NULL DEFAULT 0,
+            recommendation TEXT, provider_updated_at TEXT, source TEXT NOT NULL DEFAULT 'longbridge',
+            fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+            UNIQUE(symbol, market, source)
+        )""")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_institution_ratings_lookup ON earnings_institution_ratings(symbol, market)")
+        cur.execute("""CREATE TABLE IF NOT EXISTS earnings_guidance_status (
+            id BIGSERIAL PRIMARY KEY, symbol TEXT NOT NULL, market TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('available', 'unavailable')), reason TEXT,
+            source TEXT NOT NULL DEFAULT 'longbridge', checked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            payload JSONB NOT NULL DEFAULT '{}'::jsonb, UNIQUE(symbol, market, source)
+        )""")
         cur.execute("""
             CREATE INDEX IF NOT EXISTS idx_watchlist_user ON watchlist(user_id);
         """)
