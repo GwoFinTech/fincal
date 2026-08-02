@@ -131,8 +131,27 @@ def parse_report_date(date_str: str) -> str | None:
         return None
 
 
+def dedupe_batch(rows: list[tuple]) -> list[tuple]:
+    """Collapse provider duplicates before a bulk UPSERT.
+
+    Longbridge can repeat one calendar event across adjacent result windows.
+    PostgreSQL rejects duplicate conflict keys within one ``execute_values``
+    statement; retain the copy carrying the most financial metadata.
+    """
+    unique: dict[tuple[str, str, str, str], tuple] = {}
+    for row in rows:
+        key = (row[0], row[1], row[3], row[4])
+        existing = unique.get(key)
+        score = sum(value not in (None, "") for value in row[2:])
+        existing_score = sum(value not in (None, "") for value in existing[2:]) if existing else -1
+        if score > existing_score:
+            unique[key] = row
+    return list(unique.values())
+
+
 def flush_batch(cur, rows: list[tuple]):
     """Batch upsert using execute_values."""
+    rows = dedupe_batch(rows)
     if not rows:
         return
     from psycopg2.extras import execute_values

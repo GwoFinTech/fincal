@@ -24,3 +24,10 @@ class LongbridgePaginationTests(TestCase):
             sync_earnings.next_calendar_cursor("2026-02-03", "2026.02.04 (美东)", "2026-02-03"),
             "2026-02-05",
         )
+
+
+class LongbridgeBatchTests(TestCase):
+    def test_duplicate_natural_keys_keep_the_row_with_more_consensus_values(self):
+        sparse = ("AMD", "US", "", "2026-08-04", "Q", 2026, 2, None, None, None, None, None)
+        rich = ("AMD", "US", "AMD", "2026-08-04", "Q", 2026, 2, 1.05, None, 11.3, None, "after")
+        self.assertEqual(sync_earnings.dedupe_batch([sparse, rich]), [rich])
