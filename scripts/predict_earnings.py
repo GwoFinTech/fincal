@@ -174,10 +174,10 @@ def predict_for_symbol(symbol: str, market: str) -> int:
 def mark_confirmed():
     """Clean up predictions when real data arrives."""
     with db_cursor() as cur:
+        # Existing rows created before provenance support still need an explicit state.
+        cur.execute("UPDATE earnings SET date_source = 'algorithm', date_status = 'predicted' WHERE is_predicted = TRUE")
         # 1) Rows that have actuals are no longer predicted
-        cur.execute(
-            "UPDATE earnings SET is_predicted = FALSE WHERE is_predicted = TRUE AND eps_actual IS NOT NULL"
-        )
+        cur.execute("UPDATE earnings SET is_predicted = FALSE, date_status = 'reported' WHERE is_predicted = TRUE AND eps_actual IS NOT NULL")
         n1 = cur.rowcount
 
         # 2) Delete predicted rows that overlap with a confirmed row
