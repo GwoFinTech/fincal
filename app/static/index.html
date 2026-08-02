@@ -300,6 +300,7 @@
                 <span class="detail-label">财季</span>
                 <span class="detail-value">{{ fqLabel(selectedEarning.fiscal_year, selectedEarning.fiscal_quarter) }}</span>
               </div>
+              <p v-if="selectedEarning.is_predicted" class="mt-2 text-[11px] leading-4" style="color:var(--text-muted);">日期预测：基于历史财报发布日期推算，实际公告时间可能调整。</p>
             </div>
 
             <!-- EPS section -->
@@ -309,7 +310,7 @@
             </div>
             <div class="surface p-3 mb-3">
               <div class="detail-row">
-                <span class="detail-label">一致预期</span>
+                <span class="detail-label">一致预期 <span title="来源：Longbridge 分析师一致预期；不同数据供应商、口径或更新时间可能存在偏差。" style="color:var(--primary-light);cursor:help;">ⓘ Longbridge</span></span>
                 <span class="detail-value">{{ selectedEarning.eps_estimate != null ? fmtNum(selectedEarning.eps_estimate) : '—' }}</span>
               </div>
               <div class="detail-row">
@@ -336,7 +337,7 @@
             </div>
             <div class="surface p-3 mb-3">
               <div class="detail-row">
-                <span class="detail-label">一致预期</span>
+                <span class="detail-label">一致预期 <span title="来源：Longbridge 分析师一致预期；不同数据供应商、口径或更新时间可能存在偏差。" style="color:var(--primary-light);cursor:help;">ⓘ Longbridge</span></span>
                 <span class="detail-value">{{ selectedEarning.revenue_estimate != null ? fmtBigNum(selectedEarning.revenue_estimate) : '—' }}</span>
               </div>
               <div class="detail-row">
@@ -354,6 +355,7 @@
                   {{ revSurplus(selectedEarning) > 0 ? '+' : '' }}{{ fmtPct(revSurplus(selectedEarning)) }}
                 </span>
               </div>
+              <p v-if="selectedEarning.eps_estimate != null || selectedEarning.revenue_estimate != null" class="mt-2 text-[11px] leading-4" style="color:var(--text-muted);">预期来源：Longbridge 分析师一致预期；不同供应商、GAAP/调整后口径及更新时间可能有偏差。</p>
             </div>
           </div>
         </div>
