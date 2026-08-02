@@ -272,22 +272,28 @@ def merge_duplicate_symbols():
 
 if __name__ == "__main__":
     from app.db import init_db
+    from app.sync_audit import start_run, finish_run
     init_db()
-    merge_duplicate_symbols()
-    mark_confirmed()
-    cleanup_stale_predictions()
-
-    # Run predictions
-    logger.info("Predicting future earnings dates...")
-    total = 0
     all_symbols = []
     for mkt, syms in get_source().get_symbols_by_market().items():
         for s in syms:
             all_symbols.append((s, mkt))
-    for i, (symbol, market) in enumerate(all_symbols):
-        count = predict_for_symbol(symbol, market)
-        total += count
-        if (i + 1) % 10 == 0:
-            logger.info(f"  Processed {i+1}/{len(all_symbols)} symbols, {total} predictions so far")
+    run_id = start_run("prediction", "algorithm", symbol_count=len(all_symbols))
+    try:
+        merge_duplicate_symbols()
+        mark_confirmed()
+        cleanup_stale_predictions()
 
-    logger.info(f"Prediction complete: {total} future earnings dates predicted")
+        logger.info("Predicting future earnings dates...")
+        total = 0
+        for i, (symbol, market) in enumerate(all_symbols):
+            count = predict_for_symbol(symbol, market)
+            total += count
+            if (i + 1) % 10 == 0:
+                logger.info(f"  Processed {i+1}/{len(all_symbols)} symbols, {total} predictions so far")
+    except Exception:
+        finish_run(run_id, status="failed", error_code="prediction_failed")
+        raise
+    else:
+        logger.info(f"Prediction complete: {total} future earnings dates predicted")
+        finish_run(run_id, status="success", record_count=total)

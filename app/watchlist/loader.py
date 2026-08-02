@@ -13,14 +13,20 @@ _source: WatchlistSource | None = None
 
 def _create_source() -> WatchlistSource:
     src = config.WATCHLIST_SOURCE.lower().strip()
+    from .managed_source import CombinedWatchlistSource, ManagedWatchlistSource
+    if src == "local":
+        logger.info("Watchlist source: FinCal managed DB")
+        return ManagedWatchlistSource()
     if src == "http":
         from .http_source import HttpWatchlistSource
-        logger.info("Watchlist source: HTTP (%s)", config.WATCHLIST_HTTP_URL)
-        return HttpWatchlistSource()
-    # Default / explicit tsummt
-    from .tsummt_source import TsummtWatchlistSource
-    logger.info("Watchlist source: tsummt DB")
-    return TsummtWatchlistSource()
+        logger.info("Watchlist source: HTTP (%s) + FinCal managed DB", config.WATCHLIST_HTTP_URL)
+        return CombinedWatchlistSource(HttpWatchlistSource())
+    if src in ("hybrid", "tsummt"):
+        from .tsummt_source import TsummtWatchlistSource
+        logger.info("Watchlist source: tsummt DB + FinCal managed DB")
+        return CombinedWatchlistSource(TsummtWatchlistSource())
+    logger.warning("Unknown WATCHLIST_SOURCE=%s; using FinCal managed DB only", src)
+    return ManagedWatchlistSource()
 
 
 def get_source() -> WatchlistSource:

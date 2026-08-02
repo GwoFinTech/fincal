@@ -123,6 +123,7 @@
         </div>
         <div class="flex items-center gap-2">
           <span v-if="user" class="text-[12px] text-zinc-400">{{ user.name || user.email }}</span>
+          <button v-if="user && user.is_admin" @click="openAdmin" class="btn btn-outline" style="padding:4px 10px;font-size:12px;">管理</button>
           <button v-if="!user && appConfig.auth_login_url" @click="login" class="btn btn-primary" style="padding:4px 10px;font-size:12px;">登录</button>
         </div>
       </div>
@@ -426,6 +427,28 @@
       </div>
     </div>
 
+    <!-- Admin Modal -->
+    <div v-if="showAdmin" class="fixed inset-0 z-50 flex items-center justify-center" style="background:rgba(0,0,0,.65);backdrop-filter:blur(4px);" @click.self="showAdmin=false">
+      <div class="surface p-4 max-w-3xl w-full mx-4 max-h-[86vh] overflow-y-auto">
+        <div class="flex items-center justify-between mb-4">
+          <div><h3 class="text-[16px] font-semibold">管理</h3><p class="text-[11px] text-zinc-500 mt-1">权限来自 kazusa-home-portal 的 X-User-Role: admin</p></div>
+          <button @click="showAdmin=false" class="btn btn-ghost" style="padding:4px;">✕</button>
+        </div>
+        <div v-if="adminLoading" class="flex items-center gap-2 text-[12px] text-zinc-500"><div class="spinner"></div>加载中...</div>
+        <template v-else>
+          <div class="grid md:grid-cols-2 gap-3 mb-4">
+            <div class="surface p-3"><div class="text-[11px] text-zinc-500 mb-1">自选数据来源</div><div class="text-[13px] font-medium">{{ adminSource.configured || '—' }}</div><div class="text-[11px] text-zinc-500 mt-1">{{ adminSource.transport === 'database' ? 'PostgreSQL · ' + adminSource.location : 'FinCal 本地数据库' }}</div><div class="text-[11px] mt-2" :class="adminSource.external_dependency ? 'text-amber-400' : 'text-emerald-400'">{{ adminSource.external_dependency ? '外部来源可用时合并 FinCal 本地自选' : '不依赖外部系统' }}</div></div>
+            <div class="surface p-3"><div class="text-[11px] text-zinc-500 mb-1">当前外部/合并自选</div><div class="text-[22px] font-semibold">{{ adminSource.symbol_count || 0 }}</div><div v-if="adminSource.error_code" class="text-[11px] text-red-400">{{ adminSource.error_code }}</div></div>
+          </div>
+          <div class="section-title">FinCal 自建自选 <span class="text-zinc-500 font-normal">独立持久化；加入后会合并到同步宇宙</span></div>
+          <form @submit.prevent="saveManaged" class="flex flex-wrap gap-2 mb-3"><input v-model="managedForm.symbol" placeholder="代码，例如 AAPL / 0700" class="flex-1 min-w-[160px] text-[13px] px-3 py-1.5 rounded-md" style="background:var(--surface-raised);border:1px solid var(--border);color:var(--text);"><select v-model="managedForm.market" class="text-[13px] px-2 rounded-md" style="background:var(--surface-raised);border:1px solid var(--border);color:var(--text);"><option>US</option><option>HK</option></select><button class="btn btn-primary" style="font-size:12px;">{{ managedForm.id ? '保存' : '添加' }}</button><button v-if="managedForm.id" type="button" @click="resetManaged" class="btn btn-ghost" style="font-size:12px;">取消</button></form>
+          <div class="surface mb-4 overflow-hidden"><div v-if="!managedWatchlist.length" class="p-3 text-[12px] text-zinc-500">暂无 FinCal 自建自选。</div><div v-for="item in managedWatchlist" :key="item.id" class="flex items-center justify-between px-3 py-2 border-b last:border-0" style="border-color:var(--border);"><span class="text-[13px] font-medium">{{ item.symbol }} <span class="badge" :class="'badge-'+item.market">{{ item.market }}</span></span><span class="flex gap-1"><button @click="editManaged(item)" class="btn btn-ghost" style="font-size:11px;padding:3px 6px;">编辑</button><button @click="deleteManaged(item.id)" class="btn btn-ghost" style="font-size:11px;padding:3px 6px;color:#f87171;">删除</button></span></div></div>
+          <div class="section-title">同步记录</div>
+          <div class="surface overflow-hidden"><div v-if="!syncRuns.length" class="p-3 text-[12px] text-zinc-500">暂无记录；下一次同步将自动写入。</div><div v-for="run in syncRuns" :key="run.id" class="px-3 py-2 border-b last:border-0 text-[12px]" style="border-color:var(--border);"><div class="flex justify-between gap-3"><span class="font-medium">{{ run.stage }} · {{ run.source }}</span><span :class="run.status==='success'?'text-emerald-400':run.status==='failed'?'text-red-400':'text-amber-400'">{{ run.status }}</span></div><div class="text-zinc-500 mt-1">{{ fmtDateTime(run.started_at) }} · 标的 {{ run.symbol_count }} · 记录 {{ run.record_count }}<span v-if="run.error_code"> · {{ run.error_code }}</span></div></div></div>
+        </template>
+      </div>
+    </div>
+
     <!-- Toast -->
     <transition name="toast">
       <div v-if="toast" class="fixed top-14 right-4 z-50">
@@ -460,6 +483,12 @@
       const selectedDay = ref(null);
       const loading = ref(false);
       const error = ref(null);
+      const showAdmin = ref(false);
+      const adminLoading = ref(false);
+      const adminSource = ref({});
+      const managedWatchlist = ref([]);
+      const syncRuns = ref([]);
+      const managedForm = ref({ id: null, symbol: '', market: 'US' });
 
       const weekdays = ['日', '一', '二', '三', '四', '五', '六'];
 
@@ -541,6 +570,36 @@
       async function loadWatchlist() {
         const data = await apiFetch('/api/watchlist');
         if (data) watchlist.value = data;
+      }
+
+      async function openAdmin() {
+        showAdmin.value = true;
+        adminLoading.value = true;
+        const [overview, runs] = await Promise.all([
+          apiFetch('/api/admin/overview'), apiFetch('/api/admin/sync-runs?limit=50')
+        ]);
+        if (overview) {
+          adminSource.value = overview.source || {};
+          managedWatchlist.value = overview.managed_watchlist || [];
+        }
+        if (runs) syncRuns.value = runs;
+        adminLoading.value = false;
+      }
+      function resetManaged() { managedForm.value = { id: null, symbol: '', market: 'US' }; }
+      function editManaged(item) { managedForm.value = { id: item.id, symbol: item.symbol, market: item.market }; }
+      async function saveManaged() {
+        const form = managedForm.value;
+        const path = form.id ? `/api/admin/watchlist/${form.id}` : '/api/admin/watchlist';
+        const data = await apiFetch(path, { method: form.id ? 'PUT' : 'POST', body: JSON.stringify({ symbol: form.symbol, market: form.market }) });
+        if (data) { showToast('已保存 ' + data.symbol); resetManaged(); await openAdmin(); }
+      }
+      async function deleteManaged(id) {
+        if (!window.confirm('删除该 FinCal 自建自选？')) return;
+        const data = await apiFetch(`/api/admin/watchlist/${id}`, { method: 'DELETE' });
+        if (data) { showToast('已删除'); await openAdmin(); }
+      }
+      function fmtDateTime(value) {
+        return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '进行中';
       }
 
       async function loadEarnings() {
@@ -693,8 +752,8 @@
         showSearch, showIcalModal, searchQuery, searchResults, searchLoading,
         icalUrl, copied, toast, weekdays, monthLabel, calendarCells,
         popularSuggestions, selectedEarning, selectedDay,
-        loading, error,
-        prevMonth, nextMonth, goToday, login, copyIcal,
+        loading, error, showAdmin, adminLoading, adminSource, managedWatchlist, syncRuns, managedForm,
+        prevMonth, nextMonth, goToday, login, copyIcal, openAdmin, saveManaged, editManaged, deleteManaged, resetManaged, fmtDateTime,
         doSearch, addToWatchlist, removeFromWatchlist, isMine, showToast,
         selectCell, selectEarning,
         epsSurplus, epsSurplusClass, revSurplus, revSurplusClass,

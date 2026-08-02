@@ -28,8 +28,8 @@ DB_PASSWORD=os.getenv("DB_PASSWORD", "")
 # External DB for shared watchlist (only used when WATCHLIST_SOURCE=tsummt)
 TSUMMT_DB = os.getenv("TSUMMT_DB", "tsummt")
 
-# Watchlist data source: tsummt (direct DB) or http (remote API)
-WATCHLIST_SOURCE = os.getenv("WATCHLIST_SOURCE", "tsummt")
+# Watchlist data source: hybrid (tsummt DB + local fallback), tsummt, local, or http
+WATCHLIST_SOURCE = os.getenv("WATCHLIST_SOURCE", "hybrid")
 WATCHLIST_HTTP_URL = os.getenv("WATCHLIST_HTTP_URL", "")
 WATCHLIST_HTTP_FIELD = os.getenv("WATCHLIST_HTTP_FIELD", "code")
 
