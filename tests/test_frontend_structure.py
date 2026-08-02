@@ -13,6 +13,8 @@ def test_calendar_selection_uses_a_responsive_non_overlay_side_panel():
     assert "grid-template-columns: minmax(0, 1fr) 400px" in html
     assert 'class="selection-panel surface"' in html
     assert 'v-else-if="selectedDay" class="selection-panel surface p-4"' in html
+    assert "if (!selectedDay.value && appTab.value === 'calendar')" in html
+    assert "calendarCells.value.find(cell => cell.isToday)" in html
     assert "Day Detail Modal" not in html
     assert 'class="fixed inset-0 z-50 flex justify-end"' not in html
 
