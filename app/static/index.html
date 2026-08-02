@@ -623,7 +623,13 @@
           const end = new Date(d.getFullYear(), d.getMonth() + 2, 0).toISOString().slice(0, 10);
           const params = new URLSearchParams({ start, end, watchlistOnly: watchlistOnly.value });
           const data = await apiFetch(`/api/earnings?${params}`);
-          if (data) earnings.value = data;
+          if (data) {
+            earnings.value = data;
+            // Keep the calendar workspace useful on first render even when today has no earnings.
+            if (!selectedDay.value && appTab.value === 'calendar') {
+              selectedDay.value = calendarCells.value.find(cell => cell.isToday) || null;
+            }
+          }
         } finally {
           loading.value = false;
         }
