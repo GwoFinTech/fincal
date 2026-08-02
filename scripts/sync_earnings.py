@@ -185,10 +185,10 @@ def flush_batch(cur, rows: list[tuple]):
         actual_source = CASE WHEN e.eps_actual IS NOT NULL OR e.revenue_actual IS NOT NULL THEN 'longbridge' ELSE e.actual_source END,
         actual_as_of = CASE WHEN e.eps_actual IS NOT NULL OR e.revenue_actual IS NOT NULL THEN NOW() ELSE e.actual_as_of END
         FROM (VALUES %s) AS v(symbol, market, report_date)
-        WHERE (e.symbol,e.market,e.report_date)=(v.symbol,v.market,v.report_date)""", keys)
+        WHERE (e.symbol,e.market,e.report_date)=(v.symbol,v.market,(v.report_date)::date)""", keys)
     execute_values(cur, """INSERT INTO earnings_estimate_snapshots (earning_id, source, eps_estimate, revenue_estimate, payload)
         SELECT e.id, 'longbridge', e.eps_estimate, e.revenue_estimate, '{"endpoint":"finance-calendar"}'::jsonb
-        FROM earnings e JOIN (VALUES %s) AS v(symbol,market,report_date) ON (e.symbol,e.market,e.report_date)=(v.symbol,v.market,v.report_date)
+        FROM earnings e JOIN (VALUES %s) AS v(symbol,market,report_date) ON (e.symbol,e.market,e.report_date)=(v.symbol,v.market,(v.report_date)::date)
         WHERE e.eps_estimate IS NOT NULL OR e.revenue_estimate IS NOT NULL""", keys)
 
 
