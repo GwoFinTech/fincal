@@ -50,3 +50,12 @@ class EarningsSymbolTests(TestCase):
     def test_unknown_market_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "unsupported_market:CN"):
             sync_futu.canonical_earnings_symbol("600519.cn")
+
+
+class FutuAuditTests(TestCase):
+    def test_symbol_fetch_failure_is_not_reported_as_success(self):
+        self.assertEqual(sync_futu.futu_audit_outcome(1, 0), ("failed", "futu_symbol_fetch_failed"))
+        self.assertEqual(sync_futu.futu_audit_outcome(0, 2), ("failed", "futu_symbol_fetch_failed"))
+
+    def test_zero_symbol_fetch_failures_is_success(self):
+        self.assertEqual(sync_futu.futu_audit_outcome(0, 0), ("success", None))
