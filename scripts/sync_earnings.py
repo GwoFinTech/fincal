@@ -125,9 +125,11 @@ def extract_kv(data_kv: list[dict]) -> dict:
 
 
 def parse_report_date(date_str: str) -> str | None:
+    """Normalize provider dates, rejecting relative/non-ISO display labels."""
     try:
-        return date_str.split(" ")[0].replace(".", "-")
-    except Exception:
+        parsed = date_str.split(" ")[0].replace(".", "-")
+        return date.fromisoformat(parsed).isoformat()
+    except (AttributeError, TypeError, ValueError):
         return None
 
 

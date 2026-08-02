@@ -25,6 +25,9 @@ class LongbridgePaginationTests(TestCase):
             "2026-02-05",
         )
 
+    def test_relative_provider_date_is_rejected(self):
+        self.assertIsNone(sync_earnings.parse_report_date("今天"))
+
 
 class LongbridgeBatchTests(TestCase):
     def test_duplicate_natural_keys_keep_the_row_with_more_consensus_values(self):
