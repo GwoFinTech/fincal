@@ -20,11 +20,35 @@ logger = logging.getLogger(__name__)
 BATCH_SIZE = 200
 
 
+def next_calendar_cursor(api_next_date: str, last_report_date: str, current_start: str) -> str | None:
+    """Advance pagination even when Longbridge omits ``next_date``.
+
+    The calendar endpoint can return a full page for only one or two days but
+    leave ``next_date`` empty.  Stopping there silently drops every later
+    earnings release and its consensus estimates.
+    """
+    candidates: list[str] = []
+    try:
+        candidate = api_next_date.strip()
+        if candidate and date.fromisoformat(candidate) > date.fromisoformat(current_start):
+            candidates.append(candidate)
+    except ValueError:
+        pass
+    try:
+        last_day = last_report_date.split(" ", 1)[0].replace(".", "-")
+        candidates.append((date.fromisoformat(last_day) + timedelta(days=1)).isoformat())
+    except (AttributeError, ValueError):
+        pass
+    return max(candidates) if candidates else None
+
+
 def fetch_calendar(market: str, start: str, end: str) -> list[dict]:
     """Fetch all earnings calendar pages from Longbridge, paginating via next_date."""
     all_pages = []
     cursor_start = start
-    max_iterations = 50
+    # Empty calendar days must be advanced explicitly: this endpoint does not
+    # seek to the next non-empty day when ``start`` itself has no releases.
+    max_iterations = 800
 
     for i in range(max_iterations):
         cmd = [
@@ -46,16 +70,26 @@ def fetch_calendar(market: str, start: str, end: str) -> list[dict]:
 
         pages = data.get("list", [])
         if not pages:
-            break
+            next_cursor = (date.fromisoformat(cursor_start) + timedelta(days=1)).isoformat()
+            if next_cursor > end:
+                break
+            logger.debug("%s no releases on %s; advancing to %s", market, cursor_start, next_cursor)
+            cursor_start = next_cursor
+            continue
         all_pages.extend(pages)
 
         next_date = data.get("next_date", "")
-        if not next_date or next_date >= end:
+        last_page_date = pages[-1].get("date", "")
+        next_cursor = next_calendar_cursor(next_date, last_page_date, cursor_start)
+        if not next_cursor or next_cursor > end:
             break
-        cursor_start = next_date
+        if next_cursor <= cursor_start:
+            raise RuntimeError(f"longbridge_pagination_stalled:{market}:{cursor_start}")
+        cursor_start = next_cursor
 
-        last_page_date = pages[-1].get("date", "?")
-        logger.info(f"  {market} iteration {i}: got {len(pages)} pages, last_date={last_page_date}, next={next_date}")
+        logger.info(f"  {market} iteration {i}: got {len(pages)} pages, last_date={last_page_date}, next={cursor_start}")
+    else:
+        raise RuntimeError(f"longbridge_pagination_limit:{market}:{max_iterations}")
 
     return all_pages
 
