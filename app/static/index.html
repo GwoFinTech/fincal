@@ -63,6 +63,17 @@
     .tab-inactive { border-bottom: 2px solid transparent; color: var(--text-muted); }
     .tab-inactive:hover { color: var(--text-secondary); }
 
+    /* ── Top-level app navigation and watchlist ── */
+    .app-tab { min-height: 36px; border-radius: 8px; padding: 0 12px; font-size: 13px; font-weight: 600; color: var(--text-muted); transition: all .15s; }
+    .app-tab:hover { color: var(--text-secondary); background: var(--surface-raised); }
+    .app-tab-active { color: #ddd6fe; background: rgba(124,58,237,.18); box-shadow: inset 0 0 0 1px rgba(167,139,250,.28); }
+    .watchlist-stat { background: var(--surface-raised); border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
+    .watchlist-row { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 11px 12px; }
+    .watchlist-row:hover { border-color: var(--border-light); background: var(--surface-raised); }
+    @media (pointer: coarse) {
+      .app-tab, .watchlist-remove { min-height: 44px; }
+    }
+
     /* ── Buttons (tsummt variants) ── */
     .btn { font-size: 13px; font-weight: 500; padding: 6px 12px; border-radius: 6px; transition: all 0.15s; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
     .btn-primary { background: var(--primary); color: white; }
@@ -138,8 +149,16 @@
       </div>
     </header>
 
-    <!-- Controls -->
-    <div class="max-w-[1600px] mx-auto px-4 py-3 flex flex-wrap items-center gap-2">
+    <!-- App navigation remains independent from the calendar month/week switch. -->
+    <nav class="max-w-[1600px] mx-auto px-4 pt-3" aria-label="FinCal 主导航">
+      <div class="inline-flex gap-1 rounded-[10px] p-1" style="background:var(--surface);border:1px solid var(--border);">
+        <button @click="appTab='calendar'" :class="appTab === 'calendar' ? 'app-tab-active' : ''" class="app-tab">日历</button>
+        <button @click="appTab='watchlist'" :class="appTab === 'watchlist' ? 'app-tab-active' : ''" class="app-tab">自选 <span v-if="user && watchlist.length" class="ml-1 text-[11px] opacity-75">{{ watchlist.length }}</span></button>
+      </div>
+    </nav>
+
+    <!-- Calendar controls: month/week is deliberately scoped to the calendar tab. -->
+    <div v-if="appTab === 'calendar'" class="max-w-[1600px] mx-auto px-4 py-3 flex flex-wrap items-center gap-2">
       <div class="flex border-b" style="border-color:var(--border);">
         <button @click="viewMode='month'" :class="viewMode==='month' ? 'tab-active' : 'tab-inactive'" class="pb-1.5 px-2.5 text-[13px] font-medium transition">月</button>
         <button @click="viewMode='week'" :class="viewMode==='week' ? 'tab-active' : 'tab-inactive'" class="pb-1.5 px-2.5 text-[13px] font-medium transition">周</button>
@@ -169,51 +188,21 @@
         订阅日历
       </button>
 
-      <button v-if="user" @click="showSearch = !showSearch" class="btn btn-primary" style="font-size:12px;padding:4px 10px;">
-        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
-        添加
-      </button>
     </div>
 
-    <!-- Search panel -->
-    <transition name="slide">
-      <div v-if="showSearch" class="max-w-[1600px] mx-auto px-4 pb-3">
-        <div class="surface p-3">
-          <div class="flex gap-2 mb-2">
-            <input v-model="searchQuery" @input="doSearch" placeholder="搜索代码或公司名..." class="flex-1 text-[13px] px-3 py-1.5 rounded-md" style="background:var(--surface-raised);border:1px solid var(--border);color:var(--text);outline:none;" @focus="$event.target.style.borderColor='var(--primary)'" @blur="$event.target.style.borderColor='var(--border)'" />
-            <button @click="showSearch = false" class="btn btn-ghost" style="font-size:12px;">取消</button>
-          </div>
-          <div class="flex flex-wrap gap-1.5 mb-2" v-if="searchResults.length === 0 && !searchLoading">
-            <span class="text-[11px] text-zinc-600">热门:</span>
-            <button v-for="s in popularSuggestions" :key="s.symbol+s.market" @click="addToWatchlist(s.symbol, s.market)" class="text-[11px] px-2 py-0.5 rounded-md btn-outline" style="border:1px solid var(--border);color:var(--text-secondary);">
-              {{ s.symbol }} <span class="text-zinc-600">{{ s.market }}</span>
-            </button>
-          </div>
-          <div v-if="searchLoading" class="flex items-center gap-2 text-[12px] text-zinc-500 py-2"><div class="spinner" style="width:14px;height:14px;"></div> 搜索中...</div>
-          <div v-else class="space-y-0.5 max-h-48 overflow-y-auto">
-            <button v-for="r in searchResults" :key="r.symbol+r.market" @click="addToWatchlist(r.symbol, r.market)" class="w-full text-left px-2.5 py-1.5 rounded-md text-[13px] flex items-center justify-between transition" style="color:var(--text-secondary);" @mouseenter="$event.target.style.background='var(--surface-raised)'" @mouseleave="$event.target.style.background='transparent'">
-              <span><span class="text-zinc-200 font-medium">{{ r.symbol }}</span><span class="text-zinc-500 ml-2 text-[12px]" v-if="r.company_name">{{ r.company_name }}</span></span>
-              <span class="badge" :class="'badge-' + r.market" style="font-size:10px;">{{ r.market }}</span>
-            </button>
-          </div>
-        </div>
-      </div>
-    </transition>
-
-    <!-- Watchlist pills -->
-    <div v-if="user && watchlist.length > 0" class="max-w-[1600px] mx-auto px-4 pb-2">
-      <div class="flex flex-wrap gap-1.5 items-center">
-        <span class="text-[11px] text-zinc-600">自选:</span>
-        <span v-for="w in watchlist" :key="w.symbol+w.market" class="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-md group" style="background:var(--surface-raised);border:1px solid var(--border);color:var(--text-secondary);">
-          {{ w.symbol }}
-          <span class="badge" :class="'badge-' + w.market" style="font-size:9px;padding:0 4px;">{{ w.market }}</span>
-          <button @click="removeFromWatchlist(w.symbol, w.market)" class="text-zinc-600 hover:text-red-400 transition opacity-0 group-hover:opacity-100 ml-0.5" style="font-size:14px;line-height:1;">&times;</button>
-        </span>
-      </div>
-    </div>
+    <!-- Dedicated self-selection page: search and mutating actions stay out of the calendar. -->
+    <main v-if="appTab === 'watchlist'" class="max-w-[1100px] mx-auto px-4 py-5 pb-8">
+      <template v-if="user">
+        <div class="flex flex-wrap items-end justify-between gap-3 mb-4"><div><h2 class="text-[20px] font-semibold">我的自选</h2><p class="text-[12px] mt-1" style="color:var(--text-muted);">追踪你关注的美股与港股财报日程。</p></div><span class="text-[12px]" style="color:var(--text-muted);">{{ watchlist.length }} 个标的</span></div>
+        <div class="grid grid-cols-3 gap-2.5 mb-4"><div class="watchlist-stat"><div class="text-[11px] text-zinc-500">全部</div><div class="mt-1 text-[22px] font-semibold">{{ watchlist.length }}</div></div><div class="watchlist-stat"><div class="text-[11px] text-zinc-500">美股 · US</div><div class="mt-1 text-[22px] font-semibold text-blue-300">{{ usWatchlist.length }}</div></div><div class="watchlist-stat"><div class="text-[11px] text-zinc-500">港股 · HK</div><div class="mt-1 text-[22px] font-semibold text-pink-300">{{ hkWatchlist.length }}</div></div></div>
+        <section class="surface p-3 mb-5" aria-label="添加自选"><label class="block text-[12px] font-medium mb-2">添加自选</label><input v-model="searchQuery" @input="doSearch" placeholder="搜索股票代码或公司名称…" class="w-full text-[13px] px-3 py-2 rounded-md" style="background:var(--surface-raised);border:1px solid var(--border);color:var(--text);outline:none;" @focus="$event.target.style.borderColor='var(--primary)'" @blur="$event.target.style.borderColor='var(--border)'" /><div v-if="searchLoading" class="flex items-center gap-2 text-[12px] text-zinc-500 py-3"><div class="spinner" style="width:14px;height:14px;"></div> 搜索中…</div><div v-else-if="searchResults.length" class="mt-2 space-y-1 max-h-56 overflow-y-auto"><button v-for="r in searchResults" :key="r.symbol+r.market" @click="addToWatchlist(r.symbol, r.market)" class="w-full text-left px-3 py-2 rounded-md text-[13px] flex items-center justify-between transition" style="background:var(--surface-raised);color:var(--text-secondary);"><span class="min-w-0"><span class="text-zinc-100 font-medium">{{ r.symbol }}</span><span v-if="r.company_name" class="text-zinc-500 ml-2">{{ r.company_name }}</span></span><span class="badge" :class="'badge-' + r.market">添加 · {{ r.market }}</span></button></div><div v-else-if="!searchQuery" class="flex flex-wrap items-center gap-1.5 mt-3"><span class="text-[11px] text-zinc-600">热门：</span><button v-for="s in popularSuggestions" :key="s.symbol+s.market" @click="addToWatchlist(s.symbol, s.market)" class="text-[11px] px-2 py-1 rounded-md btn-outline">{{ s.symbol }} <span class="text-zinc-600">{{ s.market }}</span></button></div><p v-else class="mt-3 text-[12px] text-zinc-500">未找到匹配标的，试试代码或更短的关键词。</p></section>
+        <div class="grid lg:grid-cols-2 gap-4"><section><div class="section-title">美股 <span class="text-zinc-500 font-normal">{{ usWatchlist.length }}</span></div><div class="space-y-2"><div v-if="!usWatchlist.length" class="watchlist-row text-[12px] text-zinc-500">暂无美股自选。</div><div v-for="w in usWatchlist" :key="w.symbol+w.market" class="watchlist-row flex items-center gap-3"><span class="badge badge-US">US</span><span class="flex-1 font-semibold text-[14px]">{{ w.symbol }}</span><button @click="removeFromWatchlist(w.symbol, w.market)" class="watchlist-remove btn btn-ghost text-red-400" style="padding:4px 8px;font-size:12px;">移除</button></div></div></section><section><div class="section-title">港股 <span class="text-zinc-500 font-normal">{{ hkWatchlist.length }}</span></div><div class="space-y-2"><div v-if="!hkWatchlist.length" class="watchlist-row text-[12px] text-zinc-500">暂无港股自选。</div><div v-for="w in hkWatchlist" :key="w.symbol+w.market" class="watchlist-row flex items-center gap-3"><span class="badge badge-HK">HK</span><span class="flex-1 font-semibold text-[14px]">{{ w.symbol }}</span><button @click="removeFromWatchlist(w.symbol, w.market)" class="watchlist-remove btn btn-ghost text-red-400" style="padding:4px 8px;font-size:12px;">移除</button></div></div></section></div>
+      </template>
+      <section v-else class="surface max-w-lg mx-auto mt-8 p-6 text-center"><div class="w-10 h-10 mx-auto mb-3 rounded-full flex items-center justify-center text-lg" style="background:var(--surface-raised);">☆</div><h2 class="text-[17px] font-semibold">登录后管理自选</h2><p class="text-[12px] leading-5 mt-2" style="color:var(--text-muted);">自选会安全地保存到你的账户，并用于日历中的“只看自选”筛选。</p><button v-if="appConfig.auth_login_url" @click="login" class="btn btn-primary mt-4">登录</button></section>
+    </main>
 
     <!-- Calendar and selection workspace -->
-    <div class="max-w-[1600px] mx-auto px-4 pb-6">
+    <div v-if="appTab === 'calendar'" class="max-w-[1600px] mx-auto px-4 pb-6">
       <div class="calendar-workspace">
       <div class="calendar-main">
       <!-- Loading -->
@@ -482,10 +471,10 @@
       const appConfig = ref({ auth_login_url: '' });
       const earnings = ref([]);
       const watchlist = ref([]);
+      const appTab = ref('calendar');
       const viewMode = ref('month');
       const currentDate = ref(new Date());
       const watchlistOnly = ref(false);
-      const showSearch = ref(false);
       const showIcalModal = ref(false);
       const searchQuery = ref('');
       const searchResults = ref([]);
@@ -516,6 +505,8 @@
         const d = currentDate.value;
         return d.toLocaleDateString('zh-CN', { year: 'numeric', month: 'long' });
       });
+      const usWatchlist = computed(() => watchlist.value.filter(item => item.market === 'US'));
+      const hkWatchlist = computed(() => watchlist.value.filter(item => item.market === 'HK'));
 
       function sameDay(d1, d2) {
         return d1.getFullYear() === d2.getFullYear() && d1.getMonth() === d2.getMonth() && d1.getDate() === d2.getDate();
@@ -634,9 +625,9 @@
 
       let searchTimer;
       async function doSearch() {
-        if (searchQuery.value.length < 1) { searchResults.value = []; return; }
-        searchLoading.value = true;
         clearTimeout(searchTimer);
+        if (searchQuery.value.length < 1) { searchResults.value = []; searchLoading.value = false; return; }
+        searchLoading.value = true;
         searchTimer = setTimeout(async () => {
           const data = await apiFetch(`/api/search?q=${encodeURIComponent(searchQuery.value)}`);
           searchResults.value = data || [];
@@ -651,7 +642,6 @@
         showToast('已添加 ' + symbol);
         searchQuery.value = '';
         searchResults.value = [];
-        showSearch.value = false;
       }
 
       async function removeFromWatchlist(symbol, market) {
@@ -791,8 +781,8 @@
       });
 
       return {
-        user, earnings, watchlist, viewMode, currentDate, watchlistOnly,
-        showSearch, showIcalModal, searchQuery, searchResults, searchLoading,
+        user, earnings, watchlist, appTab, viewMode, currentDate, watchlistOnly,
+        showIcalModal, searchQuery, searchResults, searchLoading, usWatchlist, hkWatchlist,
         icalUrl, copied, toast, weekdays, monthLabel, calendarCells,
         popularSuggestions, selectedEarning, decision, selectedDay,
         loading, error, showAdmin, adminLoading, adminSource, managedWatchlist, syncRuns, managedForm,
