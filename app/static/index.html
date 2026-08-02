@@ -86,12 +86,16 @@
     .detail-label { color: var(--text-muted); font-size: 12px; }
     .detail-value { color: var(--text); font-size: 12px; font-weight: 500; text-align: right; }
 
+    /* ── Calendar workspace ── */
+    .calendar-workspace { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; align-items: start; }
+    .calendar-main { min-width: 0; }
+    .selection-panel { min-width: 0; max-height: calc(100vh - 132px); overflow-y: auto; }
+    @media (min-width: 1024px) {
+      .calendar-workspace { grid-template-columns: minmax(0, 1fr) minmax(360px, 420px); }
+      .selection-panel { position: sticky; top: 56px; }
+    }
+
     /* ── Animations ── */
-    .slide-enter-active { transition: transform 0.25s ease, opacity 0.25s ease; }
-    .slide-leave-active { transition: transform 0.2s ease, opacity 0.2s ease; }
-    .slide-enter-from, .slide-leave-to { opacity: 0; }
-    .slide-enter-from .panel { transform: translateX(100%); }
-    .slide-leave-to .panel { transform: translateX(100%); }
 
     @keyframes spin { to { transform: rotate(360deg); } }
     .spinner { width: 16px; height: 16px; border: 2px solid var(--border-light); border-top-color: var(--primary); border-radius: 50%; animation: spin 0.6s linear infinite; }
@@ -203,8 +207,10 @@
       </div>
     </div>
 
-    <!-- Calendar -->
+    <!-- Calendar and selection workspace -->
     <div class="max-w-[1200px] mx-auto px-4 pb-6">
+      <div class="calendar-workspace">
+      <div class="calendar-main">
       <!-- Loading -->
       <div v-if="loading" class="mb-2 flex items-center gap-2 text-[12px]" style="color:var(--primary-light);">
         <div class="spinner"></div> 加载中...
@@ -235,7 +241,7 @@
                    class="badge cursor-pointer" :class="[('badge-' + e.market), { 'badge-mine': isMine(e), 'badge-predicted': e.is_predicted }]"
                    style="font-size:10px;padding:1px 5px;"
                    :title="e.company_name + (e.is_predicted ? ' (预测)' : '')"
-                   @click.stop="selectEarning(e)">
+                   @click.stop="selectEarning(e, cell)">
                 <span v-if="e.before_after === 'before'" class="before-tag">盘前</span>
                 <span v-else-if="e.before_after === 'after'" class="after-tag">盘后</span>
                 {{ e.symbol }}
@@ -262,10 +268,9 @@
       </div>
     </div>
 
-    <!-- Detail Panel -->
-    <transition name="slide">
-      <div v-if="selectedEarning" class="fixed inset-0 z-50 flex justify-end" @click.self="selectedEarning = null" style="background:rgba(0,0,0,0.5);backdrop-filter:blur(4px);">
-        <div class="panel w-full max-w-sm overflow-y-auto" style="background:var(--surface);border-left:1px solid var(--border);">
+    <!-- Detail panel: a persistent workspace column, never a modal overlay. -->
+    <aside v-if="selectedEarning" class="selection-panel surface" aria-label="财报详情">
+        <div class="w-full" style="background:var(--surface);">
           <div class="p-4">
             <div class="flex items-center justify-between mb-3">
               <div class="flex items-center gap-2">
@@ -274,7 +279,11 @@
                 <span v-if="selectedEarning.fiscal_year && selectedEarning.fiscal_quarter" class="text-[11px] font-medium" style="color:var(--text-muted);">{{ fqLabel(selectedEarning.fiscal_year, selectedEarning.fiscal_quarter) }}</span>
                 <span v-if="selectedEarning.is_predicted" class="predicted-tag">预测</span>
               </div>
-              <button @click="selectedEarning = null" class="btn btn-ghost" style="padding:4px;">
+              <button @click="selectedEarning = null" class="btn btn-ghost" style="padding:4px;" title="返回当日列表" aria-label="返回当日列表">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+                返回
+              </button>
+              <button @click="clearSelection" class="btn btn-ghost" style="padding:4px;" title="关闭面板" aria-label="关闭面板">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
               </button>
             </div>
@@ -397,15 +406,13 @@
             </div>
           </div>
         </div>
-      </div>
-    </transition>
+    </aside>
 
-    <!-- Day Detail Modal -->
-    <div v-if="selectedDay" class="fixed inset-0 z-50 flex items-center justify-center" style="background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);" @click.self="selectedDay = null">
-      <div class="surface p-4 max-w-lg w-full mx-4 max-h-[80vh] overflow-y-auto">
+    <!-- Same-day list shares the same non-overlay panel as earnings details. -->
+    <aside v-else-if="selectedDay" class="selection-panel surface p-4" aria-label="当日财报列表">
         <div class="flex items-center justify-between mb-3">
           <h3 class="text-[15px] font-semibold text-zinc-100">{{ selectedDay.date.toLocaleDateString('zh-CN', { weekday: 'long', month: 'long', day: 'numeric' }) }}</h3>
-          <button @click="selectedDay = null" class="btn btn-ghost" style="padding:4px;">
+          <button @click="clearSelection" class="btn btn-ghost" style="padding:4px;" title="关闭面板" aria-label="关闭面板">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
           </button>
         </div>
@@ -414,7 +421,7 @@
                class="flex items-center gap-2.5 p-2.5 rounded-lg cursor-pointer transition"
                style="background:var(--surface-raised);"
                @mouseenter="$event.target.style.background='var(--border)'" @mouseleave="$event.target.style.background='var(--surface-raised)'"
-               @click="selectedDay = null; selectEarning(e)">
+               @click="selectEarning(e)">
             <div class="flex-1 min-w-0">
               <div class="flex items-center gap-1.5">
                 <span class="text-[13px] font-semibold text-zinc-200">{{ e.symbol }}</span>
@@ -439,6 +446,7 @@
             </div>
           </div>
         </div>
+    </aside>
       </div>
     </div>
 
@@ -745,7 +753,8 @@
         return short + 'Q' + fq;
       }
 
-      async function selectEarning(e) {
+      async function selectEarning(e, day = null) {
+        if (day) selectedDay.value = day;
         selectedEarning.value = e;
         decision.value = null;
         if (e.id) {
@@ -755,11 +764,14 @@
       }
       async function selectCell(cell) {
         if (cell.earnings.length === 0) return;
-        if (cell.earnings.length === 1) {
-          await selectEarning(cell.earnings[0]);
-        } else {
-          selectedDay.value = cell;
-        }
+        selectedEarning.value = null;
+        decision.value = null;
+        selectedDay.value = cell;
+      }
+      function clearSelection() {
+        selectedEarning.value = null;
+        selectedDay.value = null;
+        decision.value = null;
       }
 
       function prevMonth() {
@@ -811,7 +823,7 @@
         loading, error, showAdmin, adminLoading, adminSource, managedWatchlist, syncRuns, managedForm,
         prevMonth, nextMonth, goToday, login, copyIcal, openAdmin, saveManaged, editManaged, deleteManaged, resetManaged, fmtDateTime,
         doSearch, addToWatchlist, removeFromWatchlist, isMine, showToast,
-        selectCell, selectEarning,
+        selectCell, selectEarning, clearSelection,
         epsSurplus, epsSurplusClass, revSurplus, revSurplusClass,
         fmtNum, fmtPct, fmtBigNum, estimateSourceLabel, hasLongbridgeConsensus, fqLabel,
       };
