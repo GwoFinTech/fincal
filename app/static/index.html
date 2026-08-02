@@ -73,7 +73,8 @@
     .btn-ghost:hover { background: var(--surface-raised); color: var(--text); }
 
     /* ── Calendar ── */
-    .calendar-cell { min-height: 100px; padding: 6px; position: relative; overflow: hidden; cursor: pointer; transition: background 0.15s; }
+    .calendar-cell { min-height: 112px; padding: 7px; position: relative; overflow: hidden; cursor: pointer; transition: background 0.15s; }
+    .calendar-cell .before-tag, .calendar-cell .after-tag { display: none; }
     .calendar-cell:hover { background: var(--surface-raised); }
     .calendar-cell.out { opacity: 0.35; }
     .calendar-cell.today .day-num { background: var(--primary); color: white; width: 24px; height: 24px; border-radius: 50%; display: flex; align-items: center; justify-content: center; }
@@ -91,8 +92,12 @@
     .calendar-main { min-width: 0; }
     .selection-panel { min-width: 0; max-height: calc(100vh - 132px); overflow-y: auto; }
     @media (min-width: 1024px) {
-      .calendar-workspace { grid-template-columns: minmax(0, 1fr) minmax(360px, 420px); }
+      .calendar-workspace { grid-template-columns: minmax(0, 1fr) minmax(340px, 390px); }
       .selection-panel { position: sticky; top: 56px; }
+    }
+    @media (min-width: 1440px) {
+      .calendar-workspace { grid-template-columns: minmax(0, 1fr) 400px; gap: 20px; }
+      .calendar-cell { min-height: 126px; }
     }
 
     /* ── Animations ── */
@@ -119,7 +124,7 @@
   <div id="app">
     <!-- Header -->
     <header class="sticky top-0 z-40" style="background:rgba(9,9,11,0.8);backdrop-filter:blur(12px);border-bottom:1px solid var(--border);">
-      <div class="max-w-[1200px] mx-auto px-4 h-10 flex items-center justify-between">
+      <div class="max-w-[1600px] mx-auto px-4 h-10 flex items-center justify-between">
         <div class="flex items-center gap-2.5">
           <div class="w-7 h-7 rounded-md flex items-center justify-center text-white font-bold text-xs" style="background:var(--primary);">FC</div>
           <h1 class="text-sm font-semibold text-zinc-100">FinCal</h1>
@@ -134,7 +139,7 @@
     </header>
 
     <!-- Controls -->
-    <div class="max-w-[1200px] mx-auto px-4 py-3 flex flex-wrap items-center gap-2">
+    <div class="max-w-[1600px] mx-auto px-4 py-3 flex flex-wrap items-center gap-2">
       <div class="flex border-b" style="border-color:var(--border);">
         <button @click="viewMode='month'" :class="viewMode==='month' ? 'tab-active' : 'tab-inactive'" class="pb-1.5 px-2.5 text-[13px] font-medium transition">月</button>
         <button @click="viewMode='week'" :class="viewMode==='week' ? 'tab-active' : 'tab-inactive'" class="pb-1.5 px-2.5 text-[13px] font-medium transition">周</button>
@@ -172,7 +177,7 @@
 
     <!-- Search panel -->
     <transition name="slide">
-      <div v-if="showSearch" class="max-w-[1200px] mx-auto px-4 pb-3">
+      <div v-if="showSearch" class="max-w-[1600px] mx-auto px-4 pb-3">
         <div class="surface p-3">
           <div class="flex gap-2 mb-2">
             <input v-model="searchQuery" @input="doSearch" placeholder="搜索代码或公司名..." class="flex-1 text-[13px] px-3 py-1.5 rounded-md" style="background:var(--surface-raised);border:1px solid var(--border);color:var(--text);outline:none;" @focus="$event.target.style.borderColor='var(--primary)'" @blur="$event.target.style.borderColor='var(--border)'" />
@@ -196,7 +201,7 @@
     </transition>
 
     <!-- Watchlist pills -->
-    <div v-if="user && watchlist.length > 0" class="max-w-[1200px] mx-auto px-4 pb-2">
+    <div v-if="user && watchlist.length > 0" class="max-w-[1600px] mx-auto px-4 pb-2">
       <div class="flex flex-wrap gap-1.5 items-center">
         <span class="text-[11px] text-zinc-600">自选:</span>
         <span v-for="w in watchlist" :key="w.symbol+w.market" class="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-md group" style="background:var(--surface-raised);border:1px solid var(--border);color:var(--text-secondary);">
@@ -208,7 +213,7 @@
     </div>
 
     <!-- Calendar and selection workspace -->
-    <div class="max-w-[1200px] mx-auto px-4 pb-6">
+    <div class="max-w-[1600px] mx-auto px-4 pb-6">
       <div class="calendar-workspace">
       <div class="calendar-main">
       <!-- Loading -->
@@ -261,8 +266,6 @@
       <div class="flex items-center gap-3 mt-2 text-[11px] flex-wrap" style="color:var(--text-muted);">
         <span class="flex items-center gap-1"><span class="badge badge-US" style="font-size:9px;padding:0 4px;">US</span> 美股</span>
         <span class="flex items-center gap-1"><span class="badge badge-HK" style="font-size:9px;padding:0 4px;">HK</span> 港股</span>
-        <span class="flex items-center gap-1"><span class="before-tag">盘前</span></span>
-        <span class="flex items-center gap-1"><span class="after-tag">盘后</span></span>
         <span class="flex items-center gap-1"><span class="beat">↑</span> 超预期</span>
         <span class="flex items-center gap-1"><span class="miss">↓</span> 不及预期</span>
       </div>
