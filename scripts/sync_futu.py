@@ -216,15 +216,25 @@ def sync_actuals(ctx) -> int:
 
 if __name__ == "__main__":
     from app.db import init_db
+    from app.sync_audit import start_run, finish_run
     init_db()
 
     ctx = create_futu_context()
     if ctx is None:
+        run_id = start_run("futu", "futu")
+        finish_run(run_id, status="skipped", error_code="opend_unavailable")
         sys.exit(0)  # Non-fatal — skip Futu sync
 
+    symbols = get_source().get_futu_symbols()
+    run_id = start_run("futu", "futu", symbol_count=len(symbols))
     try:
-        sync_earnings_dates(ctx)
-        sync_actuals(ctx)
+        date_count = sync_earnings_dates(ctx)
+        actual_count = sync_actuals(ctx)
+    except Exception:
+        finish_run(run_id, status="failed", error_code="futu_sync_failed")
+        raise
+    else:
+        finish_run(run_id, status="success", record_count=date_count, details={"actual_symbols": actual_count})
     finally:
         ctx.close()
         logger.info("Futu context closed")

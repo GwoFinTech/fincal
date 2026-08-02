@@ -210,9 +210,17 @@ def sync_earnings():
             logger.info(f"  Flushed final {len(batch)} records")
 
     logger.info(f"=== Sync complete: {total} records processed ===")
+    return total
 
 
 if __name__ == "__main__":
     from app.db import init_db
+    from app.sync_audit import start_run, finish_run
     init_db()
-    sync_earnings()
+    run_id = start_run("longbridge", "longbridge")
+    try:
+        total = sync_earnings()
+    except Exception:
+        finish_run(run_id, status="failed", error_code="longbridge_sync_failed")
+        raise
+    finish_run(run_id, status="success", record_count=total)

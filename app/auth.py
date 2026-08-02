@@ -17,6 +17,13 @@ def get_current_user(request: Request) -> dict:
     }
 
 
+def require_admin(user: dict) -> dict:
+    """Require the role injected by kazusa-home-portal forwardAuth."""
+    if user.get("role", "").strip().lower() != "admin":
+        raise HTTPException(status_code=403, detail="admin_required")
+    return user
+
+
 def ensure_user(portal_user_id: int, email: str, name: str) -> dict:
     """Ensure user exists in fincal DB, create if not. Returns user dict."""
     with db.db_cursor() as cur:

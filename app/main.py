@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from . import db
-from .routers import api, ical as ical_router
+from .routers import api, admin, ical as ical_router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -28,6 +28,7 @@ app.include_router(ical_router.router)
 
 # API routes (behind forwardAuth)
 app.include_router(api.router)
+app.include_router(admin.router)
 
 # Static Vue SPA
 static_dir = os.path.join(os.path.dirname(__file__), "static")

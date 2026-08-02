@@ -26,6 +26,8 @@ def api_me(user=Depends(get_current_user)):
         "portal_user_id": fincal_user["portal_user_id"],
         "email": fincal_user["email"],
         "name": fincal_user["name"],
+        "role": user["role"],
+        "is_admin": user["role"].strip().lower() == "admin",
         "ical_token": fincal_user["ical_token"],
         "ical_url": f"{config.ICAL_BASE_URL}/ical/{fincal_user['ical_token']}",
     }

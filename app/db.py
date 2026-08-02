@@ -87,3 +87,30 @@ def init_db():
         cur.execute("""
             CREATE INDEX IF NOT EXISTS idx_watchlist_user ON watchlist(user_id);
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS managed_watchlist (
+                id SERIAL PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                market TEXT NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                UNIQUE(symbol, market)
+            );
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS sync_runs (
+                id BIGSERIAL PRIMARY KEY,
+                stage TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('running', 'success', 'failed', 'skipped')),
+                source TEXT NOT NULL,
+                symbol_count INTEGER NOT NULL DEFAULT 0,
+                record_count INTEGER NOT NULL DEFAULT 0,
+                details JSONB NOT NULL DEFAULT '{}'::jsonb,
+                error_code TEXT,
+                started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                finished_at TIMESTAMPTZ
+            );
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_sync_runs_started_at ON sync_runs(started_at DESC);
+        """)
