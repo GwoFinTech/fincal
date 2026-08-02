@@ -40,22 +40,28 @@ def fetch_earnings_from_db(
         end = date.today() + timedelta(days=90)
 
     with db.db_cursor() as cur:
-        conditions = ["report_date BETWEEN %s AND %s"]
+        conditions = ["e.report_date BETWEEN %s AND %s"]
         params: list = [start, end]
 
         if symbols:
             placeholders = ",".join(["%s"] * len(symbols))
-            conditions.append(f"symbol IN ({placeholders})")
+            conditions.append(f"e.symbol IN ({placeholders})")
             params.extend(symbols)
 
         if markets:
             placeholders = ",".join(["%s"] * len(markets))
-            conditions.append(f"market IN ({placeholders})")
+            conditions.append(f"e.market IN ({placeholders})")
             params.extend(markets)
 
         where = " AND ".join(conditions)
         cur.execute(
-            f"SELECT * FROM earnings WHERE {where} ORDER BY report_date, market, symbol",
+            f"""SELECT e.*, c.currency AS consensus_currency, c.eps_gaap AS consensus_eps_gaap,
+                   c.eps_adjusted AS consensus_eps_adjusted, c.revenue AS consensus_revenue,
+                   c.ebit AS consensus_ebit, c.net_income AS consensus_net_income,
+                   c.normalized_net_income AS consensus_normalized_net_income, c.fetched_at AS consensus_fetched_at
+            FROM earnings e LEFT JOIN earnings_consensus c ON c.symbol=e.symbol AND c.market=e.market
+              AND c.fiscal_year=e.fiscal_year AND c.fiscal_quarter=e.fiscal_quarter AND c.source='longbridge'
+            WHERE {where} ORDER BY e.report_date, e.market, e.symbol""",
             params,
         )
         return [dict(row) for row in cur.fetchall()]

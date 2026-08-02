@@ -357,6 +357,22 @@
               </div>
               <p v-if="selectedEarning.eps_estimate != null || selectedEarning.revenue_estimate != null" class="mt-2 text-[11px] leading-4" style="color:var(--text-muted);">预期来源：Longbridge 分析师一致预期；不同供应商、GAAP/调整后口径及更新时间可能有偏差。</p>
             </div>
+
+            <!-- Longbridge quarterly consensus section -->
+            <div v-if="hasLongbridgeConsensus(selectedEarning)" class="section-title flex items-center gap-1.5">
+              <svg class="w-3.5 h-3.5" style="color:var(--text-muted);" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 19V5m0 14h16M8 16v-5m4 5V8m4 8v-3"/></svg>
+              Longbridge 一致预期
+            </div>
+            <div v-if="hasLongbridgeConsensus(selectedEarning)" class="surface p-3 mb-3">
+              <div class="detail-row"><span class="detail-label">GAAP EPS</span><span class="detail-value">{{ fmtNum(selectedEarning.consensus_eps_gaap) }}</span></div>
+              <div class="detail-row"><span class="detail-label">调整后 EPS</span><span class="detail-value">{{ fmtNum(selectedEarning.consensus_eps_adjusted) }}</span></div>
+              <div class="detail-row"><span class="detail-label">营收</span><span class="detail-value">{{ fmtBigNum(selectedEarning.consensus_revenue) }}</span></div>
+              <div class="detail-row"><span class="detail-label">EBIT</span><span class="detail-value">{{ fmtBigNum(selectedEarning.consensus_ebit) }}</span></div>
+              <div class="detail-row"><span class="detail-label">净利润</span><span class="detail-value">{{ fmtBigNum(selectedEarning.consensus_net_income) }}</span></div>
+              <div class="detail-row"><span class="detail-label">币种</span><span class="detail-value">{{ selectedEarning.consensus_currency || '—' }}</span></div>
+              <div class="detail-row"><span class="detail-label">采集时间</span><span class="detail-value">{{ fmtDateTime(selectedEarning.consensus_fetched_at) }}</span></div>
+              <p class="mt-2 text-[11px] leading-4" style="color:var(--text-muted);">数据来源：Longbridge 季度分析师一致预期；GAAP 与调整后口径不可直接混用。</p>
+            </div>
           </div>
         </div>
       </div>
@@ -695,6 +711,11 @@
         return '历史来源待确认';
       }
 
+      function hasLongbridgeConsensus(e) {
+        return ['consensus_eps_gaap', 'consensus_eps_adjusted', 'consensus_revenue', 'consensus_ebit', 'consensus_net_income']
+          .some(key => e[key] != null);
+      }
+
       function fqLabel(fy, fq) {
         if (!fy || !fq) return '';
         const short = String(fy).slice(-2);
@@ -764,7 +785,7 @@
         doSearch, addToWatchlist, removeFromWatchlist, isMine, showToast,
         selectCell, selectEarning,
         epsSurplus, epsSurplusClass, revSurplus, revSurplusClass,
-        fmtNum, fmtPct, fmtBigNum, estimateSourceLabel, fqLabel,
+        fmtNum, fmtPct, fmtBigNum, estimateSourceLabel, hasLongbridgeConsensus, fqLabel,
       };
     }
   }).mount('#app');
