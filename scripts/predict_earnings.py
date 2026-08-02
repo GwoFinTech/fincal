@@ -148,11 +148,13 @@ def predict_for_symbol(symbol: str, market: str) -> int:
         with db_cursor() as cur:
             cur.execute(
                 """INSERT INTO earnings (symbol, market, company_name, report_date, report_type,
-                   fiscal_year, fiscal_quarter, before_after, is_predicted)
-                VALUES (%s, %s, %s, %s, 'Q', %s, %s, %s, TRUE)
+                   fiscal_year, fiscal_quarter, before_after, is_predicted, date_source, date_status)
+                VALUES (%s, %s, %s, %s, 'Q', %s, %s, %s, TRUE, 'algorithm', 'predicted')
                 ON CONFLICT (symbol, market, report_date, report_type)
                 DO UPDATE SET
                     is_predicted = TRUE,
+                    date_source = 'algorithm',
+                    date_status = 'predicted',
                     before_after = COALESCE(EXCLUDED.before_after, earnings.before_after),
                     company_name = CASE WHEN earnings.company_name = '' THEN EXCLUDED.company_name ELSE earnings.company_name END,
                     updated_at = NOW()

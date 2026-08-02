@@ -78,12 +78,36 @@ def init_db():
                 before_after TEXT,
                 updated_at TIMESTAMPTZ DEFAULT NOW(),
                 is_predicted BOOLEAN DEFAULT FALSE,
+                date_source TEXT NOT NULL DEFAULT 'unknown',
+                date_status TEXT NOT NULL DEFAULT 'scheduled',
+                estimate_source TEXT,
+                estimate_as_of TIMESTAMPTZ,
+                estimate_currency TEXT,
+                estimate_basis TEXT,
+                actual_source TEXT,
+                actual_as_of TIMESTAMPTZ,
                 UNIQUE(symbol, market, report_date, report_type)
             );
         """)
         cur.execute("""
             CREATE INDEX IF NOT EXISTS idx_earnings_report_date ON earnings(report_date);
         """)
+        # CREATE TABLE does not add fields to installations created by older releases.
+        for column, definition in (
+            ("date_source", "TEXT NOT NULL DEFAULT 'unknown'"), ("date_status", "TEXT NOT NULL DEFAULT 'scheduled'"),
+            ("estimate_source", "TEXT"), ("estimate_as_of", "TIMESTAMPTZ"), ("estimate_currency", "TEXT"),
+            ("estimate_basis", "TEXT"), ("actual_source", "TEXT"), ("actual_as_of", "TIMESTAMPTZ"),
+        ):
+            cur.execute(f"ALTER TABLE earnings ADD COLUMN IF NOT EXISTS {column} {definition}")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS earnings_estimate_snapshots (
+                id BIGSERIAL PRIMARY KEY, earning_id INTEGER NOT NULL REFERENCES earnings(id) ON DELETE CASCADE,
+                source TEXT NOT NULL, captured_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), eps_estimate NUMERIC,
+                revenue_estimate NUMERIC, currency TEXT, basis TEXT, payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+                UNIQUE(earning_id, source, captured_at)
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_estimate_snapshots_earning_time ON earnings_estimate_snapshots(earning_id, captured_at DESC)")
         cur.execute("""
             CREATE INDEX IF NOT EXISTS idx_watchlist_user ON watchlist(user_id);
         """)

@@ -310,7 +310,7 @@
             </div>
             <div class="surface p-3 mb-3">
               <div class="detail-row">
-                <span class="detail-label">一致预期 <span title="来源：Longbridge 分析师一致预期；不同数据供应商、口径或更新时间可能存在偏差。" style="color:var(--primary-light);cursor:help;">ⓘ Longbridge</span></span>
+                <span class="detail-label">一致预期 <span title="一致预期的来源与采集时间由数据记录决定；不同供应商、口径或更新时间可能存在偏差。" style="color:var(--primary-light);cursor:help;">ⓘ {{ estimateSourceLabel(selectedEarning) }}</span></span>
                 <span class="detail-value">{{ selectedEarning.eps_estimate != null ? fmtNum(selectedEarning.eps_estimate) : '—' }}</span>
               </div>
               <div class="detail-row">
@@ -337,7 +337,7 @@
             </div>
             <div class="surface p-3 mb-3">
               <div class="detail-row">
-                <span class="detail-label">一致预期 <span title="来源：Longbridge 分析师一致预期；不同数据供应商、口径或更新时间可能存在偏差。" style="color:var(--primary-light);cursor:help;">ⓘ Longbridge</span></span>
+                <span class="detail-label">一致预期 <span title="一致预期的来源与采集时间由数据记录决定；不同供应商、口径或更新时间可能存在偏差。" style="color:var(--primary-light);cursor:help;">ⓘ {{ estimateSourceLabel(selectedEarning) }}</span></span>
                 <span class="detail-value">{{ selectedEarning.revenue_estimate != null ? fmtBigNum(selectedEarning.revenue_estimate) : '—' }}</span>
               </div>
               <div class="detail-row">
@@ -690,6 +690,11 @@
         return v.toLocaleString();
       }
 
+      function estimateSourceLabel(e) {
+        if (e.estimate_source === 'longbridge') return 'Longbridge';
+        return '历史来源待确认';
+      }
+
       function fqLabel(fy, fq) {
         if (!fy || !fq) return '';
         const short = String(fy).slice(-2);
@@ -759,7 +764,7 @@
         doSearch, addToWatchlist, removeFromWatchlist, isMine, showToast,
         selectCell, selectEarning,
         epsSurplus, epsSurplusClass, revSurplus, revSurplusClass,
-        fmtNum, fmtPct, fmtBigNum, fqLabel,
+        fmtNum, fmtPct, fmtBigNum, estimateSourceLabel, fqLabel,
       };
     }
   }).mount('#app');
