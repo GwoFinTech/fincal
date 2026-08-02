@@ -315,59 +315,22 @@
               <p v-if="selectedEarning.is_predicted" class="mt-2 text-[11px] leading-4" style="color:var(--text-muted);">日期预测：基于历史财报发布日期推算，实际公告时间可能调整。</p>
             </div>
 
-            <!-- EPS section -->
+            <!-- Futu-style earnings comparison -->
             <div class="section-title flex items-center gap-1.5">
-              <svg class="w-3.5 h-3.5" style="color:var(--text-muted);" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"/></svg>
-              每股收益 (EPS)
+              <svg class="w-3.5 h-3.5" style="color:var(--text-muted);" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 19V5m0 14h16M8 16v-5m4 5V8m4 8v-3"/></svg>
+              业绩对比
             </div>
-            <div class="surface p-3 mb-3">
-              <div class="detail-row">
-                <span class="detail-label">一致预期 <span title="一致预期的来源与采集时间由数据记录决定；不同供应商、口径或更新时间可能存在偏差。" style="color:var(--primary-light);cursor:help;">ⓘ {{ estimateSourceLabel(selectedEarning) }}</span></span>
-                <span class="detail-value">{{ selectedEarning.eps_estimate != null ? fmtNum(selectedEarning.eps_estimate) : '—' }}</span>
-              </div>
-              <div class="detail-row">
-                <span class="detail-label">实际值</span>
-                <span class="detail-value">
-                  <template v-if="selectedEarning.eps_actual != null">
-                    <span :class="epsSurplusClass(selectedEarning)">{{ fmtNum(selectedEarning.eps_actual) }}</span>
-                  </template>
-                  <template v-else><span style="color:var(--text-muted);">未公布</span></template>
-                </span>
-              </div>
-              <div class="detail-row" v-if="selectedEarning.eps_estimate != null && selectedEarning.eps_actual != null">
-                <span class="detail-label">惊喜</span>
-                <span class="detail-value" :class="epsSurplusClass(selectedEarning)">
-                  {{ epsSurplus(selectedEarning) > 0 ? '+' : '' }}{{ fmtPct(epsSurplus(selectedEarning)) }}
-                </span>
-              </div>
-            </div>
-
-            <!-- Revenue section -->
-            <div class="section-title flex items-center gap-1.5">
-              <svg class="w-3.5 h-3.5" style="color:var(--text-muted);" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-              营收 (Revenue)
-            </div>
-            <div class="surface p-3 mb-3">
-              <div class="detail-row">
-                <span class="detail-label">一致预期 <span title="一致预期的来源与采集时间由数据记录决定；不同供应商、口径或更新时间可能存在偏差。" style="color:var(--primary-light);cursor:help;">ⓘ {{ estimateSourceLabel(selectedEarning) }}</span></span>
-                <span class="detail-value">{{ selectedEarning.revenue_estimate != null ? fmtBigNum(selectedEarning.revenue_estimate) : '—' }}</span>
-              </div>
-              <div class="detail-row">
-                <span class="detail-label">实际值</span>
-                <span class="detail-value">
-                  <template v-if="selectedEarning.revenue_actual != null">
-                    <span :class="revSurplusClass(selectedEarning)">{{ fmtBigNum(selectedEarning.revenue_actual) }}</span>
-                  </template>
-                  <template v-else><span style="color:var(--text-muted);">未公布</span></template>
-                </span>
-              </div>
-              <div class="detail-row" v-if="selectedEarning.revenue_estimate != null && selectedEarning.revenue_actual != null">
-                <span class="detail-label">惊喜</span>
-                <span class="detail-value" :class="revSurplusClass(selectedEarning)">
-                  {{ revSurplus(selectedEarning) > 0 ? '+' : '' }}{{ fmtPct(revSurplus(selectedEarning)) }}
-                </span>
-              </div>
-              <p v-if="selectedEarning.eps_estimate != null || selectedEarning.revenue_estimate != null" class="mt-2 text-[11px] leading-4" style="color:var(--text-muted);">预期来源：Longbridge 分析师一致预期；不同供应商、GAAP/调整后口径及更新时间可能有偏差。</p>
+            <div class="surface mb-3 overflow-x-auto">
+              <table class="w-full min-w-[390px] text-[11px]">
+                <thead style="background:var(--surface-raised);color:var(--text-muted);">
+                  <tr><th class="text-left p-2 font-medium">指标</th><th class="text-right p-2 font-medium">预期值<br><span class="font-normal text-[10px]">绝对值 / 同比</span></th><th class="text-right p-2 font-medium">实际值<br><span class="font-normal text-[10px]">绝对值 / 同比</span></th><th class="text-right p-2 font-medium">较预期<br><span class="font-normal text-[10px]">绝对值 / 涨跌幅</span></th></tr>
+                </thead>
+                <tbody>
+                  <tr style="border-top:1px solid var(--border);"><th class="text-left p-2 font-medium">营收</th><td class="p-2 text-right">{{ fmtBigNum(selectedEarning.revenue_estimate) }}<br><span style="color:var(--text-muted);">—</span></td><td class="p-2 text-right">{{ fmtBigNum(selectedEarning.revenue_actual) }}<br><span style="color:var(--text-muted);">{{ decision ? fmtPct(decision.actual_growth.revenue_yoy) : '—' }}</span></td><td class="p-2 text-right" :class="revSurplusClass(selectedEarning)">{{ fmtBigNum(metricDelta(selectedEarning.revenue_actual, selectedEarning.revenue_estimate)) }}<br>{{ signedPct(revSurplus(selectedEarning)) }}</td></tr>
+                  <tr style="border-top:1px solid var(--border);"><th class="text-left p-2 font-medium">EPS</th><td class="p-2 text-right">{{ fmtNum(selectedEarning.eps_estimate) }}<br><span style="color:var(--text-muted);">—</span></td><td class="p-2 text-right">{{ fmtNum(selectedEarning.eps_actual) }}<br><span style="color:var(--text-muted);">{{ decision ? fmtPct(decision.actual_growth.eps_yoy) : '—' }}</span></td><td class="p-2 text-right" :class="epsSurplusClass(selectedEarning)">{{ fmtNum(metricDelta(selectedEarning.eps_actual, selectedEarning.eps_estimate)) }}<br>{{ signedPct(epsSurplus(selectedEarning)) }}</td></tr>
+                </tbody>
+              </table>
+              <p class="px-3 pb-3 text-[11px] leading-4" style="color:var(--text-muted);">预期来源：{{ estimateSourceLabel(selectedEarning) }}。同比仅基于已披露实际值；预期同比缺少同口径历史一致预期时显示“—”。</p>
             </div>
 
             <!-- Longbridge quarterly consensus section -->
@@ -703,7 +666,7 @@
       }
 
       function epsSurplus(e) {
-        if (e.eps_estimate == null || e.eps_actual == null) return 0;
+        if (e.eps_estimate == null || e.eps_actual == null) return null;
         const diff = e.eps_actual - e.eps_estimate;
         if (Math.abs(e.eps_estimate) < 0.0001) return diff > 0 ? 1 : diff < 0 ? -1 : 0;
         return diff / Math.abs(e.eps_estimate);
@@ -713,7 +676,7 @@
         return s > 0.001 ? 'beat' : s < -0.001 ? 'miss' : '';
       }
       function revSurplus(e) {
-        if (e.revenue_estimate == null || e.revenue_actual == null) return 0;
+        if (e.revenue_estimate == null || e.revenue_actual == null) return null;
         const diff = e.revenue_actual - e.revenue_estimate;
         if (Math.abs(e.revenue_estimate) < 0.0001) return diff > 0 ? 1 : diff < 0 ? -1 : 0;
         return diff / Math.abs(e.revenue_estimate);
@@ -721,6 +684,15 @@
       function revSurplusClass(e) {
         const s = revSurplus(e);
         return s > 0.001 ? 'beat' : s < -0.001 ? 'miss' : '';
+      }
+
+      function metricDelta(actual, estimate) {
+        return actual == null || estimate == null ? null : Number(actual) - Number(estimate);
+      }
+      function signedPct(ratio) {
+        if (ratio == null) return '—';
+        const text = fmtPct(ratio);
+        return ratio > 0 ? '+' + text : text;
       }
 
       function fmtNum(n) {
@@ -828,7 +800,7 @@
         doSearch, addToWatchlist, removeFromWatchlist, isMine, showToast,
         selectCell, selectEarning, clearSelection,
         epsSurplus, epsSurplusClass, revSurplus, revSurplusClass,
-        fmtNum, fmtPct, fmtBigNum, estimateSourceLabel, hasLongbridgeConsensus, fqLabel,
+        fmtNum, fmtPct, fmtBigNum, metricDelta, signedPct, estimateSourceLabel, hasLongbridgeConsensus, fqLabel,
       };
     }
   }).mount('#app');
