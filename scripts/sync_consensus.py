@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Persist Longbridge per-quarter consensus for the managed universe."""
-import json, logging, os, subprocess, sys
+import json, logging, os, subprocess, sys, time
 from decimal import Decimal, InvalidOperation
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.db import db_cursor, init_db
@@ -22,9 +22,19 @@ def sync():
     for market, symbols in get_source().get_symbols_by_market().items():
         for symbol in symbols:
             try:
-                p=subprocess.run(["longbridge","consensus",lb_symbol(symbol,market),"--format","json"],capture_output=True,text=True,timeout=30)
-                if p.returncode: raise RuntimeError(p.stderr[:120])
+                p = None
+                for attempt in range(4):
+                    p=subprocess.run(["longbridge","consensus",lb_symbol(symbol,market),"--format","json"],capture_output=True,text=True,timeout=30)
+                    if p.returncode == 0:
+                        break
+                    if "429002" not in p.stderr or attempt == 3:
+                        raise RuntimeError(p.stderr[:120])
+                    delay = 20 * (attempt + 1)
+                    log.warning("consensus rate limited for %s; retrying in %ss", symbol, delay)
+                    time.sleep(delay)
+                assert p is not None
                 data=json.loads(p.stdout)
+                time.sleep(3)  # Longbridge consensus endpoint enforces a tight per-minute quota
                 for period in data.get("list",[]):
                     fy,fq=period.get("fiscal_year"),period.get("fiscal_period")
                     if not fy or not fq: continue
