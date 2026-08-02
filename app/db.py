@@ -108,6 +108,13 @@ def init_db():
             )
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_estimate_snapshots_earning_time ON earnings_estimate_snapshots(earning_id, captured_at DESC)")
+        cur.execute("""CREATE TABLE IF NOT EXISTS earnings_consensus (
+            id BIGSERIAL PRIMARY KEY, symbol TEXT NOT NULL, market TEXT NOT NULL, fiscal_year INTEGER NOT NULL, fiscal_quarter INTEGER NOT NULL,
+            currency TEXT, eps_gaap NUMERIC, eps_adjusted NUMERIC, revenue NUMERIC, ebit NUMERIC, net_income NUMERIC, normalized_net_income NUMERIC,
+            source TEXT NOT NULL DEFAULT 'longbridge', fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+            UNIQUE(symbol, market, fiscal_year, fiscal_quarter, source)
+        )""")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_earnings_consensus_lookup ON earnings_consensus(symbol, market, fiscal_year, fiscal_quarter)")
         cur.execute("""
             CREATE INDEX IF NOT EXISTS idx_watchlist_user ON watchlist(user_id);
         """)
