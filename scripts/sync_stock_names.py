@@ -73,9 +73,9 @@ if __name__ == "__main__":
     run_id = start_run("stock_names", "kurumi+longbridge+futu")
     try:
         count = main()
-        finish_run(run_id, "success", record_count=count, details={"filled": count})
+        finish_run(run_id, status="success", record_count=count, details={"filled": count})
     except Exception as exc:  # noqa: BLE001
         logger.exception("stock name sync failed")
-        finish_run(run_id, "failed", error_code="stock_names_sync_failed",
+        finish_run(run_id, status="failed", error_code="stock_names_sync_failed",
                    details={"error": str(exc)})
         raise

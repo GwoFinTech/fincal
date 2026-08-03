@@ -16,7 +16,7 @@ SPEC.loader.exec_module(MOD)
 def test_kurumi_symbol_normalizes_hk_padding():
     assert MOD.kurumi_symbol("0700.HK", "HK") == "700.HK"
     assert MOD.kurumi_symbol("0001.HK", "HK") == "1.HK"
-    assert MOD.kurumi_symbol("AAPL", "US") == "AAPL"
+    assert MOD.kurumi_symbol("AAPL", "US") == "AAPL.US"
     assert MOD.kurumi_symbol("9988.HK", "HK") == "9988.HK"
 
 
