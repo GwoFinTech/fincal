@@ -391,7 +391,7 @@
               <p class="text-[11px] truncate" style="color:var(--text-muted);" v-if="e.company_name">{{ e.company_name }}</p>
             </div>
             <div class="text-right text-[12px] flex flex-col items-end gap-1" v-if="e.eps_estimate != null || e.eps_actual != null">
-              <button v-if="user" @click="toggleWatchlist(e.symbol, e.market)" class="btn btn-ghost" :class="isMine(e) ? 'text-amber-400' : 'text-zinc-500'" style="padding:3px 8px;font-size:11px;border:1px solid var(--border);border-radius:6px;" :title="isMine(e) ? '从自选移除' : '加入自选'" aria-label="切换自选">
+              <button v-if="user" @click.stop="toggleWatchlist(e.symbol, e.market)" class="btn btn-ghost" :class="isMine(e) ? 'text-amber-400' : 'text-zinc-500'" style="padding:3px 8px;font-size:11px;border:1px solid var(--border);border-radius:6px;" :title="isMine(e) ? '从自选移除' : '加入自选'" aria-label="切换自选">
                 {{ isMine(e) ? '★ 已自选' : '☆ 加自选' }}
               </button>
               <div v-if="e.eps_actual != null" :class="epsSurplusClass(e)" class="font-medium">
