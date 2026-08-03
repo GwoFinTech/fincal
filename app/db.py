@@ -134,6 +134,13 @@ def init_db():
             UNIQUE(symbol, market, source)
         )""")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_institution_ratings_lookup ON earnings_institution_ratings(symbol, market)")
+        cur.execute("""CREATE TABLE IF NOT EXISTS stock_names (
+            id BIGSERIAL PRIMARY KEY, symbol TEXT NOT NULL, market TEXT NOT NULL,
+            company_name TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT '',
+            fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE(symbol, market)
+        )""")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_stock_names_lookup ON stock_names(symbol, market)")
         cur.execute("""CREATE TABLE IF NOT EXISTS earnings_guidance_status (
             id BIGSERIAL PRIMARY KEY, symbol TEXT NOT NULL, market TEXT NOT NULL,
             status TEXT NOT NULL CHECK (status IN ('available', 'unavailable')), reason TEXT,

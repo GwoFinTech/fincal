@@ -46,3 +46,7 @@ LONGBRIDGE_ACCESS_TOKEN=os.getenv("LONGBRIDGE_ACCESS_TOKEN", "")
 
 # iCal subscription base URL (must be publicly accessible)
 ICAL_BASE_URL = os.getenv("ICAL_BASE_URL", "")
+
+# Kurumi (tsummt) API — preferred company-name source for FinCal symbols.
+KURUMI_API_URL = os.getenv("KURUMI_API_URL", "http://localhost:8000")
+KURUMI_API_TIMEOUT = float(os.getenv("KURUMI_API_TIMEOUT", "5"))
