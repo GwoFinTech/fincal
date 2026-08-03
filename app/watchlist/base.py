@@ -5,6 +5,7 @@ Subclasses implement `fetch_symbols()` only.  Derived accessors
 with an in-memory cache that callers can bust via `refresh()`.
 """
 from abc import ABC, abstractmethod
+from ..symbol import normalize
 
 
 class WatchlistSource(ABC):
@@ -30,13 +31,15 @@ class WatchlistSource(ABC):
         return list(self._raw_cache)
 
     def get_symbols_by_market(self, *, force_refresh: bool = False) -> dict[str, list[str]]:
-        """``{'US': ['AAPL', …], 'HK': ['0700.HK', …]}``"""
+        """``{'US': ['AAPL', …], 'HK': ['0700.HK', …]}`` — HK codes are
+        normalized to the canonical 4-digit zero-padded form so they match
+        the earnings table keys (700.HK -> 0700.HK)."""
         codes = self.get_symbols(force_refresh=force_refresh)
         result: dict[str, list[str]] = {"US": [], "HK": []}
         for code in codes:
             code = code.strip().upper()
             if code.endswith(".HK"):
-                result["HK"].append(code)
+                result["HK"].append(normalize(code[:-3], "HK"))
             elif code.endswith(".US"):
                 result["US"].append(code[:-3])  # strip .US suffix
             else:
@@ -49,7 +52,9 @@ class WatchlistSource(ABC):
         result: list[str] = []
         for code in codes:
             code = code.strip().upper()
-            if code.endswith(".HK") or code.endswith(".US"):
+            if code.endswith(".HK"):
+                result.append(normalize(code[:-3], "HK"))
+            elif code.endswith(".US"):
                 result.append(code)
             else:
                 result.append(f"{code}.US")
