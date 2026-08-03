@@ -86,6 +86,8 @@
     /* ── Calendar ── */
     .calendar-cell { min-height: 112px; padding: 7px; position: relative; overflow: hidden; cursor: pointer; transition: background 0.15s; }
     .calendar-cell .before-tag, .calendar-cell .after-tag { display: none; }
+    .calendar-cell .cal-scroll { overflow-y: auto; overflow-x: hidden; scrollbar-width: none; }
+    .calendar-cell .cal-scroll::-webkit-scrollbar { display: none; }
     .calendar-cell:hover { background: var(--surface-raised); }
     .calendar-cell.out { opacity: 0.35; }
     .calendar-cell.today .day-num { background: var(--primary); color: white; width: 24px; height: 24px; border-radius: 50%; display: flex; align-items: center; justify-content: center; }
@@ -230,7 +232,7 @@
               <span class="day-num text-[12px] font-medium" :class="cell.inMonth ? 'text-zinc-400' : 'text-zinc-700'">{{ cell.day }}</span>
               <span v-if="cell.earnings.length > 0" class="text-[10px]" style="color:var(--text-muted);">{{ cell.earnings.length }}</span>
             </div>
-            <div class="space-y-0.5 overflow-y-auto" style="max-height: 72px;">
+            <div class="cal-scroll space-y-0.5" style="max-height: 72px;">
               <div v-for="e in cell.earnings.slice(0, 4)" :key="e.symbol+e.market"
                    class="badge cursor-pointer" :class="[('badge-' + e.market), { 'badge-mine': isMine(e), 'badge-predicted': e.is_predicted }]"
                    style="font-size:10px;padding:1px 5px;"
