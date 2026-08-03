@@ -10,5 +10,7 @@ dependencies = [
     "futu-api>=10.6.6608",
 ]
 
-[tool.uv]
-dev-dependencies = []
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
