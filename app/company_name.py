@@ -20,11 +20,12 @@ import app.config as config
 
 logger = logging.getLogger(__name__)
 
-# Kurumi normalizes HK symbols to unpadded form: 0700.HK -> 700.HK
+# Kurumi normalizes HK symbols to unpadded form (0700.HK -> 700.HK) and
+# expects a market suffix for US (AAPL -> AAPL.US).
 def kurumi_symbol(symbol: str, market: str) -> str:
     if market == "HK":
         return (symbol.split(".")[0].lstrip("0") or "0") + ".HK"
-    return symbol
+    return f"{symbol}.US"
 
 
 def fetch_from_kurumi(symbol: str, market: str) -> str:
@@ -43,10 +44,10 @@ def fetch_from_kurumi(symbol: str, market: str) -> str:
 def fetch_from_longbridge(symbol: str, market: str) -> str:
     """Query `longbridge static`. Returns name or ''."""
     lb_sym = (symbol.split(".")[0].lstrip("0") or "0") if market == "HK" else symbol
+    lb_sym = f"{lb_sym}.{market}"
     try:
         p = subprocess.run(
-            ["longbridge", "static", f"{lb_sym}.{market}" if market == "HK" else lb_sym,
-             "--format", "json"],
+            ["longbridge", "static", lb_sym, "--format", "json"],
             capture_output=True, text=True, timeout=30,
         )
         if p.returncode != 0:
