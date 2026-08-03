@@ -270,6 +270,10 @@
           <div class="p-4">
             <div class="flex items-center justify-between mb-3">
               <div class="flex items-center gap-2">
+                <button @click="selectedEarning = null" class="btn btn-ghost" style="padding:4px;" title="返回当日列表" aria-label="返回当日列表">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+                  返回
+                </button>
                 <span class="text-lg font-bold text-zinc-100">{{ selectedEarning.symbol }}</span>
                 <span class="badge" :class="'badge-' + selectedEarning.market" style="font-size:10px;">{{ selectedEarning.market }}</span>
                 <span v-if="selectedEarning.fiscal_year && selectedEarning.fiscal_quarter" class="text-[11px] font-medium" style="color:var(--text-muted);">{{ fqLabel(selectedEarning.fiscal_year, selectedEarning.fiscal_quarter) }}</span>
@@ -277,13 +281,6 @@
               </div>
               <button v-if="user" @click="toggleWatchlist(selectedEarning.symbol, selectedEarning.market)" class="btn btn-outline" :class="isMine(selectedEarning) ? 'text-amber-400' : ''" style="padding:4px 10px;font-size:12px;" :title="isMine(selectedEarning) ? '从自选移除' : '加入自选'" aria-label="切换自选">
                 {{ isMine(selectedEarning) ? '★ 已自选' : '☆ 加自选' }}
-              </button>
-              <button @click="selectedEarning = null" class="btn btn-ghost" style="padding:4px;" title="返回当日列表" aria-label="返回当日列表">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
-                返回
-              </button>
-              <button @click="clearSelection" class="btn btn-ghost" style="padding:4px;" title="关闭面板" aria-label="关闭面板">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
               </button>
             </div>
 
@@ -375,9 +372,6 @@
         <div class="p-4">
         <div class="flex items-center justify-between mb-3">
           <h3 class="text-[15px] font-semibold text-zinc-100">{{ selectedDay.date.toLocaleDateString('zh-CN', { weekday: 'long', month: 'long', day: 'numeric' }) }}</h3>
-          <button @click="clearSelection" class="btn btn-ghost" style="padding:4px;" title="关闭面板" aria-label="关闭面板">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
-          </button>
         </div>
         <div class="space-y-1.5">
           <div v-for="e in selectedDay.earnings" :key="e.symbol+e.market"
