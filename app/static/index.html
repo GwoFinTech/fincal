@@ -207,9 +207,9 @@
     <div v-if="appTab === 'calendar'" class="max-w-[1600px] mx-auto px-4 pb-6">
       <div class="calendar-workspace">
       <div class="calendar-main">
-      <!-- Loading -->
-      <div v-if="loading" class="mb-2 flex items-center gap-2 text-[12px]" style="color:var(--primary-light);">
-        <div class="spinner"></div> 加载中...
+      <!-- Loading (floating overlay so it never shifts the calendar layout) -->
+      <div v-if="loading" class="fixed z-50" style="top:64px;right:20px;display:flex;align-items:center;gap:8px;padding:8px 14px;border-radius:10px;background:var(--surface-raised);border:1px solid var(--border);color:var(--text-muted);font-size:12px;box-shadow:0 4px 16px rgba(0,0,0,.35);pointer-events:none;">
+        <div class="spinner" style="width:14px;height:14px;"></div> 加载中...
       </div>
       <!-- Error -->
       <div v-if="error" class="mb-2 px-3 py-2 rounded-lg text-[12px] flex items-center justify-between" style="background:var(--destructive-bg);border:1px solid rgba(239,68,68,0.3);color:#fca5a5;">
