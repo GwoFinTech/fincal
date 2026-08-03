@@ -271,6 +271,9 @@
                 <span v-if="selectedEarning.fiscal_year && selectedEarning.fiscal_quarter" class="text-[11px] font-medium" style="color:var(--text-muted);">{{ fqLabel(selectedEarning.fiscal_year, selectedEarning.fiscal_quarter) }}</span>
                 <span v-if="selectedEarning.is_predicted" class="predicted-tag">预测</span>
               </div>
+              <button v-if="user" @click="toggleWatchlist(selectedEarning.symbol, selectedEarning.market)" class="btn btn-outline" :class="isMine(selectedEarning) ? 'text-amber-400' : ''" style="padding:4px 10px;font-size:12px;" :title="isMine(selectedEarning) ? '从自选移除' : '加入自选'" aria-label="切换自选">
+                {{ isMine(selectedEarning) ? '★ 已自选' : '☆ 加自选' }}
+              </button>
               <button @click="selectedEarning = null" class="btn btn-ghost" style="padding:4px;" title="返回当日列表" aria-label="返回当日列表">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
                 返回
@@ -388,7 +391,10 @@
               </div>
               <p class="text-[11px] truncate" style="color:var(--text-muted);" v-if="e.company_name">{{ e.company_name }}</p>
             </div>
-            <div class="text-right text-[12px]" v-if="e.eps_estimate != null || e.eps_actual != null">
+            <div class="text-right text-[12px] flex flex-col items-end gap-1" v-if="e.eps_estimate != null || e.eps_actual != null">
+              <button v-if="user" @click="toggleWatchlist(e.symbol, e.market)" class="btn btn-ghost" :class="isMine(e) ? 'text-amber-400' : 'text-zinc-500'" style="padding:3px 8px;font-size:11px;border:1px solid var(--border);border-radius:6px;" :title="isMine(e) ? '从自选移除' : '加入自选'" aria-label="切换自选">
+                {{ isMine(e) ? '★ 已自选' : '☆ 加自选' }}
+              </button>
               <div v-if="e.eps_actual != null" :class="epsSurplusClass(e)" class="font-medium">
                 {{ fmtNum(e.eps_actual) }}
               </div>
@@ -667,6 +673,15 @@
         return watchlist.value.some(w => w.symbol === earning.symbol && w.market === earning.market);
       }
 
+      async function toggleWatchlist(symbol, market) {
+        const existing = watchlist.value.some(w => w.symbol === symbol && w.market === market);
+        if (existing) {
+          await removeFromWatchlist(symbol, market);
+        } else {
+          await addToWatchlist(symbol, market);
+        }
+      }
+
       function epsSurplus(e) {
         if (e.eps_estimate == null || e.eps_actual == null) return null;
         const diff = e.eps_actual - e.eps_estimate;
@@ -799,7 +814,7 @@
         popularSuggestions, selectedEarning, decision, selectedDay,
         loading, error, showAdmin, adminLoading, adminSource, managedWatchlist, syncRuns, managedForm,
         prevMonth, nextMonth, goToday, login, copyIcal, openAdmin, saveManaged, editManaged, deleteManaged, resetManaged, fmtDateTime,
-        doSearch, addToWatchlist, removeFromWatchlist, isMine, watchlistInsight, showToast,
+        doSearch, addToWatchlist, removeFromWatchlist, toggleWatchlist, isMine, watchlistInsight, showToast,
         selectCell, selectEarning, clearSelection,
         epsSurplus, epsSurplusClass, revSurplus, revSurplusClass,
         fmtNum, fmtPct, fmtBigNum, metricDelta, signedPct, estimateSourceLabel, hasLongbridgeConsensus, fqLabel,
