@@ -262,8 +262,10 @@
       </div>
     </div>
 
-    <!-- Detail panel: a persistent workspace column, never a modal overlay. -->
-    <aside v-if="selectedEarning" class="selection-panel surface" aria-label="财报详情">
+    <!-- Detail/list panel: a persistent workspace column, never a modal overlay.
+         Always rendered so the right column never collapses to blank space. -->
+    <aside class="selection-panel surface" aria-label="财报详情">
+      <template v-if="selectedEarning">
         <div class="w-full" style="background:var(--surface);">
           <div class="p-4">
             <div class="flex items-center justify-between mb-3">
@@ -366,10 +368,11 @@
             </div>
           </div>
         </div>
-    </aside>
+      </template>
 
     <!-- Same-day list shares the same non-overlay panel as earnings details. -->
-    <aside v-else-if="selectedDay" class="selection-panel surface p-4" aria-label="当日财报列表">
+    <template v-else-if="selectedDay">
+        <div class="p-4">
         <div class="flex items-center justify-between mb-3">
           <h3 class="text-[15px] font-semibold text-zinc-100">{{ selectedDay.date.toLocaleDateString('zh-CN', { weekday: 'long', month: 'long', day: 'numeric' }) }}</h3>
           <button @click="clearSelection" class="btn btn-ghost" style="padding:4px;" title="关闭面板" aria-label="关闭面板">
@@ -409,6 +412,15 @@
             </div>
           </div>
         </div>
+        <div v-if="!selectedDay.earnings.length" class="py-8 text-center text-[12px]" style="color:var(--text-muted);">当天暂无财报。</div>
+        </div>
+      </template>
+
+    <!-- Default state: keep the right column occupied instead of blank space. -->
+    <div v-else class="p-4">
+      <h3 class="text-[15px] font-semibold text-zinc-100 mb-3">财报日历</h3>
+      <p class="text-[12px] leading-5" style="color:var(--text-muted);">点击日历中的日期查看当天财报列表，点击个股查看详情。</p>
+    </div>
     </aside>
       </div>
     </div>
@@ -764,8 +776,9 @@
       }
       function clearSelection() {
         selectedEarning.value = null;
-        selectedDay.value = null;
         decision.value = null;
+        // Keep the right column occupied: fall back to today's day list.
+        selectedDay.value = calendarCells.value.find(cell => cell.isToday) || null;
       }
 
       function prevMonth() {
