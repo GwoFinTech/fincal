@@ -30,11 +30,13 @@ from ..symbol import normalize
 from ..ical import generate_ical
 from datetime import date, timedelta
 from cachetools import TTLCache
+from ..singleflight import Singleflight
 
 router = APIRouter(tags=["ical"])
 
 # Cache iCal feeds per token + options for 1 hour
 _ical_cache = TTLCache(maxsize=512, ttl=3600)
+_ical_flight = Singleflight()
 
 
 def invalidate_ical_cache(token: str | None = None) -> None:
@@ -77,24 +79,26 @@ def ical_feed(
 
     from ..earnings import fetch_earnings_from_db, POPULAR_STOCKS_US, POPULAR_STOCKS_HK
     selected_markets = [markets] if markets != "all" else ["US", "HK"]
-    if scope == "all":
-        # "All" means every symbol currently recorded in FinCal, not only
-        # the homepage popular lists.
-        with db.db_cursor() as cur:
-            cur.execute(
-                "SELECT DISTINCT symbol, market FROM earnings WHERE market = ANY(%s)",
-                (selected_markets,),
-            )
-            symbols = [normalize(r["symbol"], r["market"]) for r in cur.fetchall()]
-    else:
-        symbols = [normalize(r["symbol"], r["market"]) for r in watchlist if r["market"] in selected_markets]
-    earnings = fetch_earnings_from_db(
-        symbols=symbols, markets=selected_markets,
-        start=date.today() - timedelta(days=7), end=date.today() + timedelta(days=120),
-    )
-    if not predicted:
-        earnings = [e for e in earnings if not e.get("is_predicted")]
-    ical_content = generate_ical(earnings, user.get("email", ""), title_lang=lang)
+
+    def _generate():
+        if scope == "all":
+            with db.db_cursor() as cur:
+                cur.execute(
+                    "SELECT DISTINCT symbol, market FROM earnings WHERE market = ANY(%s)",
+                    (selected_markets,),
+                )
+                syms = [normalize(r["symbol"], r["market"]) for r in cur.fetchall()]
+        else:
+            syms = [normalize(r["symbol"], r["market"]) for r in watchlist if r["market"] in selected_markets]
+        earn = fetch_earnings_from_db(
+            symbols=syms, markets=selected_markets,
+            start=date.today() - timedelta(days=7), end=date.today() + timedelta(days=120),
+        )
+        if not predicted:
+            earn = [e for e in earn if not e.get("is_predicted")]
+        return generate_ical(earn, user.get("email", ""), title_lang=lang), earn
+
+    ical_content, earnings = _ical_flight.do(str(cache_key), _generate)
     etag = '"' + sha256(ical_content.encode("utf-8")).hexdigest() + '"'
     timestamps = [e.get("updated_at") or e.get("created_at") for e in earnings]
     timestamps = [value for value in timestamps if value is not None]

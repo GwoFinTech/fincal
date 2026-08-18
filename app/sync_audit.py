@@ -196,7 +196,41 @@ def reap_timeout_runs(timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS) -> int:
         return count
 
 
-# ── Cancel (Issue #3) ──────────────────────────────────────────────
+# ── Advisory lock (Issue #8) ────────────────────────────────────────
+
+def advisory_lock(lock_key: int, *, timeout: float = 0) -> bool:
+    """Acquire a PostgreSQL advisory lock. Returns True if acquired.
+
+    Use timeout=0 for immediate (non-blocking). Use timeout>0 for bounded wait.
+    """
+    with db.db_cursor() as cur:
+        if timeout > 0:
+            cur.execute("SET lock_timeout = %s", (int(timeout * 1000),))
+            try:
+                cur.execute("SELECT pg_advisory_lock(%s)", (lock_key,))
+                return True
+            except Exception:
+                return False
+            finally:
+                cur.execute("RESET lock_timeout")
+        else:
+            cur.execute("SELECT pg_try_advisory_lock(%s)", (lock_key,))
+            row = cur.fetchone()
+            return bool(row and row.get("pg_try_advisory_lock"))
+
+
+def advisory_unlock(lock_key: int) -> None:
+    """Release a PostgreSQL advisory lock."""
+    with db.db_cursor() as cur:
+        cur.execute("SELECT pg_advisory_unlock(%s)", (lock_key,))
+
+
+# Lock keys for different sync stages (must be stable, unique per resource)
+LOCK_LONGBRIDGE_EARNINGS = 1001
+LOCK_FUTU_EARNINGS = 1002
+LOCK_CONSENSUS = 1003
+LOCK_STOCK_NAMES = 1004
+LOCK_PREDICTION = 1005
 
 def request_cancel(run_id: int) -> bool:
     """Mark a running task as cancelled. Returns True if transitioned."""
