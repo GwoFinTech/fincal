@@ -13,6 +13,9 @@ Configure with:
 
 * ``WATCHLIST_HTTP_URL``   -- endpoint URL (required)
 * ``WATCHLIST_HTTP_FIELD`` -- object key for symbol code (default: ``code``)
+
+Issue #4: raises on failure instead of returning empty, so
+stale-while-error can preserve previous data.
 """
 import json
 import logging
@@ -31,43 +34,38 @@ class HttpWatchlistSource(WatchlistSource):
     def fetch_symbols(self) -> list[str]:
         url = config.WATCHLIST_HTTP_URL
         if not url:
-            logger.error("WATCHLIST_SOURCE=http but WATCHLIST_HTTP_URL is empty")
-            return []
+            raise ValueError("WATCHLIST_SOURCE=http but WATCHLIST_HTTP_URL is empty")
 
-        try:
-            req = urllib.request.Request(url, headers={"Accept": "application/json"})
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                payload = json.loads(resp.read().decode())
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            payload = json.loads(resp.read().decode())
 
-            field = config.WATCHLIST_HTTP_FIELD
+        field = config.WATCHLIST_HTTP_FIELD
 
-            # Unwrap top-level object if needed
-            items = payload
-            if isinstance(payload, dict):
-                for key in _WRAP_KEYS:
-                    if key in payload:
-                        items = payload[key]
-                        break
-                else:
-                    logger.error(
-                        "HTTP source: no recognised key in response, got %s",
-                        list(payload.keys()),
-                    )
-                    return []
-
-            if not isinstance(items, list):
-                logger.error("HTTP source: expected list, got %s", type(items).__name__)
-                return []
-
-            # Extract codes
-            if items and isinstance(items[0], dict):
-                codes = [str(item[field]) for item in items if item.get(field)]
+        # Unwrap top-level object if needed
+        items = payload
+        if isinstance(payload, dict):
+            for key in _WRAP_KEYS:
+                if key in payload:
+                    items = payload[key]
+                    break
             else:
-                codes = [str(s) for s in items]
+                raise ValueError(
+                    f"HTTP source: no recognised key in response, got {list(payload.keys())}"
+                )
 
-            logger.info(f"Fetched {len(codes)} symbols from {url}")
-            return codes
+        if not isinstance(items, list):
+            raise TypeError(f"HTTP source: expected list, got {type(items).__name__}")
 
-        except Exception as e:
-            logger.error(f"Failed to fetch watchlist from {url}: {e}")
-            return []
+        # Extract codes
+        if items and isinstance(items[0], dict):
+            codes = [str(item[field]) for item in items if item.get(field)]
+        else:
+            codes = [str(s) for s in items]
+
+        logger.info("Fetched %d symbols from %s", len(codes), url)
+        return codes
+
+    @property
+    def source_name(self) -> str:
+        return "http"

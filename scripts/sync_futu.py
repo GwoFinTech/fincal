@@ -238,19 +238,27 @@ def sync_actuals(ctx) -> tuple[int, int]:
 
 if __name__ == "__main__":
     from app.db import init_db
-    from app.sync_audit import start_run, finish_run
+    from app.sync_audit import start_run, finish_run, heartbeat
     init_db()
 
     ctx = create_futu_context()
     if ctx is None:
-        run_id = start_run("futu", "futu")
-        finish_run(run_id, status="skipped", error_code="opend_unavailable")
+        run_id = start_run("futu", "futu", idempotency_key="futu:earnings:full")
+        if run_id is not None:
+            finish_run(run_id, status="skipped", error_code="opend_unavailable")
         sys.exit(0)  # Non-fatal — skip Futu sync
 
     symbols = get_source().get_futu_symbols()
-    run_id = start_run("futu", "futu", symbol_count=len(symbols))
+    run_id = start_run("futu", "futu", symbol_count=len(symbols),
+                        idempotency_key="futu:earnings:full")
+    if run_id is None:
+        logger.info("futu sync already running, skipping")
+        ctx.close()
+        sys.exit(0)
     try:
+        heartbeat(run_id, phase="dates", current=0, total=len(symbols))
         date_count, date_failures = sync_earnings_dates(ctx)
+        heartbeat(run_id, phase="actuals", current=0, total=len(symbols))
         actual_count, actual_failures = sync_actuals(ctx)
     except Exception:
         finish_run(run_id, status="failed", error_code="futu_sync_failed")

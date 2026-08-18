@@ -282,9 +282,14 @@ def sync_earnings():
 
 if __name__ == "__main__":
     from app.db import init_db
-    from app.sync_audit import start_run, finish_run
+    from app.sync_audit import start_run, finish_run, heartbeat
     init_db()
-    run_id = start_run("longbridge", "longbridge")
+    run_id = start_run("longbridge", "longbridge",
+                        idempotency_key="longbridge:earnings:full",
+                        symbol_count=0)
+    if run_id is None:
+        logger.info("longbridge earnings sync already running, skipping")
+        sys.exit(0)
     try:
         total = sync_earnings()
     except Exception:

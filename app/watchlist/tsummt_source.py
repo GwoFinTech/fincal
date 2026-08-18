@@ -2,6 +2,9 @@
 
 This is the default source.  It connects to the tsummt database and reads
 the watchlist table that the tsummt-web application manages.
+
+Issue #4: raises on failure instead of returning empty, so
+stale-while-error can preserve previous data.
 """
 import logging
 import psycopg2
@@ -15,21 +18,23 @@ class TsummtWatchlistSource(WatchlistSource):
     """Read symbols from ``tsummt.watchlist`` table."""
 
     def fetch_symbols(self) -> list[str]:
+        conn = psycopg2.connect(
+            host=config.DB_HOST,
+            port=config.DB_PORT,
+            database=config.TSUMMT_DB,
+            user=config.DB_USER,
+            password=config.DB_PASSWORD,
+        )
         try:
-            conn = psycopg2.connect(
-                host=config.DB_HOST,
-                port=config.DB_PORT,
-                database=config.TSUMMT_DB,
-                user=config.DB_USER,
-                password=config.DB_PASSWORD,
-            )
             cur = conn.cursor()
             cur.execute("SELECT code FROM watchlist ORDER BY id")
             codes = [row[0] for row in cur.fetchall()]
             cur.close()
-            conn.close()
-            logger.info(f"Loaded {len(codes)} symbols from tsummt.watchlist")
+            logger.info("Loaded %d symbols from tsummt.watchlist", len(codes))
             return codes
-        except Exception as e:
-            logger.warning(f"Failed to read tsummt.watchlist: {e}")
-            return []
+        finally:
+            conn.close()
+
+    @property
+    def source_name(self) -> str:
+        return "tsummt"

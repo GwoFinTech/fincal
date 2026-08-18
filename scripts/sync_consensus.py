@@ -173,7 +173,11 @@ if __name__ == "__main__":
     init_db()
     source = get_source()
     symbol_count = sum(len(symbols) for symbols in source.get_symbols_by_market().values())
-    run = start_run("consensus", "longbridge", symbol_count=symbol_count)
+    run = start_run("consensus", "longbridge", symbol_count=symbol_count,
+                     idempotency_key="longbridge:consensus:full")
+    if run is None:
+        log.info("consensus sync already running, skipping")
+        sys.exit(0)
     try:
         consensus_count, forecast_count, rating_count, failed = sync()
         finish_run(

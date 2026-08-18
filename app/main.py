@@ -18,6 +18,9 @@ async def lifespan(app: FastAPI):
     db.init_db()
     from .earnings import seed_earnings_if_empty
     seed_earnings_if_empty()
+    # Recover stale sync runs from previous process (issue #3)
+    from .sync_audit import recover_stale_runs
+    recover_stale_runs()
     yield
 
 

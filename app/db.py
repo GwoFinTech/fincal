@@ -164,16 +164,39 @@ def init_db():
             CREATE TABLE IF NOT EXISTS sync_runs (
                 id BIGSERIAL PRIMARY KEY,
                 stage TEXT NOT NULL,
-                status TEXT NOT NULL CHECK (status IN ('running', 'success', 'failed', 'skipped')),
+                status TEXT NOT NULL CHECK (status IN ('running', 'success', 'failed', 'skipped', 'interrupted', 'cancelled')),
                 source TEXT NOT NULL,
                 symbol_count INTEGER NOT NULL DEFAULT 0,
                 record_count INTEGER NOT NULL DEFAULT 0,
                 details JSONB NOT NULL DEFAULT '{}'::jsonb,
                 error_code TEXT,
                 started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                finished_at TIMESTAMPTZ
+                finished_at TIMESTAMPTZ,
+                heartbeat_at TIMESTAMPTZ,
+                attempt INTEGER NOT NULL DEFAULT 1,
+                idempotency_key TEXT,
+                phase TEXT,
+                current INTEGER,
+                total INTEGER,
+                timeout_seconds INTEGER NOT NULL DEFAULT 3600
             );
         """)
         cur.execute("""
             CREATE INDEX IF NOT EXISTS idx_sync_runs_started_at ON sync_runs(started_at DESC);
         """)
+        # Add new columns to existing installations
+        for column, definition in (
+            ("heartbeat_at", "TIMESTAMPTZ"),
+            ("attempt", "INTEGER NOT NULL DEFAULT 1"),
+            ("idempotency_key", "TEXT"),
+            ("phase", "TEXT"),
+            ("current", "INTEGER"),
+            ("total", "INTEGER"),
+            ("timeout_seconds", "INTEGER NOT NULL DEFAULT 3600"),
+        ):
+            cur.execute(f"ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS {column} {definition}")
+        # Update CHECK constraint for new statuses
+        cur.execute("ALTER TABLE sync_runs DROP CONSTRAINT IF EXISTS sync_runs_status_check")
+        cur.execute("ALTER TABLE sync_runs ADD CONSTRAINT sync_runs_status_check CHECK (status IN ('running', 'success', 'failed', 'skipped', 'interrupted', 'cancelled'))")
+        # Unique index for idempotency key
+        cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_runs_idempotency_key ON sync_runs(idempotency_key) WHERE idempotency_key IS NOT NULL")

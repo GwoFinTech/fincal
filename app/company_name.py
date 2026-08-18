@@ -7,6 +7,9 @@ Priority order (per user requirement):
 
 Every successful lookup is cached in the `stock_names` table so subsequent
 runs never re-hit the upstream providers for the same symbol.
+
+Issue #4: returns NameResult with error metadata; callers must check
+.ok before overwriting existing names with empty.
 """
 from __future__ import annotations
 
@@ -14,11 +17,29 @@ import json
 import logging
 import subprocess
 import urllib.request
+from dataclasses import dataclass
 from urllib.error import URLError
 
 import app.config as config
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class NameResult:
+    """Result of a company-name lookup with error metadata."""
+    name: str
+    source: str = ""
+    error_code: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return bool(self.name) and self.error_code is None
+
+    @property
+    def unavailable(self) -> bool:
+        return not self.name and self.error_code is not None
+
 
 # Kurumi normalizes HK symbols to unpadded form (0700.HK -> 700.HK) and
 # expects a market suffix for US (AAPL -> AAPL.US).
@@ -38,7 +59,7 @@ def fetch_from_kurumi(symbol: str, market: str) -> str:
         return name
     except (URLError, TimeoutError, OSError, ValueError) as exc:
         logger.info("kurumi lookup failed %s: %s", symbol, exc)
-        return ""
+        raise  # re-raise so resolve_company_name can classify the error
 
 
 def fetch_from_longbridge(symbol: str, market: str) -> str:
@@ -51,13 +72,14 @@ def fetch_from_longbridge(symbol: str, market: str) -> str:
             capture_output=True, text=True, timeout=30,
         )
         if p.returncode != 0:
-            return ""
+            raise RuntimeError(f"longbridge_cli_exit_{p.returncode}")
         rows = json.loads(p.stdout or "[]")
         if rows and isinstance(rows, list):
             return str(rows[0].get("name", "")).strip()
+        return ""
     except (subprocess.SubprocessError, ValueError, OSError) as exc:
         logger.info("longbridge lookup failed %s: %s", symbol, exc)
-    return ""
+        raise
 
 
 def fetch_from_futu(symbol: str, market: str) -> str:
@@ -77,16 +99,30 @@ def fetch_from_futu(symbol: str, market: str) -> str:
         )
         if ret == RET_OK and data is not None and not data.empty:
             return str(data.iloc[0].get("name", "")).strip()
+        return ""
     except Exception as exc:  # noqa: BLE001
         logger.info("futu lookup failed %s: %s", symbol, exc)
+        raise
     finally:
         if ctx is not None:
             ctx.close()
-    return ""
 
 
 def resolve_company_name(symbol: str, market: str) -> tuple[str, str]:
-    """Resolve a company name. Returns (name, source); (\"\", \"\") if unavailable."""
+    """Resolve a company name. Returns (name, source); ("", "") if unavailable.
+
+    DEPRECATED: use resolve_company_name_result() for error metadata.
+    """
+    result = resolve_company_name_result(symbol, market)
+    return (result.name, result.source) if result.ok else ("", "")
+
+
+def resolve_company_name_result(symbol: str, market: str) -> NameResult:
+    """Resolve a company name with error metadata (issue #4).
+
+    Returns NameResult with .ok/.unavailable/.error_code.
+    """
+    errors: list[str] = []
     for fetcher, source in (
         (fetch_from_kurumi, "kurumi"),
         (fetch_from_longbridge, "longbridge"),
@@ -94,8 +130,11 @@ def resolve_company_name(symbol: str, market: str) -> tuple[str, str]:
     ):
         try:
             name = fetcher(symbol, market)
-        except Exception:  # noqa: BLE001
+            if name:
+                return NameResult(name=name, source=source)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{source}:{exc}")
             continue
-        if name:
-            return name, source
-    return "", ""
+    if errors:
+        return NameResult(name="", source="", error_code="all_sources_failed")
+    return NameResult(name="", source="", error_code="unavailable")

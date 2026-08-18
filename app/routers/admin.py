@@ -33,18 +33,19 @@ def source_description() -> dict:
 @router.get("/overview")
 def overview(_: dict = Depends(admin_user)):
     source = get_source()
-    try:
-        external_symbols = source.get_symbols(force_refresh=True)
-        source_error = None
-    except Exception:
-        external_symbols = []
-        source_error = "watchlist_source_unavailable"
+    result = source.get_symbols_with_status(force_refresh=True)
     with db.db_cursor() as cur:
         cur.execute("SELECT id, symbol, market, created_at, updated_at FROM managed_watchlist ORDER BY market, symbol")
         managed = [dict(row) for row in cur.fetchall()]
     return {
-        "source": {**source_description(), "symbol_count": len(external_symbols), "error_code": source_error},
-        "external_symbols": external_symbols,
+        "source": {
+            **source_description(),
+            "symbol_count": len(result.symbols),
+            "error_code": result.error_code,
+            "stale": result.stale,
+            "last_success_at": result.last_success_at.isoformat() if result.last_success_at else None,
+        },
+        "external_symbols": result.symbols,
         "managed_watchlist": managed,
     }
 
@@ -108,8 +109,26 @@ def list_sync_runs(limit: int = 50, _: dict = Depends(admin_user)):
     with db.db_cursor() as cur:
         cur.execute(
             """SELECT id, stage, status, source, symbol_count, record_count,
-                      details, error_code, started_at, finished_at
+                      details, error_code, started_at, finished_at,
+                      heartbeat_at, attempt, idempotency_key,
+                      phase, current, total
                FROM sync_runs ORDER BY started_at DESC LIMIT %s""",
             (limit,),
         )
         return [dict(row) for row in cur.fetchall()]
+
+
+@router.post("/sync-runs/{run_id}/cancel")
+def cancel_sync_run(run_id: int, _: dict = Depends(admin_user)):
+    from ..sync_audit import request_cancel
+    cancelled = request_cancel(run_id)
+    if not cancelled:
+        raise HTTPException(status_code=409, detail="run_not_cancellable")
+    return {"status": "cancelled", "run_id": run_id}
+
+
+@router.post("/sync-runs/recover")
+def recover_stale_runs(_: dict = Depends(admin_user)):
+    from ..sync_audit import recover_stale_runs
+    count = recover_stale_runs()
+    return {"recovered": count}
