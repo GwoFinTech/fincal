@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse
 from . import db
 from .routers import api, admin, ical as ical_router
 from .errors import error_middleware
+from .etag_middleware import etag_middleware
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -29,6 +30,9 @@ app = FastAPI(title="FinCal", lifespan=lifespan)
 
 # Error handling middleware (Issue #9)
 app.middleware("http")(error_middleware)
+
+# ETag middleware (Issue #10)
+app.middleware("http")(etag_middleware)
 
 # iCal feed (no auth — token-based, must be before catch-all SPA)
 app.include_router(ical_router.router)
