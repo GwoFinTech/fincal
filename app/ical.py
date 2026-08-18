@@ -1,6 +1,44 @@
 """iCal (.ics) feed generation for user watchlist."""
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 from . import config
+
+
+_EASTERN = ZoneInfo("America/New_York")
+
+
+def _utc_ical_timestamp(report_date: date, hhmmss: str) -> str:
+    """Convert an Eastern-market wall-clock time to an explicit UTC iCal value.
+
+    Using UTC (rather than a bare TZID without a VTIMEZONE component) avoids
+    Apple Calendar interpreting the event in the Mac's calendar timezone.
+    """
+    local = datetime.combine(
+        report_date,
+        time(int(hhmmss[:2]), int(hhmmss[2:4]), int(hhmmss[4:6])),
+        tzinfo=_EASTERN,
+    )
+    return local.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def _escape_ical(value: str) -> str:
+    return str(value).replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace("\n", "\\n")
+
+
+def _fold_ical_lines(lines: list[str]) -> list[str]:
+    """Fold long UTF-8-ish content conservatively for calendar clients."""
+    folded = []
+    for line in lines:
+        if len(line) <= 74:
+            folded.append(line)
+            continue
+        folded.append(line[:74])
+        rest = line[74:]
+        while rest:
+            folded.append(" " + rest[:73])
+            rest = rest[73:]
+    return folded
+
 
 
 def generate_ical(earnings: list[dict], user_email: str = "") -> str:
@@ -12,7 +50,7 @@ def generate_ical(earnings: list[dict], user_email: str = "") -> str:
         "CALSCALE:GREGORIAN",
         "METHOD:PUBLISH",
         "X-WR-CALNAME:FinCal Earnings",
-        "X-WR-TIMEZONE:Asia/Hong_Kong",
+        "X-WR-TIMEZONE:Asia/Shanghai",
         "REFRESH-INTERVAL;VALUE=DURATION:PT12H",
     ]
 
@@ -64,9 +102,11 @@ def generate_ical(earnings: list[dict], user_email: str = "") -> str:
         lines.append(f"DESCRIPTION:{desc}")
 
         if hour_start:
-            lines.append(f"DTSTART;TZID=America/New_York:{dt_str}T{hour_start}")
-            lines.append(f"DTEND;TZID=America/New_York:{dt_str}T{hour_end}")
+            # Explicit UTC timestamps are interpreted consistently by Apple Calendar.
+            lines.append(f"DTSTART:{_utc_ical_timestamp(report_date, hour_start)}")
+            lines.append(f"DTEND:{_utc_ical_timestamp(report_date, hour_end or hour_start)}")
         else:
+            # Date-only events are intentionally timezone-neutral in iCalendar.
             lines.append(f"DTSTART;VALUE=DATE:{dt_str}")
             lines.append(f"DTEND;VALUE=DATE:{dt_str}")
 
