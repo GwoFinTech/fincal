@@ -121,17 +121,25 @@ def _sanitize_log_url(url: str) -> str:
 
 def http_get_json(url: str, *, cfg: ProviderConfig | None = None) -> dict | list:
     """Fetch JSON from URL with retries and classified errors."""
+    from .metrics import metrics
     cfg = cfg or ProviderConfig(name="http")
     last_error: ProviderError | None = None
 
     for attempt in range(cfg.max_retries + 1):
+        t0 = time.time()
         try:
             req = urllib.request.Request(url, headers={"Accept": "application/json"})
             with urllib.request.urlopen(req, timeout=cfg.timeout) as resp:
-                return json.loads(resp.read().decode())
+                data = json.loads(resp.read().decode())
+            metrics.record_provider_call(cfg.name, success=True,
+                                          duration_ms=(time.time() - t0) * 1000)
+            return data
         except Exception as exc:
             err = classify_error(exc, cfg.name)
             last_error = err
+            metrics.record_provider_call(cfg.name, success=False,
+                                          category=err.category.value,
+                                          duration_ms=(time.time() - t0) * 1000)
             if attempt < cfg.max_retries and _should_retry(err.category, cfg):
                 delay = _backoff_delay(attempt, cfg, err.retry_after)
                 logger.warning("%s attempt %d failed (%s); retrying in %.1fs",

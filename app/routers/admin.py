@@ -146,6 +146,23 @@ def list_audit_log(limit: int = 50, _: dict = Depends(admin_user)):
     return get_audit_log(limit)
 
 
+@router.get("/diagnostics")
+def diagnostics(_: dict = Depends(admin_user)):
+    """Provider metrics and cache diagnostics (Issue #15)."""
+    from ..metrics import metrics
+    result = metrics.snapshot()
+    # Add sync run summary
+    with db.db_cursor() as cur:
+        cur.execute("""SELECT status, COUNT(*) as cnt FROM sync_runs
+                       WHERE started_at > NOW() - INTERVAL '24 hours'
+                       GROUP BY status ORDER BY cnt DESC""")
+        result["sync_runs_24h"] = [dict(r) for r in cur.fetchall()]
+        cur.execute("""SELECT stage, status, started_at, finished_at
+                       FROM sync_runs ORDER BY started_at DESC LIMIT 5""")
+        result["recent_syncs"] = [dict(r) for r in cur.fetchall()]
+    return result
+
+
 @router.get("/health")
 def health_check():
     """Full dependency health status (Issue #11, #14). No auth required."""
