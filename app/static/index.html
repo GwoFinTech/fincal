@@ -533,6 +533,7 @@
         const d = currentDate.value;
         return d.toLocaleDateString('zh-CN', { year: 'numeric', month: 'long' });
       });
+      watch(icalOptions, updateIcalUrl, { deep: true });
       const usWatchlist = computed(() => watchlist.value.filter(item => item.market === 'US'));
       const hkWatchlist = computed(() => watchlist.value.filter(item => item.market === 'HK'));
 
