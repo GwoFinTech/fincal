@@ -200,3 +200,17 @@ def init_db():
         cur.execute("ALTER TABLE sync_runs ADD CONSTRAINT sync_runs_status_check CHECK (status IN ('running', 'success', 'failed', 'skipped', 'interrupted', 'cancelled'))")
         # Unique index for idempotency key
         cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_runs_idempotency_key ON sync_runs(idempotency_key) WHERE idempotency_key IS NOT NULL")
+
+        # Audit log for admin operations (Issue #11)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS admin_audit_log (
+                id BIGSERIAL PRIMARY KEY,
+                action TEXT NOT NULL,
+                actor_id TEXT,
+                actor_email TEXT,
+                target TEXT,
+                details JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_admin_audit_log_created_at ON admin_audit_log(created_at DESC)")

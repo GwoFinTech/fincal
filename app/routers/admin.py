@@ -120,16 +120,81 @@ def list_sync_runs(limit: int = 50, _: dict = Depends(admin_user)):
 
 
 @router.post("/sync-runs/{run_id}/cancel")
-def cancel_sync_run(run_id: int, _: dict = Depends(admin_user)):
+def cancel_sync_run(run_id: int, user=Depends(admin_user)):
     from ..sync_audit import request_cancel
+    from ..audit import log_admin_action
     cancelled = request_cancel(run_id)
     if not cancelled:
         raise ConflictError("run_not_cancellable", "run is not in running state")
+    log_admin_action("cancel_sync_run", actor_id=str(user.get("id")), actor_email=user.get("email"),
+                     target=f"sync_run:{run_id}")
     return {"status": "cancelled", "run_id": run_id}
 
 
 @router.post("/sync-runs/recover")
-def recover_stale_runs(_: dict = Depends(admin_user)):
+def recover_stale_runs(user=Depends(admin_user)):
     from ..sync_audit import recover_stale_runs
+    from ..audit import log_admin_action
     count = recover_stale_runs()
-    return {"recovered": count}
+    log_admin_action("recover_stale_runs", actor_id=str(user.get("id")), actor_email=user.get("email"),
+                     details={"recovered": count})
+
+
+@router.get("/audit-log")
+def list_audit_log(limit: int = 50, _: dict = Depends(admin_user)):
+    from ..audit import get_audit_log
+    return get_audit_log(limit)
+
+
+@router.get("/health")
+def health_check():
+    """Dependency health status (Issue #11). No auth required."""
+    import time
+    checks = {}
+
+    # PostgreSQL
+    try:
+        with db.db_cursor() as cur:
+            cur.execute("SELECT 1")
+        checks["postgresql"] = {"status": "healthy"}
+    except Exception as exc:
+        checks["postgresql"] = {"status": "not_ready", "error": type(exc).__name__}
+
+    # Kurumi API
+    try:
+        from .. import config
+        import urllib.request
+        url = f"{config.KURUMI_API_URL}/api/config"
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            checks["kurumi"] = {"status": "healthy" if resp.status == 200 else "degraded"}
+    except Exception:
+        checks["kurumi"] = {"status": "degraded"}
+
+    # Futu OpenD
+    try:
+        from .. import config
+        import socket
+        with socket.create_connection((config.FUTU_HOST, config.FUTU_PORT), timeout=2):
+            checks["futu"] = {"status": "healthy"}
+    except Exception:
+        checks["futu"] = {"status": "degraded"}
+
+    # Longbridge CLI
+    try:
+        import subprocess
+        p = subprocess.run(["longbridge", "--version"], capture_output=True, timeout=5)
+        checks["longbridge"] = {"status": "healthy" if p.returncode == 0 else "degraded"}
+    except Exception:
+        checks["longbridge"] = {"status": "degraded"}
+
+    # Determine overall status
+    statuses = [c["status"] for c in checks.values()]
+    if all(s == "healthy" for s in statuses):
+        overall = "healthy"
+    elif any(s == "not_ready" for s in statuses):
+        overall = "not_ready"
+    else:
+        overall = "degraded"
+
+    return {"status": overall, "checks": checks}
