@@ -1,12 +1,20 @@
-"""API routes for watchlist management and earnings data."""
+"""API routes for watchlist management and earnings data.
+
+Issue #7: layer cache for earnings and popular stocks.
+"""
 import json
 from fastapi import APIRouter, Depends
 from datetime import date, timedelta
 from ..auth import get_current_user, ensure_user
 from .. import db, config
 from ..symbol import normalize, sort_key, from_lb_counter_id
+from ..layer_cache import LayerCache
 
 router = APIRouter(prefix="/api", tags=["api"])
+
+# Per-endpoint caches
+_earnings_cache = LayerCache(default_ttl=120.0, stale_ttl=1800.0)
+_popular_cache = LayerCache(default_ttl=3600.0, stale_ttl=86400.0)
 
 
 @router.get("/config")
@@ -88,7 +96,7 @@ def api_earnings(
     watchlistOnly: bool = False,
     user=Depends(get_current_user),
 ):
-    """Get earnings calendar data."""
+    """Get earnings calendar data with layer cache (Issue #7)."""
     from ..earnings import fetch_earnings_from_db, POPULAR_STOCKS_US, POPULAR_STOCKS_HK
 
     fincal_user = ensure_user(user["id"], user["email"], user["name"])
@@ -97,6 +105,8 @@ def api_earnings(
         start = date.today() - timedelta(days=7)
     if end is None:
         end = date.today() + timedelta(days=90)
+
+    cache_key = f"earnings:{start}:{end}:{watchlistOnly}:{fincal_user['id']}"
 
     if watchlistOnly:
         with db.db_cursor() as cur:
@@ -111,20 +121,24 @@ def api_earnings(
         markets = list(set(r["market"] for r in wl))
         return fetch_earnings_from_db(symbols=symbols, markets=markets, start=start, end=end)
     else:
-        all_symbols = list(set(POPULAR_STOCKS_US + POPULAR_STOCKS_HK))
-        all_markets = ["US", "HK"]
-        with db.db_cursor() as cur:
-            cur.execute(
-                "SELECT symbol, market FROM watchlist WHERE user_id = %s",
-                (fincal_user["id"],),
-            )
-            for r in cur.fetchall():
-                norm = normalize(r["symbol"], r["market"])
-                if norm not in all_symbols:
-                    all_symbols.append(norm)
-                    if r["market"] not in all_markets:
-                        all_markets.append(r["market"])
-        return fetch_earnings_from_db(symbols=all_symbols, markets=all_markets, start=start, end=end)
+        def _fetch():
+            all_symbols = list(set(POPULAR_STOCKS_US + POPULAR_STOCKS_HK))
+            all_markets = ["US", "HK"]
+            with db.db_cursor() as cur:
+                cur.execute(
+                    "SELECT symbol, market FROM watchlist WHERE user_id = %s",
+                    (fincal_user["id"],),
+                )
+                for r in cur.fetchall():
+                    norm = normalize(r["symbol"], r["market"])
+                    if norm not in all_symbols:
+                        all_symbols.append(norm)
+                        if r["market"] not in all_markets:
+                            all_markets.append(r["market"])
+            return fetch_earnings_from_db(symbols=all_symbols, markets=all_markets, start=start, end=end)
+
+        data, entry = _earnings_cache.get_or_refresh(cache_key, _fetch, ttl=120.0)
+        return data
 
 
 @router.get("/earnings/{earning_id}/decision")
@@ -132,7 +146,6 @@ def api_earning_decision(earning_id: int, user=Depends(get_current_user)):
     """Decision-support facts with source-specific unavailable states, never synthetic values."""
     from ..phase3 import build_decision_metrics, revision_trend
 
-    # Require the same authenticated boundary as the calendar before exposing provider facts.
     ensure_user(user["id"], user["email"], user["name"])
     with db.db_cursor() as cur:
         cur.execute("SELECT * FROM earnings WHERE id=%s", (earning_id,))
@@ -159,17 +172,19 @@ def api_earning_decision(earning_id: int, user=Depends(get_current_user)):
 
 @router.get("/popular")
 def api_popular():
-    """Get the list of popular stocks shown by default."""
+    """Get the list of popular stocks shown by default. Cached (Issue #7)."""
     from ..earnings import POPULAR_STOCKS_US, POPULAR_STOCKS_HK
-    return {
-        "US": POPULAR_STOCKS_US,
-        "HK": POPULAR_STOCKS_HK,
-    }
+
+    def _fetch():
+        return {"US": POPULAR_STOCKS_US, "HK": POPULAR_STOCKS_HK}
+
+    data, _ = _popular_cache.get_or_refresh("popular", _fetch, ttl=3600.0)
+    return data
 
 
 @router.get("/search")
 def api_search_stocks(q: str):
-    """Search for stocks to add to watchlist. Handles various HK code formats."""
+    """Search for stocks to add to watchlist."""
     with db.db_cursor() as cur:
         cur.execute(
             """SELECT DISTINCT symbol, market, company_name FROM earnings
@@ -179,7 +194,6 @@ def api_search_stocks(q: str):
         )
         results = [dict(row) for row in cur.fetchall()]
 
-    # Fallback: if no results in DB, try Longbridge search
     if not results:
         try:
             import subprocess
@@ -213,7 +227,6 @@ def api_export(start: str, end: str, format: str = "csv"):
     if format == "json":
         return data
 
-    # CSV output
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(["symbol", "market", "company_name", "report_date", "fiscal_year",
