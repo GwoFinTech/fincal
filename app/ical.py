@@ -97,7 +97,17 @@ def generate_ical(earnings: list[dict], user_email: str = "") -> str:
         fq_str = f"Q{fq}" if fq else ""
         is_pred = e.get("is_predicted", False)
         pred_marker = " [预测]" if is_pred else ""
-        summary = f"{symbol} ({market}) {fq_str} Earnings{pred_marker}"
+        # The symbol already carries the market suffix for HK (e.g. 0700.HK).
+        # Bare symbols are product-default US symbols, so do not append a
+        # redundant `(US)` / `(HK)` marker. Put the company name next to code.
+        summary_parts = [str(symbol)]
+        if company:
+            summary_parts.append(str(company))
+        if fq_str:
+            summary_parts.append(fq_str)
+        summary_parts.append("Earnings")
+        summary = " ".join(summary_parts) + pred_marker
+        # Keep the human-readable summary free of duplicate market labels.
         desc_parts = [f"Company: {company}" if company else "",
                       f"Fiscal: FY{fy} {fq_str}" if fy else "",
                       f"Timing: {time_label}" if time_label else "",
