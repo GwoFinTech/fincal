@@ -3,12 +3,13 @@
 Issue #7: layer cache for earnings and popular stocks.
 """
 import json
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from datetime import date, timedelta
 from ..auth import get_current_user, ensure_user
 from .. import db, config
 from ..symbol import normalize, sort_key, from_lb_counter_id
 from ..layer_cache import LayerCache
+from ..errors import AppError, NotFoundError, ForbiddenError
 
 router = APIRouter(prefix="/api", tags=["api"])
 
@@ -59,7 +60,7 @@ def api_add_watchlist(symbol: str, market: str = "US", user=Depends(get_current_
     fincal_user = ensure_user(user["id"], user["email"], user["name"])
     market = market.strip().upper()
     if market not in ("US", "HK"):
-        return {"error": "market must be US or HK"}
+        raise AppError("invalid_market", "market must be US or HK", 400)
     normalized = normalize(symbol, market)
     with db.db_cursor() as cur:
         cur.execute(

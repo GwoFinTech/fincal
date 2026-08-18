@@ -5,6 +5,7 @@ from .. import config, db
 from ..admin_watchlist import normalize_managed_symbol
 from ..auth import get_current_user, require_admin
 from ..watchlist import get_source
+from ..errors import AppError, NotFoundError, ConflictError, ForbiddenError
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -62,7 +63,7 @@ def add_managed_watchlist(payload: ManagedWatchlistInput, _: dict = Depends(admi
     try:
         symbol, market = normalize_managed_symbol(payload.symbol, payload.market)
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
+        raise AppError("invalid_symbol", str(exc), 422)
     with db.db_cursor() as cur:
         cur.execute(
             """INSERT INTO managed_watchlist (symbol, market) VALUES (%s, %s)
@@ -78,14 +79,14 @@ def update_managed_watchlist(watchlist_id: int, payload: ManagedWatchlistInput, 
     try:
         symbol, market = normalize_managed_symbol(payload.symbol, payload.market)
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
+        raise AppError("invalid_symbol", str(exc), 422)
     with db.db_cursor() as cur:
         cur.execute("SELECT 1 FROM managed_watchlist WHERE id=%s", (watchlist_id,))
         if not cur.fetchone():
-            raise HTTPException(status_code=404, detail="managed_watchlist_not_found")
+            raise NotFoundError("managed_watchlist")
         cur.execute("SELECT id FROM managed_watchlist WHERE symbol=%s AND market=%s AND id != %s", (symbol, market, watchlist_id))
         if cur.fetchone():
-            raise HTTPException(status_code=409, detail="managed_watchlist_duplicate")
+            raise ConflictError("managed_watchlist_duplicate", "symbol already exists")
         cur.execute(
             """UPDATE managed_watchlist SET symbol=%s, market=%s, updated_at=NOW()
                WHERE id=%s RETURNING id, symbol, market, created_at, updated_at""",
@@ -99,7 +100,7 @@ def delete_managed_watchlist(watchlist_id: int, _: dict = Depends(admin_user)):
     with db.db_cursor() as cur:
         cur.execute("DELETE FROM managed_watchlist WHERE id=%s", (watchlist_id,))
         if cur.rowcount != 1:
-            raise HTTPException(status_code=404, detail="managed_watchlist_not_found")
+            raise NotFoundError("managed_watchlist")
     return {"status": "removed"}
 
 
@@ -123,7 +124,7 @@ def cancel_sync_run(run_id: int, _: dict = Depends(admin_user)):
     from ..sync_audit import request_cancel
     cancelled = request_cancel(run_id)
     if not cancelled:
-        raise HTTPException(status_code=409, detail="run_not_cancellable")
+        raise ConflictError("run_not_cancellable", "run is not in running state")
     return {"status": "cancelled", "run_id": run_id}
 
 
