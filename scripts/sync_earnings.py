@@ -283,6 +283,7 @@ def sync_earnings():
 if __name__ == "__main__":
     from app.db import init_db
     from app.sync_audit import start_run, finish_run, heartbeat, advisory_lock, advisory_unlock, LOCK_LONGBRIDGE_EARNINGS
+    from app.sync_quality import SyncQuality
     init_db()
     if not advisory_lock(LOCK_LONGBRIDGE_EARNINGS):
         logger.info("longbridge earnings sync locked by another process, skipping")
@@ -296,9 +297,13 @@ if __name__ == "__main__":
             sys.exit(0)
         try:
             total = sync_earnings()
-        except Exception:
-            finish_run(run_id, status="failed", error_code="longbridge_sync_failed")
+            quality = SyncQuality(fetched=total, written=total)
+            finish_run(run_id, status="success", record_count=total,
+                       details=quality.to_dict())
+        except Exception as exc:
+            quality = SyncQuality(fetched=0, written=0, failed=1)
+            finish_run(run_id, status="failed", error_code="longbridge_sync_failed",
+                       details=quality.to_dict())
             raise
-        finish_run(run_id, status="success", record_count=total)
     finally:
         advisory_unlock(LOCK_LONGBRIDGE_EARNINGS)
