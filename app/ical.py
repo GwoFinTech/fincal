@@ -1,6 +1,7 @@
 """iCal (.ics) feed generation for user watchlist."""
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
+
 from . import config
 
 
@@ -8,11 +9,7 @@ _EASTERN = ZoneInfo("America/New_York")
 
 
 def _utc_ical_timestamp(report_date: date, hhmmss: str) -> str:
-    """Convert an Eastern-market wall-clock time to an explicit UTC iCal value.
-
-    Using UTC (rather than a bare TZID without a VTIMEZONE component) avoids
-    Apple Calendar interpreting the event in the Mac's calendar timezone.
-    """
+    """Convert an Eastern-market wall-clock time to an explicit UTC iCal value."""
     local = datetime.combine(
         report_date,
         time(int(hhmmss[:2]), int(hhmmss[2:4]), int(hhmmss[4:6])),
@@ -21,23 +18,38 @@ def _utc_ical_timestamp(report_date: date, hhmmss: str) -> str:
     return local.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
-def _escape_ical(value: str) -> str:
-    return str(value).replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace("\n", "\\n")
+def _escape_ical(value: object) -> str:
+    return (str(value).replace("\\", "\\\\").replace(";", "\\;")
+            .replace(",", "\\,").replace("\r\n", "\\n")
+            .replace("\r", "\\n").replace("\n", "\\n"))
 
 
 def _fold_ical_lines(lines: list[str]) -> list[str]:
-    """Fold long UTF-8-ish content conservatively for calendar clients."""
-    folded = []
+    """Fold content lines at UTF-8 byte boundaries (RFC 5545)."""
+    folded: list[str] = []
     for line in lines:
-        if len(line) <= 74:
+        raw = line.encode("utf-8")
+        if len(raw) <= 75:
             folded.append(line)
             continue
-        folded.append(line[:74])
-        rest = line[74:]
-        while rest:
-            folded.append(" " + rest[:73])
-            rest = rest[73:]
+        first = True
+        while raw:
+            limit = 75 if first else 74
+            chunk = raw[:limit]
+            while True:
+                try:
+                    text = chunk.decode("utf-8")
+                    break
+                except UnicodeDecodeError:
+                    chunk = chunk[:-1]
+            folded.append(("" if first else " ") + text)
+            raw = raw[len(chunk):]
+            first = False
     return folded
+
+
+def _now_utc() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
 
@@ -49,6 +61,7 @@ def generate_ical(earnings: list[dict], user_email: str = "") -> str:
         "PRODID:-//FinCal//Earnings Calendar//EN",
         "CALSCALE:GREGORIAN",
         "METHOD:PUBLISH",
+        "NAME:FinCal Earnings",
         "X-WR-CALNAME:FinCal Earnings",
         "X-WR-TIMEZONE:Asia/Shanghai",
         "REFRESH-INTERVAL;VALUE=DURATION:PT12H",
@@ -88,18 +101,22 @@ def generate_ical(earnings: list[dict], user_email: str = "") -> str:
         desc_parts = [f"Company: {company}" if company else "",
                       f"Fiscal: FY{fy} {fq_str}" if fy else "",
                       f"Timing: {time_label}" if time_label else "",
-                      f"⚠ Predicted date (not confirmed)" if is_pred else "",
+                      "⚠ Predicted date (not confirmed)" if is_pred else "",
                       f"EPS Est: {e.get('eps_estimate')}" if e.get('eps_estimate') else "",
                       f"EPS Actual: {e.get('eps_actual')}" if e.get('eps_actual') else ""]
-        desc = "\\\\n".join(p for p in desc_parts if p)
+        desc = "\n".join(p for p in desc_parts if p)
 
         dt_str = report_date.strftime("%Y%m%d")
         uid = f"fincal-{symbol}-{market}-{dt_str}@{config.APP_NAME}"
+        stamp = _now_utc()
 
         lines.append("BEGIN:VEVENT")
-        lines.append(f"UID:{uid}")
-        lines.append(f"SUMMARY:{summary}")
-        lines.append(f"DESCRIPTION:{desc}")
+        lines.append(f"UID:{_escape_ical(uid)}")
+        lines.append(f"DTSTAMP:{stamp}")
+        lines.append(f"LAST-MODIFIED:{stamp}")
+        lines.append(f"SUMMARY:{_escape_ical(summary)}")
+        lines.append(f"DESCRIPTION:{_escape_ical(desc)}")
+        lines.append(f"CATEGORIES:Earnings{',Predicted' if is_pred else ''}")
 
         if hour_start:
             # Explicit UTC timestamps are interpreted consistently by Apple Calendar.
@@ -108,10 +125,10 @@ def generate_ical(earnings: list[dict], user_email: str = "") -> str:
         else:
             # Date-only events are intentionally timezone-neutral in iCalendar.
             lines.append(f"DTSTART;VALUE=DATE:{dt_str}")
-            lines.append(f"DTEND;VALUE=DATE:{dt_str}")
+            lines.append(f"DTEND;VALUE=DATE:{(report_date + timedelta(days=1)).strftime('%Y%m%d')}")
 
         lines.append(f"STATUS:{'TENTATIVE' if is_pred else 'CONFIRMED'}")
         lines.append("END:VEVENT")
 
     lines.append("END:VCALENDAR")
-    return "\r\n".join(lines)
+    return "\r\n".join(_fold_ical_lines(lines))

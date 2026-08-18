@@ -21,5 +21,32 @@ def test_all_day_events_remain_timezone_neutral():
         "before_after": "",
     }])
     assert "DTSTART;VALUE=DATE:20260812" in ics
-    assert "DTEND;VALUE=DATE:20260812" in ics
+    assert "DTEND;VALUE=DATE:20260813" in ics
+    assert "DTSTAMP:" in ics
+    assert "LAST-MODIFIED:" in ics
+    assert "CATEGORIES:Earnings" in ics
     assert "TZID=" not in ics
+
+
+def test_text_is_escaped_and_long_utf8_lines_are_folded():
+    name = "公司, A\\B; 测试" * 12
+    ics = generate_ical([{
+        "symbol": "AAPL", "market": "US", "company_name": name,
+        "report_date": date(2026, 8, 3), "before_after": "",
+    }])
+    assert "SUMMARY:AAPL (US)" in ics
+    assert "DESCRIPTION:Company: " in ics
+    assert "\\," in ics and "\\;" in ics
+    assert "\r\n " in ics
+    assert all(len(line.encode("utf-8")) <= 75 for line in ics.split("\r\n"))
+    assert "\\\\" in ics
+
+
+def test_description_uses_single_escaped_newlines():
+    ics = generate_ical([{
+        "symbol": "AAPL", "market": "US", "company_name": "Apple",
+        "report_date": date(2026, 8, 3), "before_after": "before",
+        "fiscal_year": 2026, "fiscal_quarter": 2,
+    }])
+    assert "\\nFiscal:" in ics
+    assert "\\\\nFiscal:" not in ics

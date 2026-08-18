@@ -13,6 +13,14 @@ router = APIRouter(tags=["ical"])
 _ical_cache = TTLCache(maxsize=256, ttl=3600)
 
 
+def invalidate_ical_cache(token: str | None = None) -> None:
+    """Invalidate one user's feed, or all feeds when token is omitted."""
+    if token is None:
+        _ical_cache.clear()
+    else:
+        _ical_cache.pop(token, None)
+
+
 @router.get("/ical/{token}")
 def ical_feed(token: str):
     """Generate iCal feed for user based on their ical_token."""

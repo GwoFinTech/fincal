@@ -60,7 +60,9 @@ def api_add_watchlist(symbol: str, market: str = "US", user=Depends(get_current_
             (fincal_user["id"], normalized, market),
         )
         row = cur.fetchone()
-        return dict(row) if row else {"status": "already_exists"}
+    from .ical import invalidate_ical_cache
+    invalidate_ical_cache(fincal_user.get("ical_token"))
+    return dict(row) if row else {"status": "already_exists"}
 
 
 @router.delete("/watchlist")
@@ -74,7 +76,9 @@ def api_remove_watchlist(symbol: str, market: str = "US", user=Depends(get_curre
             "DELETE FROM watchlist WHERE user_id = %s AND symbol = %s AND market = %s",
             (fincal_user["id"], normalized, market),
         )
-        return {"status": "removed"}
+    from .ical import invalidate_ical_cache
+    invalidate_ical_cache(fincal_user.get("ical_token"))
+    return {"status": "removed"}
 
 
 @router.get("/earnings")
