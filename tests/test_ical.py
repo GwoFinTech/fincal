@@ -1,6 +1,7 @@
-from datetime import date
+from datetime import date, datetime, timezone
 
 from app.ical import generate_ical
+from app.routers.ical import _feed_headers, _not_modified
 
 
 def test_timed_events_use_explicit_utc_for_apple_calendar():
@@ -67,3 +68,35 @@ def test_description_uses_single_escaped_newlines():
     }])
     assert "\\nFiscal:" in ics
     assert "\\\\nFiscal:" not in ics
+
+
+def test_event_metadata_is_stable_and_has_sequence():
+    event = {
+        "symbol": "AAPL", "market": "US", "company_name": "Apple",
+        "report_date": date(2026, 8, 3), "before_after": "before",
+        "updated_at": datetime(2026, 8, 1, 8, 0, tzinfo=timezone.utc),
+    }
+    first = generate_ical([event])
+    second = generate_ical([event])
+    assert first == second
+    assert "LAST-MODIFIED:20260801T080000Z" in first
+    assert "SEQUENCE:" in first
+
+
+def test_changed_event_content_changes_sequence():
+    base = {
+        "symbol": "AAPL", "market": "US", "report_date": date(2026, 8, 3),
+        "before_after": "before",
+    }
+    changed = {**base, "before_after": "after"}
+    first = generate_ical([base])
+    second = generate_ical([changed])
+    assert first.split("SEQUENCE:", 1)[1].split("\r\n", 1)[0] != second.split("SEQUENCE:", 1)[1].split("\r\n", 1)[0]
+
+
+def test_feed_validator_headers_support_conditional_requests():
+    headers = _feed_headers('"abc"', "Mon, 01 Aug 2026 08:00:00 GMT")
+    assert headers["ETag"] == '"abc"'
+    assert headers["Last-Modified"].endswith("GMT")
+    assert headers["Cache-Control"].endswith("must-revalidate")
+    assert _not_modified(type("Request", (), {"headers": {"if-none-match": '"abc"'}})(), '"abc"', headers["Last-Modified"])

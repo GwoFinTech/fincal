@@ -55,9 +55,34 @@ def _fold_ical_lines(lines: list[str]) -> list[str]:
     return folded
 
 
-def _now_utc() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+def _stable_event_stamp(event: dict, report_date: date) -> str:
+    """Return a stable UTC modification stamp for an event.
 
+    Prefer the database update timestamp. The report date is a deterministic
+    fallback; request time must never be used for LAST-MODIFIED.
+    """
+    value = event.get("updated_at") or event.get("created_at")
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        except ValueError:
+            pass
+    return datetime.combine(report_date, time.min, tzinfo=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def _event_sequence(event: dict, summary: str, desc: str, report_date: date) -> int:
+    """Derive a stable positive SEQUENCE from the event content."""
+    payload = "|".join((str(event.get(key, "")) for key in (
+        "symbol", "market", "report_date", "report_type", "fiscal_year",
+        "fiscal_quarter", "before_after", "is_predicted", "company_name",
+        "eps_estimate", "eps_actual", "revenue_estimate", "revenue_actual",
+    ))) + f"|{summary}|{desc}|{report_date.isoformat()}"
+    return int.from_bytes(__import__("hashlib").sha256(payload.encode()).digest()[:4], "big") & 0x7FFFFFFF
 
 
 def generate_ical(earnings: list[dict], user_email: str = "", title_lang: str = "en") -> str:
@@ -127,9 +152,11 @@ def generate_ical(earnings: list[dict], user_email: str = "", title_lang: str = 
 
         dt_str = report_date.strftime("%Y%m%d")
         uid = f"fincal-{symbol}-{market}-{dt_str}@{config.APP_NAME}"
-        stamp = _now_utc()
+        stamp = _stable_event_stamp(e, report_date)
+        sequence = _event_sequence(e, summary, desc, report_date)
 
         lines.append("BEGIN:VEVENT")
+        lines.append(f"SEQUENCE:{sequence}")
         lines.append(f"UID:{_escape_ical(uid)}")
         lines.append(f"DTSTAMP:{stamp}")
         lines.append(f"LAST-MODIFIED:{stamp}")
