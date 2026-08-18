@@ -238,42 +238,49 @@ def sync_actuals(ctx) -> tuple[int, int]:
 
 if __name__ == "__main__":
     from app.db import init_db
-    from app.sync_audit import start_run, finish_run, heartbeat
+    from app.sync_audit import start_run, finish_run, heartbeat, advisory_lock, advisory_unlock, LOCK_FUTU_EARNINGS
     init_db()
 
-    ctx = create_futu_context()
-    if ctx is None:
-        run_id = start_run("futu", "futu", idempotency_key="futu:earnings:full")
-        if run_id is not None:
-            finish_run(run_id, status="skipped", error_code="opend_unavailable")
-        sys.exit(0)  # Non-fatal — skip Futu sync
-
-    symbols = get_source().get_futu_symbols()
-    run_id = start_run("futu", "futu", symbol_count=len(symbols),
-                        idempotency_key="futu:earnings:full")
-    if run_id is None:
-        logger.info("futu sync already running, skipping")
-        ctx.close()
+    if not advisory_lock(LOCK_FUTU_EARNINGS):
+        logger.info("futu sync locked by another process, skipping")
         sys.exit(0)
+
     try:
-        heartbeat(run_id, phase="dates", current=0, total=len(symbols))
-        date_count, date_failures = sync_earnings_dates(ctx)
-        heartbeat(run_id, phase="actuals", current=0, total=len(symbols))
-        actual_count, actual_failures = sync_actuals(ctx)
-    except Exception:
-        finish_run(run_id, status="failed", error_code="futu_sync_failed")
-        raise
-    else:
-        status, error_code = futu_audit_outcome(date_failures, actual_failures)
-        finish_run(
-            run_id, status=status, record_count=date_count,
-            details={
-                "actual_symbols": actual_count,
-                "date_failed_symbols": date_failures,
-                "actual_failed_symbols": actual_failures,
-            },
-            error_code=error_code,
-        )
+        ctx = create_futu_context()
+        if ctx is None:
+            run_id = start_run("futu", "futu", idempotency_key="futu:earnings:full")
+            if run_id is not None:
+                finish_run(run_id, status="skipped", error_code="opend_unavailable")
+            sys.exit(0)  # Non-fatal — skip Futu sync
+
+        symbols = get_source().get_futu_symbols()
+        run_id = start_run("futu", "futu", symbol_count=len(symbols),
+                            idempotency_key="futu:earnings:full")
+        if run_id is None:
+            logger.info("futu sync already running, skipping")
+            ctx.close()
+            sys.exit(0)
+        try:
+            heartbeat(run_id, phase="dates", current=0, total=len(symbols))
+            date_count, date_failures = sync_earnings_dates(ctx)
+            heartbeat(run_id, phase="actuals", current=0, total=len(symbols))
+            actual_count, actual_failures = sync_actuals(ctx)
+        except Exception:
+            finish_run(run_id, status="failed", error_code="futu_sync_failed")
+            raise
+        else:
+            status, error_code = futu_audit_outcome(date_failures, actual_failures)
+            finish_run(
+                run_id, status=status, record_count=date_count,
+                details={
+                    "actual_symbols": actual_count,
+                    "date_failed_symbols": date_failures,
+                    "actual_failed_symbols": actual_failures,
+                },
+                error_code=error_code,
+            )
+        finally:
+            ctx.close()
+            logger.info("Futu context closed")
     finally:
-        ctx.close()
-        logger.info("Futu context closed")
+        advisory_unlock(LOCK_FUTU_EARNINGS)

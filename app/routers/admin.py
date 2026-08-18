@@ -198,3 +198,43 @@ def health_check():
         overall = "degraded"
 
     return {"status": overall, "checks": checks}
+
+
+@router.post("/sync-runs/{run_id}/retry")
+def retry_sync_run(run_id: int, user=Depends(admin_user)):
+    """Create a retry run from a failed/interrupted/cancelled run (Issue #19)."""
+    from ..sync_audit import start_run
+    from ..audit import log_admin_action
+
+    with db.db_cursor() as cur:
+        cur.execute(
+            "SELECT stage, source, symbol_count, status, idempotency_key FROM sync_runs WHERE id=%s",
+            (run_id,),
+        )
+        original = cur.fetchone()
+        if not original:
+            raise NotFoundError("sync_run")
+        if original["status"] not in ("failed", "interrupted", "cancelled"):
+            raise ConflictError("run_not_retryable",
+                                f"cannot retry run in '{original['status']}' state")
+
+    # Create new run with same stage/source but new idempotency key
+    new_key = original["idempotency_key"]
+    if new_key:
+        new_key = f"{new_key}:retry:{run_id}"
+
+    new_id = start_run(
+        original["stage"], original["source"],
+        symbol_count=original["symbol_count"],
+        idempotency_key=new_key,
+    )
+
+    if new_id is None:
+        raise ConflictError("retry_already_running", "a retry is already in progress")
+
+    log_admin_action("retry_sync_run", actor_id=str(user.get("id")),
+                     actor_email=user.get("email"),
+                     target=f"sync_run:{run_id}",
+                     details={"new_run_id": new_id})
+
+    return {"status": "retry_created", "original_run_id": run_id, "new_run_id": new_id}
