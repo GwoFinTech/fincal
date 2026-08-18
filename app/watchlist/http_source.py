@@ -1,31 +1,16 @@
-"""Watchlist source: fetch from a remote HTTP/JSON API.
+"""Watchlist source: fetch from a remote HTTP/JSON API (Issue #6).
 
-Supports two response shapes:
-  1. Array of strings:       ``["AAPL.US", "0700.HK"]``
-  2. Array of objects:       ``[{"code": "AAPL.US"}, …]``  (field configurable)
-
-Also handles wrapped payloads::
-
-    {"symbols": [...]}   {"data": [...]}
-    {"items": [...]}     {"list": [...]}
-
-Configure with:
-
-* ``WATCHLIST_HTTP_URL``   -- endpoint URL (required)
-* ``WATCHLIST_HTTP_FIELD`` -- object key for symbol code (default: ``code``)
-
-Issue #4: raises on failure instead of returning empty, so
-stale-while-error can preserve previous data.
+Uses unified provider_client for timeout, retry, error classification.
 """
-import json
 import logging
-import urllib.request
 from .base import WatchlistSource
 from .. import config
+from ..provider_client import ProviderConfig, http_get_json
 
 logger = logging.getLogger(__name__)
 
 _WRAP_KEYS = ("symbols", "data", "items", "list")
+_HTTP_CFG = ProviderConfig(name="watchlist_http", timeout=15, max_retries=1)
 
 
 class HttpWatchlistSource(WatchlistSource):
@@ -36,10 +21,7 @@ class HttpWatchlistSource(WatchlistSource):
         if not url:
             raise ValueError("WATCHLIST_SOURCE=http but WATCHLIST_HTTP_URL is empty")
 
-        req = urllib.request.Request(url, headers={"Accept": "application/json"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            payload = json.loads(resp.read().decode())
-
+        payload = http_get_json(url, cfg=_HTTP_CFG)
         field = config.WATCHLIST_HTTP_FIELD
 
         # Unwrap top-level object if needed
@@ -57,7 +39,6 @@ class HttpWatchlistSource(WatchlistSource):
         if not isinstance(items, list):
             raise TypeError(f"HTTP source: expected list, got {type(items).__name__}")
 
-        # Extract codes
         if items and isinstance(items[0], dict):
             codes = [str(item[field]) for item in items if item.get(field)]
         else:

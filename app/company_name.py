@@ -8,8 +8,8 @@ Priority order (per user requirement):
 Every successful lookup is cached in the `stock_names` table so subsequent
 runs never re-hit the upstream providers for the same symbol.
 
-Issue #4: returns NameResult with error metadata; callers must check
-.ok before overwriting existing names with empty.
+Issue #4: returns NameResult with error metadata.
+Issue #6: uses unified provider_client for timeouts and error classification.
 """
 from __future__ import annotations
 
@@ -21,8 +21,14 @@ from dataclasses import dataclass
 from urllib.error import URLError
 
 import app.config as config
+from app.provider_client import (
+    ErrorCategory, ProviderConfig, ProviderError, classify_error,
+)
 
 logger = logging.getLogger(__name__)
+
+_KURUMI_CFG = ProviderConfig(name="kurumi", timeout=config.KURUMI_API_TIMEOUT, max_retries=1)
+_LB_CFG = ProviderConfig(name="longbridge", timeout=30, max_retries=0)
 
 
 @dataclass
@@ -41,8 +47,6 @@ class NameResult:
         return not self.name and self.error_code is not None
 
 
-# Kurumi normalizes HK symbols to unpadded form (0700.HK -> 700.HK) and
-# expects a market suffix for US (AAPL -> AAPL.US).
 def kurumi_symbol(symbol: str, market: str) -> str:
     if market == "HK":
         return (symbol.split(".")[0].lstrip("0") or "0") + ".HK"
@@ -50,26 +54,26 @@ def kurumi_symbol(symbol: str, market: str) -> str:
 
 
 def fetch_from_kurumi(symbol: str, market: str) -> str:
-    """Query Kurumi /api/stock/{symbol}/overview. Returns name or ''."""
+    """Query Kurumi /api/stock/{symbol}/overview. Raises ProviderError on failure."""
     url = f"{config.KURUMI_API_URL}/api/stock/{kurumi_symbol(symbol, market)}/overview"
     try:
-        with urllib.request.urlopen(url, timeout=config.KURUMI_API_TIMEOUT) as resp:
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=_KURUMI_CFG.timeout) as resp:
             data = json.loads(resp.read().decode("utf-8") or "{}")
         name = str(data.get("name") or "").strip()
         return name
-    except (URLError, TimeoutError, OSError, ValueError) as exc:
-        logger.info("kurumi lookup failed %s: %s", symbol, exc)
-        raise  # re-raise so resolve_company_name can classify the error
+    except Exception as exc:
+        raise classify_error(exc, "kurumi") from exc
 
 
 def fetch_from_longbridge(symbol: str, market: str) -> str:
-    """Query `longbridge static`. Returns name or ''."""
+    """Query `longbridge static`. Raises ProviderError on failure."""
     lb_sym = (symbol.split(".")[0].lstrip("0") or "0") if market == "HK" else symbol
     lb_sym = f"{lb_sym}.{market}"
     try:
         p = subprocess.run(
             ["longbridge", "static", lb_sym, "--format", "json"],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, timeout=_LB_CFG.timeout,
         )
         if p.returncode != 0:
             raise RuntimeError(f"longbridge_cli_exit_{p.returncode}")
@@ -77,13 +81,12 @@ def fetch_from_longbridge(symbol: str, market: str) -> str:
         if rows and isinstance(rows, list):
             return str(rows[0].get("name", "")).strip()
         return ""
-    except (subprocess.SubprocessError, ValueError, OSError) as exc:
-        logger.info("longbridge lookup failed %s: %s", symbol, exc)
-        raise
+    except Exception as exc:
+        raise classify_error(exc, "longbridge") from exc
 
 
 def fetch_from_futu(symbol: str, market: str) -> str:
-    """Query Futu OpenD get_stock_basicinfo. Returns name or ''."""
+    """Query Futu OpenD get_stock_basicinfo. Raises ProviderError on failure."""
     try:
         from futu import RET_OK, Market, SecurityType, OpenQuoteContext
         from app.symbol import to_futu_code
@@ -101,27 +104,20 @@ def fetch_from_futu(symbol: str, market: str) -> str:
             return str(data.iloc[0].get("name", "")).strip()
         return ""
     except Exception as exc:  # noqa: BLE001
-        logger.info("futu lookup failed %s: %s", symbol, exc)
-        raise
+        raise classify_error(exc, "futu") from exc
     finally:
         if ctx is not None:
             ctx.close()
 
 
 def resolve_company_name(symbol: str, market: str) -> tuple[str, str]:
-    """Resolve a company name. Returns (name, source); ("", "") if unavailable.
-
-    DEPRECATED: use resolve_company_name_result() for error metadata.
-    """
+    """Resolve a company name. Returns (name, source); ("", "") if unavailable."""
     result = resolve_company_name_result(symbol, market)
     return (result.name, result.source) if result.ok else ("", "")
 
 
 def resolve_company_name_result(symbol: str, market: str) -> NameResult:
-    """Resolve a company name with error metadata (issue #4).
-
-    Returns NameResult with .ok/.unavailable/.error_code.
-    """
+    """Resolve a company name with error metadata (issue #4, #6)."""
     errors: list[str] = []
     for fetcher, source in (
         (fetch_from_kurumi, "kurumi"),
@@ -132,8 +128,11 @@ def resolve_company_name_result(symbol: str, market: str) -> NameResult:
             name = fetcher(symbol, market)
             if name:
                 return NameResult(name=name, source=source)
+        except ProviderError as exc:
+            errors.append(f"{source}:{exc.error_code}")
+            continue
         except Exception as exc:  # noqa: BLE001
-            errors.append(f"{source}:{exc}")
+            errors.append(f"{source}:unknown")
             continue
     if errors:
         return NameResult(name="", source="", error_code="all_sources_failed")
