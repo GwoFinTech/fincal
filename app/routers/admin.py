@@ -165,7 +165,8 @@ def diagnostics(_: dict = Depends(admin_user)):
 
 @router.get("/health")
 def health_check():
-    """Full dependency health status (Issue #11, #14). No auth required."""
+    """Full dependency health status (Issue #11, #14, #20). No auth required."""
+    from ..version import get_version
     checks = {}
 
     # PostgreSQL
@@ -212,7 +213,7 @@ def health_check():
     else:
         overall = "degraded"
 
-    return {"status": overall, "checks": checks}
+    return {"status": overall, "version": get_version(), "checks": checks}
 
 
 @router.get("/ready")
