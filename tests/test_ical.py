@@ -34,6 +34,16 @@ def test_all_day_events_remain_timezone_neutral():
     assert "TZID=" not in ics
 
 
+def test_hk_timed_events_use_hong_kong_timezone():
+    ics = generate_ical([{
+        "symbol": "01810.HK", "market": "HK", "company_name": "小米集团",
+        "report_date": date(2026, 8, 19), "before_after": "before",
+    }], title_lang="zh")
+    # 08:00–09:00 Asia/Hong_Kong = 00:00–01:00 UTC.
+    assert "DTSTART:20260819T000000Z" in ics
+    assert "DTEND:20260819T010000Z" in ics
+
+
 def test_text_is_escaped_and_long_utf8_lines_are_folded():
     name = "公司, A\\B; 测试" * 12
     ics = generate_ical([{

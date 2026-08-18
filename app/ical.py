@@ -5,17 +5,24 @@ from zoneinfo import ZoneInfo
 from . import config
 
 
-_EASTERN = ZoneInfo("America/New_York")
+_MARKET_TZ = {
+    "US": ZoneInfo("America/New_York"),
+    "HK": ZoneInfo("Asia/Hong_Kong"),
+}
 
 
-def _utc_ical_timestamp(report_date: date, hhmmss: str) -> str:
-    """Convert an Eastern-market wall-clock time to an explicit UTC iCal value."""
+def _utc_ical_timestamp(report_date: date, hhmmss: str, market: str = "US") -> str:
+    """Convert a market-local wall-clock time to an explicit UTC iCal value."""
     local = datetime.combine(
         report_date,
         time(int(hhmmss[:2]), int(hhmmss[2:4]), int(hhmmss[4:6])),
-        tzinfo=_EASTERN,
+        tzinfo=_MARKET_TZ.get(market, _MARKET_TZ["US"]),
     )
     return local.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+# Market-local report times are converted to UTC; Mac Calendar then renders
+# them in the user's configured timezone.
 
 
 def _escape_ical(value: object) -> str:
@@ -132,8 +139,8 @@ def generate_ical(earnings: list[dict], user_email: str = "", title_lang: str = 
 
         if hour_start:
             # Explicit UTC timestamps are interpreted consistently by Apple Calendar.
-            lines.append(f"DTSTART:{_utc_ical_timestamp(report_date, hour_start)}")
-            lines.append(f"DTEND:{_utc_ical_timestamp(report_date, hour_end or hour_start)}")
+            lines.append(f"DTSTART:{_utc_ical_timestamp(report_date, hour_start, market)}")
+            lines.append(f"DTEND:{_utc_ical_timestamp(report_date, hour_end or hour_start, market)}")
         else:
             # Date-only events are intentionally timezone-neutral in iCalendar.
             lines.append(f"DTSTART;VALUE=DATE:{dt_str}")
