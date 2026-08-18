@@ -53,7 +53,7 @@ def _now_utc() -> str:
 
 
 
-def generate_ical(earnings: list[dict], user_email: str = "") -> str:
+def generate_ical(earnings: list[dict], user_email: str = "", title_lang: str = "en") -> str:
     """Generate iCal content from earnings records."""
     lines = [
         "BEGIN:VCALENDAR",
@@ -102,11 +102,13 @@ def generate_ical(earnings: list[dict], user_email: str = "") -> str:
         # redundant `(US)` / `(HK)` marker. Put the company name next to code.
         summary_parts = [str(symbol)]
         if company:
-            summary_parts.append(str(company))
+            summary_parts.append(str(company) if title_lang == "zh" else str(e.get("company_name_en") or company))
         if fq_str:
             summary_parts.append(fq_str)
-        summary_parts.append("Earnings")
+        summary_parts.append("财报" if title_lang == "zh" else "Earnings")
         summary = " ".join(summary_parts) + pred_marker
+        # Company names use the cached canonical name; title_lang controls the
+        # event wording because the current earnings schema has one name field.
         # Keep the human-readable summary free of duplicate market labels.
         desc_parts = [f"Company: {company}" if company else "",
                       f"Fiscal: FY{fy} {fq_str}" if fy else "",
