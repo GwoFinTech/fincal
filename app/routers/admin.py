@@ -148,8 +148,7 @@ def list_audit_log(limit: int = 50, _: dict = Depends(admin_user)):
 
 @router.get("/health")
 def health_check():
-    """Dependency health status (Issue #11). No auth required."""
-    import time
+    """Full dependency health status (Issue #11, #14). No auth required."""
     checks = {}
 
     # PostgreSQL
@@ -188,7 +187,6 @@ def health_check():
     except Exception:
         checks["longbridge"] = {"status": "degraded"}
 
-    # Determine overall status
     statuses = [c["status"] for c in checks.values()]
     if all(s == "healthy" for s in statuses):
         overall = "healthy"
@@ -198,6 +196,21 @@ def health_check():
         overall = "degraded"
 
     return {"status": overall, "checks": checks}
+
+
+@router.get("/ready")
+def readiness_check():
+    """Readiness probe (Issue #14). Returns 200 only when core deps are OK.
+
+    Core: PostgreSQL must be healthy. External providers are optional.
+    """
+    try:
+        with db.db_cursor() as cur:
+            cur.execute("SELECT 1")
+        return {"status": "ready"}
+    except Exception:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=503, content={"status": "not_ready"})
 
 
 @router.post("/sync-runs/{run_id}/retry")
