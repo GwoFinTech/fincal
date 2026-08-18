@@ -83,6 +83,29 @@
     .btn-ghost { background: transparent; color: var(--text-muted); }
     .btn-ghost:hover { background: var(--surface-raised); color: var(--text); }
 
+    /* ── shadcn/ui-compatible primitives (single-file deployment) ── */
+    .ui-btn { border: 1px solid transparent; border-radius: 6px; min-height: 36px; font-size: 13px; font-weight: 500; padding: 0 14px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; cursor: pointer; transition: background .15s, border-color .15s, color .15s; }
+    .ui-btn:focus-visible, .ui-input:focus-visible, .ui-select:focus-visible, .ui-checkbox:focus-visible { outline: 2px solid var(--primary-light); outline-offset: 2px; }
+    .ui-btn-primary { background: var(--primary); color: #fff; }
+    .ui-btn-primary:hover { background: #6d28d9; }
+    .ui-btn-outline { background: transparent; border-color: var(--border); color: var(--text-secondary); }
+    .ui-btn-outline:hover { background: var(--surface-raised); color: var(--text); }
+    .ui-btn-ghost { background: transparent; color: var(--text-muted); }
+    .ui-btn-ghost:hover { background: var(--surface-raised); color: var(--text); }
+    .ui-btn-icon { width: 36px; min-width: 36px; padding: 0; }
+    .ui-input, .ui-select { width: 100%; min-height: 36px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-raised); color: var(--text); padding: 0 10px; font-size: 13px; transition: border-color .15s, box-shadow .15s; }
+    .ui-input:focus, .ui-select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px rgba(124,58,237,.2); outline: none; }
+    .ui-checkbox { width: 16px; height: 16px; accent-color: var(--primary); cursor: pointer; }
+    .ui-dialog-backdrop { background: rgba(0,0,0,.65); backdrop-filter: blur(4px); }
+    .ui-dialog { border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 24px 48px rgba(0,0,0,.45); }
+    .ui-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
+    /* Existing domain classes now share the same shadcn-compatible tokens. */
+    .btn { min-height: 36px; border: 1px solid transparent; }
+    .btn:focus-visible, .app-tab:focus-visible, .tab-active:focus-visible, .tab-inactive:focus-visible { outline: 2px solid var(--primary-light); outline-offset: 2px; }
+    .app-tab, .tab-active, .tab-inactive { min-height: 36px; }
+    .surface { border-radius: 8px; }
+    .surface-raised { border-radius: 8px; }
+
     /* ── Calendar ── */
     .calendar-cell { min-height: 112px; padding: 7px; position: relative; overflow: hidden; cursor: pointer; transition: background 0.15s; }
     .calendar-cell .before-tag, .calendar-cell .after-tag { display: none; }
@@ -145,8 +168,8 @@
         </div>
         <div class="flex items-center gap-2">
           <span v-if="user" class="text-[12px] text-zinc-400">{{ user.name || user.email }}</span>
-          <button v-if="user && user.is_admin" @click="openAdmin" class="btn btn-outline" style="padding:4px 10px;font-size:12px;">管理</button>
-          <button v-if="!user && appConfig.auth_login_url" @click="login" class="btn btn-primary" style="padding:4px 10px;font-size:12px;">登录</button>
+          <button v-if="user && user.is_admin" @click="openAdmin" class="ui-btn ui-btn-outline" style="padding:4px 10px;font-size:12px;">管理</button>
+          <button v-if="!user && appConfig.auth_login_url" @click="login" class="ui-btn ui-btn-primary" style="padding:4px 10px;font-size:12px;">登录</button>
         </div>
       </div>
     </header>
@@ -154,38 +177,38 @@
     <!-- App navigation remains independent from the calendar month/week switch. -->
     <nav class="max-w-[1600px] mx-auto px-4 pt-3" aria-label="FinCal 主导航">
       <div class="inline-flex gap-1 rounded-[10px] p-1" style="background:var(--surface);border:1px solid var(--border);">
-        <button @click="appTab='calendar'" :class="appTab === 'calendar' ? 'app-tab-active' : ''" class="app-tab">日历</button>
-        <button @click="appTab='watchlist'" :class="appTab === 'watchlist' ? 'app-tab-active' : ''" class="app-tab">自选 <span v-if="user && watchlist.length" class="ml-1 text-[11px] opacity-75">{{ watchlist.length }}</span></button>
+        <button @click="appTab='calendar'" :class="appTab === 'calendar' ? 'app-tab-active' : ''" class="ui-tab app-tab">日历</button>
+        <button @click="appTab='watchlist'" :class="appTab === 'watchlist' ? 'app-tab-active' : ''" class="ui-tab app-tab">自选 <span v-if="user && watchlist.length" class="ml-1 text-[11px] opacity-75">{{ watchlist.length }}</span></button>
       </div>
     </nav>
 
     <!-- Calendar controls: month/week is deliberately scoped to the calendar tab. -->
     <div v-if="appTab === 'calendar'" class="max-w-[1600px] mx-auto px-4 py-3 flex flex-wrap items-center gap-2">
       <div class="flex border-b" style="border-color:var(--border);">
-        <button @click="viewMode='month'" :class="viewMode==='month' ? 'tab-active' : 'tab-inactive'" class="pb-1.5 px-2.5 text-[13px] font-medium transition">月</button>
-        <button @click="viewMode='week'" :class="viewMode==='week' ? 'tab-active' : 'tab-inactive'" class="pb-1.5 px-2.5 text-[13px] font-medium transition">周</button>
+        <button @click="viewMode='month'" :class="viewMode==='month' ? 'tab-active' : 'tab-inactive'" class="ui-tab pb-1.5 px-2.5 text-[13px] font-medium transition">月</button>
+        <button @click="viewMode='week'" :class="viewMode==='week' ? 'tab-active' : 'tab-inactive'" class="ui-tab pb-1.5 px-2.5 text-[13px] font-medium transition">周</button>
       </div>
 
       <div class="flex items-center gap-1.5">
-        <button @click="prevMonth" class="btn btn-ghost" style="padding:4px;">
+        <button @click="prevMonth" class="ui-btn ui-btn-ghost" style="padding:4px;">
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
         </button>
         <span class="text-[13px] font-medium text-zinc-300 min-w-[120px] text-center">{{ monthLabel }}</span>
-        <button @click="nextMonth" class="btn btn-ghost" style="padding:4px;">
+        <button @click="nextMonth" class="ui-btn ui-btn-ghost" style="padding:4px;">
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
         </button>
-        <button @click="goToday" class="btn btn-outline" style="padding:3px 8px;font-size:11px;">今天</button>
+        <button @click="goToday" class="ui-btn ui-btn-outline" style="padding:3px 8px;font-size:11px;">今天</button>
       </div>
 
       <div class="flex-1"></div>
 
       <label v-if="user" class="flex items-center gap-1.5 cursor-pointer text-[12px] text-zinc-400">
-        <input type="checkbox" v-model="watchlistOnly" @change="loadEarnings" style="accent-color:var(--primary);width:14px;height:14px;border-radius:4px;" />
+        <input class="ui-checkbox" type="checkbox" v-model="watchlistOnly" @change="loadEarnings" aria-label="只看自选" />
         只看自选
         <span v-if="watchlistOnly && watchlist.length === 0" class="text-amber-500 text-[11px]">⚠ 空</span>
       </label>
 
-      <button v-if="user" @click="showIcalModal = true" class="btn btn-outline" style="font-size:12px;padding:4px 10px;">
+      <button v-if="user" @click="showIcalModal = true" class="ui-btn ui-btn-outline" style="font-size:12px;padding:4px 10px;">
         <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
         订阅日历
       </button>
@@ -197,10 +220,10 @@
       <template v-if="user">
         <div class="flex flex-wrap items-end justify-between gap-3 mb-4"><div><h2 class="text-[20px] font-semibold">我的自选</h2><p class="text-[12px] mt-1" style="color:var(--text-muted);">追踪你关注的美股与港股财报日程。</p></div><span class="text-[12px]" style="color:var(--text-muted);">{{ watchlist.length }} 个标的</span></div>
         <div class="grid grid-cols-3 gap-2.5 mb-4"><div class="watchlist-stat"><div class="text-[11px] text-zinc-500">全部</div><div class="mt-1 text-[22px] font-semibold">{{ watchlist.length }}</div></div><div class="watchlist-stat"><div class="text-[11px] text-zinc-500">美股 · US</div><div class="mt-1 text-[22px] font-semibold text-blue-300">{{ usWatchlist.length }}</div></div><div class="watchlist-stat"><div class="text-[11px] text-zinc-500">港股 · HK</div><div class="mt-1 text-[22px] font-semibold text-pink-300">{{ hkWatchlist.length }}</div></div></div>
-        <section class="surface p-3 mb-5" aria-label="添加自选"><label class="block text-[12px] font-medium mb-2">添加自选</label><input v-model="searchQuery" @input="doSearch" placeholder="搜索股票代码或公司名称…" class="w-full text-[13px] px-3 py-2 rounded-md" style="background:var(--surface-raised);border:1px solid var(--border);color:var(--text);outline:none;" @focus="$event.target.style.borderColor='var(--primary)'" @blur="$event.target.style.borderColor='var(--border)'" /><div v-if="searchLoading" class="flex items-center gap-2 text-[12px] text-zinc-500 py-3"><div class="spinner" style="width:14px;height:14px;"></div> 搜索中…</div><div v-else-if="searchResults.length" class="mt-2 space-y-1 max-h-56 overflow-y-auto"><button v-for="r in searchResults" :key="r.symbol+r.market" @click="addToWatchlist(r.symbol, r.market)" class="w-full text-left px-3 py-2 rounded-md text-[13px] flex items-center justify-between transition" style="background:var(--surface-raised);color:var(--text-secondary);"><span class="min-w-0"><span class="text-zinc-100 font-medium">{{ r.symbol }}</span><span v-if="r.company_name" class="text-zinc-500 ml-2">{{ r.company_name }}</span></span><span class="badge" :class="'badge-' + r.market">添加 · {{ r.market }}</span></button></div><div v-else-if="!searchQuery" class="flex flex-wrap items-center gap-1.5 mt-3"><span class="text-[11px] text-zinc-600">热门：</span><button v-for="s in popularSuggestions" :key="s.symbol+s.market" @click="addToWatchlist(s.symbol, s.market)" class="text-[11px] px-2 py-1 rounded-md btn-outline">{{ s.symbol }} <span class="text-zinc-600">{{ s.market }}</span></button></div><p v-else class="mt-3 text-[12px] text-zinc-500">未找到匹配标的，试试代码或更短的关键词。</p></section>
-        <div class="grid lg:grid-cols-2 gap-4"><section class="surface overflow-hidden"><div class="flex items-center justify-between px-4 py-3 border-b" style="border-color:var(--border);"><div class="section-title mb-0 border-0 p-0">美股 <span class="text-zinc-500 font-normal">{{ usWatchlist.length }}</span></div><span class="text-[11px] text-zinc-500">下次财报 · 一致预期</span></div><div class="overflow-x-auto"><table class="w-full min-w-[620px] text-[12px]"><thead class="text-[10px] text-zinc-500" style="background:var(--surface-raised);"><tr><th class="text-left px-4 py-2 font-medium">代码 / 公司</th><th class="text-left px-3 py-2 font-medium">下次财报</th><th class="text-right px-3 py-2 font-medium">EPS 预期</th><th class="text-right px-3 py-2 font-medium">营收预期</th><th class="text-right px-4 py-2 font-medium">操作</th></tr></thead><tbody><tr v-if="!usWatchlist.length"><td colspan="5" class="px-4 py-5 text-zinc-500">暂无美股自选。</td></tr><tr v-for="w in usWatchlist" :key="w.symbol+w.market" class="border-t" style="border-color:var(--border);"><td class="px-4 py-2.5"><div class="font-semibold text-[13px]">{{ w.symbol }} <span class="badge badge-US" style="font-size:9px;">US</span></div><div class="text-[10px] text-zinc-500 truncate max-w-[180px]">{{ watchlistInsight(w).company_name || '—' }}</div></td><td class="px-3 py-2.5"><div>{{ watchlistInsight(w).report_date || '—' }}</div><div class="text-[10px] text-zinc-500">{{ watchlistInsight(w).fiscal_year ? fqLabel(watchlistInsight(w).fiscal_year, watchlistInsight(w).fiscal_quarter) : '待确认' }}</div></td><td class="px-3 py-2.5 text-right">{{ fmtNum(watchlistInsight(w).eps_estimate) }}</td><td class="px-3 py-2.5 text-right">{{ fmtBigNum(watchlistInsight(w).revenue_estimate) }}</td><td class="px-4 py-2.5 text-right"><button @click="removeFromWatchlist(w.symbol, w.market)" class="watchlist-remove btn btn-ghost text-red-400" style="padding:4px 8px;font-size:11px;">移除</button></td></tr></tbody></table></div></section><section class="surface overflow-hidden"><div class="flex items-center justify-between px-4 py-3 border-b" style="border-color:var(--border);"><div class="section-title mb-0 border-0 p-0">港股 <span class="text-zinc-500 font-normal">{{ hkWatchlist.length }}</span></div><span class="text-[11px] text-zinc-500">下次财报 · 一致预期</span></div><div class="overflow-x-auto"><table class="w-full min-w-[620px] text-[12px]"><thead class="text-[10px] text-zinc-500" style="background:var(--surface-raised);"><tr><th class="text-left px-4 py-2 font-medium">代码 / 公司</th><th class="text-left px-3 py-2 font-medium">下次财报</th><th class="text-right px-3 py-2 font-medium">EPS 预期</th><th class="text-right px-3 py-2 font-medium">营收预期</th><th class="text-right px-4 py-2 font-medium">操作</th></tr></thead><tbody><tr v-if="!hkWatchlist.length"><td colspan="5" class="px-4 py-5 text-zinc-500">暂无港股自选。</td></tr><tr v-for="w in hkWatchlist" :key="w.symbol+w.market" class="border-t" style="border-color:var(--border);"><td class="px-4 py-2.5"><div class="font-semibold text-[13px]">{{ w.symbol }} <span class="badge badge-HK" style="font-size:9px;">HK</span></div><div class="text-[10px] text-zinc-500 truncate max-w-[180px]">{{ watchlistInsight(w).company_name || '—' }}</div></td><td class="px-3 py-2.5"><div>{{ watchlistInsight(w).report_date || '—' }}</div><div class="text-[10px] text-zinc-500">{{ watchlistInsight(w).fiscal_year ? fqLabel(watchlistInsight(w).fiscal_year, watchlistInsight(w).fiscal_quarter) : '待确认' }}</div></td><td class="px-3 py-2.5 text-right">{{ fmtNum(watchlistInsight(w).eps_estimate) }}</td><td class="px-3 py-2.5 text-right">{{ fmtBigNum(watchlistInsight(w).revenue_estimate) }}</td><td class="px-4 py-2.5 text-right"><button @click="removeFromWatchlist(w.symbol, w.market)" class="watchlist-remove btn btn-ghost text-red-400" style="padding:4px 8px;font-size:11px;">移除</button></td></tr></tbody></table></div></section></div>
+        <section class="surface p-3 mb-5" aria-label="添加自选"><label class="block text-[12px] font-medium mb-2">添加自选</label><input v-model="searchQuery" @input="doSearch" placeholder="搜索股票代码或公司名称…" class="ui-input" aria-label="搜索股票代码或公司名称" /><div v-if="searchLoading" class="flex items-center gap-2 text-[12px] text-zinc-500 py-3"><div class="spinner" style="width:14px;height:14px;"></div> 搜索中…</div><div v-else-if="searchResults.length" class="mt-2 space-y-1 max-h-56 overflow-y-auto"><button v-for="r in searchResults" :key="r.symbol+r.market" @click="addToWatchlist(r.symbol, r.market)" class="ui-btn ui-btn-outline w-full text-left justify-between" style="color:var(--text-secondary);"><span class="min-w-0"><span class="text-zinc-100 font-medium">{{ r.symbol }}</span><span v-if="r.company_name" class="text-zinc-500 ml-2">{{ r.company_name }}</span></span><span class="badge" :class="'badge-' + r.market">添加 · {{ r.market }}</span></button></div><div v-else-if="!searchQuery" class="flex flex-wrap items-center gap-1.5 mt-3"><span class="text-[11px] text-zinc-600">热门：</span><button v-for="s in popularSuggestions" :key="s.symbol+s.market" @click="addToWatchlist(s.symbol, s.market)" class="text-[11px] px-2 py-1 rounded-md btn-outline">{{ s.symbol }} <span class="text-zinc-600">{{ s.market }}</span></button></div><p v-else class="mt-3 text-[12px] text-zinc-500">未找到匹配标的，试试代码或更短的关键词。</p></section>
+        <div class="grid lg:grid-cols-2 gap-4"><section class="surface overflow-hidden"><div class="flex items-center justify-between px-4 py-3 border-b" style="border-color:var(--border);"><div class="section-title mb-0 border-0 p-0">美股 <span class="text-zinc-500 font-normal">{{ usWatchlist.length }}</span></div><span class="text-[11px] text-zinc-500">下次财报 · 一致预期</span></div><div class="overflow-x-auto"><table class="w-full min-w-[620px] text-[12px]"><thead class="text-[10px] text-zinc-500" style="background:var(--surface-raised);"><tr><th class="text-left px-4 py-2 font-medium">代码 / 公司</th><th class="text-left px-3 py-2 font-medium">下次财报</th><th class="text-right px-3 py-2 font-medium">EPS 预期</th><th class="text-right px-3 py-2 font-medium">营收预期</th><th class="text-right px-4 py-2 font-medium">操作</th></tr></thead><tbody><tr v-if="!usWatchlist.length"><td colspan="5" class="px-4 py-5 text-zinc-500">暂无美股自选。</td></tr><tr v-for="w in usWatchlist" :key="w.symbol+w.market" class="border-t" style="border-color:var(--border);"><td class="px-4 py-2.5"><div class="font-semibold text-[13px]">{{ w.symbol }} <span class="badge badge-US" style="font-size:9px;">US</span></div><div class="text-[10px] text-zinc-500 truncate max-w-[180px]">{{ watchlistInsight(w).company_name || '—' }}</div></td><td class="px-3 py-2.5"><div>{{ watchlistInsight(w).report_date || '—' }}</div><div class="text-[10px] text-zinc-500">{{ watchlistInsight(w).fiscal_year ? fqLabel(watchlistInsight(w).fiscal_year, watchlistInsight(w).fiscal_quarter) : '待确认' }}</div></td><td class="px-3 py-2.5 text-right">{{ fmtNum(watchlistInsight(w).eps_estimate) }}</td><td class="px-3 py-2.5 text-right">{{ fmtBigNum(watchlistInsight(w).revenue_estimate) }}</td><td class="px-4 py-2.5 text-right"><button @click="removeFromWatchlist(w.symbol, w.market)" class="watchlist-remove ui-btn ui-btn-ghost text-red-400" style="padding:4px 8px;font-size:11px;">移除</button></td></tr></tbody></table></div></section><section class="surface overflow-hidden"><div class="flex items-center justify-between px-4 py-3 border-b" style="border-color:var(--border);"><div class="section-title mb-0 border-0 p-0">港股 <span class="text-zinc-500 font-normal">{{ hkWatchlist.length }}</span></div><span class="text-[11px] text-zinc-500">下次财报 · 一致预期</span></div><div class="overflow-x-auto"><table class="w-full min-w-[620px] text-[12px]"><thead class="text-[10px] text-zinc-500" style="background:var(--surface-raised);"><tr><th class="text-left px-4 py-2 font-medium">代码 / 公司</th><th class="text-left px-3 py-2 font-medium">下次财报</th><th class="text-right px-3 py-2 font-medium">EPS 预期</th><th class="text-right px-3 py-2 font-medium">营收预期</th><th class="text-right px-4 py-2 font-medium">操作</th></tr></thead><tbody><tr v-if="!hkWatchlist.length"><td colspan="5" class="px-4 py-5 text-zinc-500">暂无港股自选。</td></tr><tr v-for="w in hkWatchlist" :key="w.symbol+w.market" class="border-t" style="border-color:var(--border);"><td class="px-4 py-2.5"><div class="font-semibold text-[13px]">{{ w.symbol }} <span class="badge badge-HK" style="font-size:9px;">HK</span></div><div class="text-[10px] text-zinc-500 truncate max-w-[180px]">{{ watchlistInsight(w).company_name || '—' }}</div></td><td class="px-3 py-2.5"><div>{{ watchlistInsight(w).report_date || '—' }}</div><div class="text-[10px] text-zinc-500">{{ watchlistInsight(w).fiscal_year ? fqLabel(watchlistInsight(w).fiscal_year, watchlistInsight(w).fiscal_quarter) : '待确认' }}</div></td><td class="px-3 py-2.5 text-right">{{ fmtNum(watchlistInsight(w).eps_estimate) }}</td><td class="px-3 py-2.5 text-right">{{ fmtBigNum(watchlistInsight(w).revenue_estimate) }}</td><td class="px-4 py-2.5 text-right"><button @click="removeFromWatchlist(w.symbol, w.market)" class="watchlist-remove ui-btn ui-btn-ghost text-red-400" style="padding:4px 8px;font-size:11px;">移除</button></td></tr></tbody></table></div></section></div>
       </template>
-      <section v-else class="surface max-w-lg mx-auto mt-8 p-6 text-center"><div class="w-10 h-10 mx-auto mb-3 rounded-full flex items-center justify-center text-lg" style="background:var(--surface-raised);">☆</div><h2 class="text-[17px] font-semibold">登录后管理自选</h2><p class="text-[12px] leading-5 mt-2" style="color:var(--text-muted);">自选会安全地保存到你的账户，并用于日历中的“只看自选”筛选。</p><button v-if="appConfig.auth_login_url" @click="login" class="btn btn-primary mt-4">登录</button></section>
+      <section v-else class="surface max-w-lg mx-auto mt-8 p-6 text-center"><div class="w-10 h-10 mx-auto mb-3 rounded-full flex items-center justify-center text-lg" style="background:var(--surface-raised);">☆</div><h2 class="text-[17px] font-semibold">登录后管理自选</h2><p class="text-[12px] leading-5 mt-2" style="color:var(--text-muted);">自选会安全地保存到你的账户，并用于日历中的“只看自选”筛选。</p><button v-if="appConfig.auth_login_url" @click="login" class="ui-btn ui-btn-primary mt-4">登录</button></section>
     </main>
 
     <!-- Calendar and selection workspace -->
@@ -270,7 +293,7 @@
           <div class="p-4">
             <div class="flex items-center justify-between mb-3">
               <div class="flex items-center gap-2">
-                <button @click="selectedEarning = null" class="btn btn-ghost" style="padding:4px;" title="返回当日列表" aria-label="返回当日列表">
+                <button @click="selectedEarning = null" class="ui-btn ui-btn-ghost" style="padding:4px;" title="返回当日列表" aria-label="返回当日列表">
                   <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
                   返回
                 </button>
@@ -279,7 +302,7 @@
                 <span v-if="selectedEarning.fiscal_year && selectedEarning.fiscal_quarter" class="text-[11px] font-medium" style="color:var(--text-muted);">{{ fqLabel(selectedEarning.fiscal_year, selectedEarning.fiscal_quarter) }}</span>
                 <span v-if="selectedEarning.is_predicted" class="predicted-tag">预测</span>
               </div>
-              <button v-if="user" @click="toggleWatchlist(selectedEarning.symbol, selectedEarning.market)" class="btn btn-outline" :class="isMine(selectedEarning) ? 'text-amber-400' : ''" style="padding:4px 10px;font-size:12px;" :title="isMine(selectedEarning) ? '从自选移除' : '加入自选'" aria-label="切换自选">
+              <button v-if="user" @click="toggleWatchlist(selectedEarning.symbol, selectedEarning.market)" class="ui-btn ui-btn-outline" :class="isMine(selectedEarning) ? 'text-amber-400' : ''" style="padding:4px 10px;font-size:12px;" :title="isMine(selectedEarning) ? '从自选移除' : '加入自选'" aria-label="切换自选">
                 {{ isMine(selectedEarning) ? '★ 已自选' : '☆ 加自选' }}
               </button>
             </div>
@@ -391,7 +414,7 @@
               <p class="text-[11px] truncate" style="color:var(--text-muted);" v-if="e.company_name">{{ e.company_name }}</p>
             </div>
             <div class="text-right text-[12px] flex flex-col items-end gap-1" v-if="e.eps_estimate != null || e.eps_actual != null">
-              <button v-if="user" @click.stop="toggleWatchlist(e.symbol, e.market)" class="btn btn-ghost" :class="isMine(e) ? 'text-amber-400' : 'text-zinc-500'" style="padding:3px 8px;font-size:11px;border:1px solid var(--border);border-radius:6px;" :title="isMine(e) ? '从自选移除' : '加入自选'" aria-label="切换自选">
+              <button v-if="user" @click.stop="toggleWatchlist(e.symbol, e.market)" class="ui-btn ui-btn-ghost" :class="isMine(e) ? 'text-amber-400' : 'text-zinc-500'" style="padding:3px 8px;font-size:11px;border:1px solid var(--border);border-radius:6px;" :title="isMine(e) ? '从自选移除' : '加入自选'" aria-label="切换自选">
                 {{ isMine(e) ? '★ 已自选' : '☆ 加自选' }}
               </button>
               <div v-if="e.eps_actual != null" :class="epsSurplusClass(e)" class="font-medium">
@@ -420,28 +443,28 @@
     </div>
 
     <!-- iCal Modal -->
-    <div v-if="showIcalModal" class="fixed inset-0 z-50 flex items-center justify-center" style="background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);" @click.self="showIcalModal = false">
-      <div class="surface p-4 max-w-md w-full mx-4">
+    <div v-if="showIcalModal" class="fixed inset-0 z-50 flex items-center justify-center ui-dialog-backdrop" @click.self="showIcalModal = false">
+      <div class="ui-dialog surface p-4 max-w-md w-full mx-4">
         <h3 class="text-[15px] font-semibold text-zinc-100 mb-1.5">日历订阅</h3>
         <p class="text-[12px] mb-3" style="color:var(--text-secondary);">将财报日同步到 Apple Calendar、Google Calendar 或 Outlook。</p>
         <div class="surface p-3 mb-3 space-y-2" style="background:var(--surface-raised);">
           <label class="text-[11px] block" style="color:var(--text-muted);">事件标题语言</label>
-          <select v-model="icalOptions.lang" class="w-full text-[12px] px-2 py-1 rounded" style="background:var(--bg);border:1px solid var(--border);color:var(--text);">
+          <select v-model="icalOptions.lang" class="ui-select" aria-label="事件标题语言">
             <option value="zh">中文公司名</option><option value="en">英文公司名</option>
           </select>
           <label class="text-[11px] block" style="color:var(--text-muted);">标的范围</label>
-          <select v-model="icalOptions.scope" class="w-full text-[12px] px-2 py-1 rounded" style="background:var(--bg);border:1px solid var(--border);color:var(--text);">
+          <select v-model="icalOptions.scope" class="ui-select" aria-label="标的范围">
             <option value="watchlist">仅自选</option><option value="all">全部系统录入标的</option>
           </select>
-          <label class="flex items-center gap-2 text-[12px]" style="color:var(--text-secondary);"><input v-model="icalOptions.predicted" type="checkbox"> 接受预测日期</label>
+          <label class="flex items-center gap-2 text-[12px]" style="color:var(--text-secondary);"><input class="ui-checkbox" v-model="icalOptions.predicted" type="checkbox" aria-label="接受预测日期"> 接受预测日期</label>
           <label class="text-[11px] block" style="color:var(--text-muted);">市场范围</label>
-          <select v-model="icalOptions.markets" class="w-full text-[12px] px-2 py-1 rounded" style="background:var(--bg);border:1px solid var(--border);color:var(--text);">
+          <select v-model="icalOptions.markets" class="ui-select" aria-label="市场范围">
             <option value="all">美股 + 港股</option><option value="US">仅美股</option><option value="HK">仅港股</option>
           </select>
           <label class="text-[11px] block mb-1" style="color:var(--text-muted);">订阅地址</label>
           <div class="flex gap-2">
-            <input :value="icalUrl" readonly class="flex-1 text-[11px] px-2 py-1 rounded" style="background:var(--bg);border:1px solid var(--border);color:var(--text-secondary);font-family:monospace;" />
-            <button @click="copyIcal" class="btn btn-primary" style="font-size:11px;padding:4px 10px;">
+            <input :value="icalUrl" readonly class="ui-input flex-1 text-[11px]" aria-label="iCal 订阅地址" style="font-family:monospace;" />
+            <button @click="copyIcal" class="ui-btn ui-btn-primary" style="font-size:11px;padding:4px 10px;">
               {{ copied ? '已复制!' : '复制' }}
             </button>
           </div>
@@ -452,17 +475,17 @@
           <p><strong style="color:var(--text-secondary);">Outlook:</strong> 添加日历 → 从 Web 订阅</p>
         </div>
         <div class="mt-3 flex justify-end">
-          <button @click="showIcalModal = false" class="btn btn-ghost" style="font-size:12px;">关闭</button>
+          <button @click="showIcalModal = false" class="ui-btn ui-btn-ghost" style="font-size:12px;">关闭</button>
         </div>
       </div>
     </div>
 
     <!-- Admin Modal -->
-    <div v-if="showAdmin" class="fixed inset-0 z-50 flex items-center justify-center" style="background:rgba(0,0,0,.65);backdrop-filter:blur(4px);" @click.self="showAdmin=false">
-      <div class="surface p-4 max-w-3xl w-full mx-4 max-h-[86vh] overflow-y-auto">
+    <div v-if="showAdmin" class="fixed inset-0 z-50 flex items-center justify-center ui-dialog-backdrop" @click.self="showAdmin=false">
+      <div class="ui-dialog surface p-4 max-w-3xl w-full mx-4 max-h-[86vh] overflow-y-auto">
         <div class="flex items-center justify-between mb-4">
           <div><h3 class="text-[16px] font-semibold">管理</h3><p class="text-[11px] text-zinc-500 mt-1">权限来自 kazusa-home-portal 的 X-User-Role: admin</p></div>
-          <button @click="showAdmin=false" class="btn btn-ghost" style="padding:4px;">✕</button>
+          <button @click="showAdmin=false" class="ui-btn ui-btn-ghost" style="padding:4px;">✕</button>
         </div>
         <div v-if="adminLoading" class="flex items-center gap-2 text-[12px] text-zinc-500"><div class="spinner"></div>加载中...</div>
         <template v-else>
@@ -471,8 +494,8 @@
             <div class="surface p-3"><div class="text-[11px] text-zinc-500 mb-1">当前外部/合并自选</div><div class="text-[22px] font-semibold">{{ adminSource.symbol_count || 0 }}</div><div v-if="adminSource.error_code" class="text-[11px] text-red-400">{{ adminSource.error_code }}</div></div>
           </div>
           <div class="section-title">FinCal 自建自选 <span class="text-zinc-500 font-normal">独立持久化；加入后会合并到同步宇宙</span></div>
-          <form @submit.prevent="saveManaged" class="flex flex-wrap gap-2 mb-3"><input v-model="managedForm.symbol" placeholder="代码，例如 AAPL / 0700" class="flex-1 min-w-[160px] text-[13px] px-3 py-1.5 rounded-md" style="background:var(--surface-raised);border:1px solid var(--border);color:var(--text);"><select v-model="managedForm.market" class="text-[13px] px-2 rounded-md" style="background:var(--surface-raised);border:1px solid var(--border);color:var(--text);"><option>US</option><option>HK</option></select><button class="btn btn-primary" style="font-size:12px;">{{ managedForm.id ? '保存' : '添加' }}</button><button v-if="managedForm.id" type="button" @click="resetManaged" class="btn btn-ghost" style="font-size:12px;">取消</button></form>
-          <div class="surface mb-4 overflow-hidden"><div v-if="!managedWatchlist.length" class="p-3 text-[12px] text-zinc-500">暂无 FinCal 自建自选。</div><div v-for="item in managedWatchlist" :key="item.id" class="flex items-center justify-between px-3 py-2 border-b last:border-0" style="border-color:var(--border);"><span class="text-[13px] font-medium">{{ item.symbol }} <span class="badge" :class="'badge-'+item.market">{{ item.market }}</span></span><span class="flex gap-1"><button @click="editManaged(item)" class="btn btn-ghost" style="font-size:11px;padding:3px 6px;">编辑</button><button @click="deleteManaged(item.id)" class="btn btn-ghost" style="font-size:11px;padding:3px 6px;color:#f87171;">删除</button></span></div></div>
+          <form @submit.prevent="saveManaged" class="flex flex-wrap gap-2 mb-3"><input v-model="managedForm.symbol" placeholder="代码，例如 AAPL / 0700" class="ui-input flex-1 min-w-[160px]"><select v-model="managedForm.market" class="ui-select" style="width:auto;"><option>US</option><option>HK</option></select><button class="ui-btn ui-btn-primary" style="font-size:12px;">{{ managedForm.id ? '保存' : '添加' }}</button><button v-if="managedForm.id" type="button" @click="resetManaged" class="ui-btn ui-btn-ghost" style="font-size:12px;">取消</button></form>
+          <div class="surface mb-4 overflow-hidden"><div v-if="!managedWatchlist.length" class="p-3 text-[12px] text-zinc-500">暂无 FinCal 自建自选。</div><div v-for="item in managedWatchlist" :key="item.id" class="flex items-center justify-between px-3 py-2 border-b last:border-0" style="border-color:var(--border);"><span class="text-[13px] font-medium">{{ item.symbol }} <span class="badge" :class="'badge-'+item.market">{{ item.market }}</span></span><span class="flex gap-1"><button @click="editManaged(item)" class="ui-btn ui-btn-ghost" style="font-size:11px;padding:3px 6px;">编辑</button><button @click="deleteManaged(item.id)" class="ui-btn ui-btn-ghost" style="font-size:11px;padding:3px 6px;color:#f87171;">删除</button></span></div></div>
           <div class="section-title">同步记录</div>
           <div class="surface overflow-hidden"><div v-if="!syncRuns.length" class="p-3 text-[12px] text-zinc-500">暂无记录；下一次同步将自动写入。</div><div v-for="run in syncRuns" :key="run.id" class="px-3 py-2 border-b last:border-0 text-[12px]" style="border-color:var(--border);"><div class="flex justify-between gap-3"><span class="font-medium">{{ run.stage }} · {{ run.source }}</span><span :class="run.status==='success'?'text-emerald-400':run.status==='failed'?'text-red-400':'text-amber-400'">{{ run.status }}</span></div><div class="text-zinc-500 mt-1">{{ fmtDateTime(run.started_at) }} · 标的 {{ run.symbol_count }} · 记录 {{ run.record_count }}<span v-if="run.error_code"> · {{ run.error_code }}</span></div></div></div>
         </template>

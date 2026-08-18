@@ -53,3 +53,18 @@ def test_watchlist_page_reuses_search_and_mutation_apis_without_calendar_pills()
     assert "async function addToWatchlist(symbol, market)" in html
     assert "async function removeFromWatchlist(symbol, market)" in html
     assert "<!-- Watchlist pills -->" not in html
+
+
+def test_controls_use_shadcn_compatible_primitives():
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    assert "ui-btn" in html
+    assert "ui-input" in html
+    assert "ui-select" in html
+    assert "ui-checkbox" in html
+    assert "ui-dialog-backdrop" in html
+    assert "ui-dialog" in html
+    assert "@click=\"appTab='calendar'\"" in html
+    assert '<input type="checkbox"' not in html.replace('<input class="ui-checkbox" type="checkbox"', '')
+    assert 'v-model="icalOptions.lang" class="ui-select"' in html
+    assert 'v-model="icalOptions.scope" class="ui-select"' in html
+    assert 'v-model="icalOptions.markets" class="ui-select"' in html
