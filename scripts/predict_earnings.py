@@ -243,11 +243,12 @@ def merge_duplicate_symbols():
         if merged:
             logger.info(f"Merged {merged} .US duplicate symbols")
 
-        # 2) Merge 5-digit HK codes (8XXXX.HK) → 4-digit (XXXX.HK)
-        cur.execute("SELECT DISTINCT symbol FROM earnings WHERE symbol ~ '^\\d{5}\\.HK$'")
+        # 2) Merge 5-digit HK codes (e.g. 00700.HK) → 4-digit canonical (0700.HK)
+        #    Uses app.symbol.normalize — the single source of truth for HK codes.
+        cur.execute(r"SELECT DISTINCT symbol FROM earnings WHERE symbol ~ '^\d{5}\.HK$'")
         hk5 = [r["symbol"] for r in cur.fetchall()]
         for sym in hk5:
-            bare = (sym.split(".")[0].lstrip("8") or "0").zfill(4) + ".HK"
+            bare = normalize(sym.split(".")[0], "HK")
             cur.execute(
                 """INSERT INTO earnings (symbol, market, company_name, report_date, report_type,
                    fiscal_year, fiscal_quarter, eps_estimate, eps_actual, revenue_estimate, revenue_actual, before_after, is_predicted)
