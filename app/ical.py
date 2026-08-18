@@ -129,6 +129,17 @@ def generate_ical(earnings: list[dict], user_email: str = "", title_lang: str = 
         fq_str = f"Q{fq}" if fq else ""
         is_pred = e.get("is_predicted", False)
         pred_marker = " [预测]" if is_pred else ""
+        # Issue #17: explicit source status in summary
+        date_status = e.get("date_status", "")
+        date_source = e.get("date_source", "")
+        if date_status == "predicted":
+            source_tag = " [预测]"
+        elif date_status == "reported":
+            source_tag = ""
+        elif date_status == "unavailable":
+            source_tag = " [未确认]"
+        else:
+            source_tag = pred_marker
         # The symbol already carries the market suffix for HK (e.g. 0700.HK).
         # Bare symbols are product-default US symbols, so do not append a
         # redundant `(US)` / `(HK)` marker. Put the company name next to code.
@@ -138,14 +149,15 @@ def generate_ical(earnings: list[dict], user_email: str = "", title_lang: str = 
         if fq_str:
             summary_parts.append(fq_str)
         summary_parts.append("财报" if title_lang == "zh" else "Earnings")
-        summary = " ".join(summary_parts) + pred_marker
+        summary = " ".join(summary_parts) + source_tag
         # Company names use the cached canonical name; title_lang controls the
         # event wording because the current earnings schema has one name field.
         # Keep the human-readable summary free of duplicate market labels.
         desc_parts = [f"Company: {company}" if company else "",
                       f"Fiscal: FY{fy} {fq_str}" if fy else "",
                       f"Timing: {time_label}" if time_label else "",
-                      "⚠ Predicted date (not confirmed)" if is_pred else "",
+                      f"⚠ Predicted date (not confirmed)" if is_pred else "",
+                      f"Date source: {date_source}" if date_source and date_source != "unknown" else "",
                       f"EPS Est: {e.get('eps_estimate')}" if e.get('eps_estimate') else "",
                       f"EPS Actual: {e.get('eps_actual')}" if e.get('eps_actual') else ""]
         desc = "\n".join(p for p in desc_parts if p)
