@@ -676,9 +676,14 @@
           const params = new URLSearchParams({ start, end, watchlistOnly: watchlistOnly.value });
           const data = await apiFetch(`/api/earnings?${params}`);
           if (data) {
-            earnings.value = data;
-            // Keep the calendar workspace useful on first render even when today has no earnings.
-            if (!selectedDay.value && appTab.value === 'calendar') {
+            // Keep a client-side guard as well as the API filter. This prevents
+            // stale/cached responses from leaking non-watchlist rows into the calendar.
+            earnings.value = watchlistOnly.value
+              ? data.filter(e => watchlist.value.some(w => w.symbol === e.symbol && w.market === e.market))
+              : data;
+            // Rebuild the selected day after a filter change; its old earnings
+            // array may otherwise keep showing rows from the previous mode.
+            if (appTab.value === 'calendar') {
               selectedDay.value = calendarCells.value.find(cell => cell.isToday) || null;
             }
           }

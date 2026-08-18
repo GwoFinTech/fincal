@@ -13,7 +13,7 @@ def test_calendar_selection_uses_a_responsive_non_overlay_side_panel():
     assert "grid-template-columns: minmax(0, 1fr) 400px" in html
     assert 'class="selection-panel surface"' in html
     assert 'v-else-if="selectedDay"' in html
-    assert "if (!selectedDay.value && appTab.value === 'calendar')" in html
+    assert "if (appTab.value === 'calendar')" in html
     assert "calendarCells.value.find(cell => cell.isToday)" in html
     assert "Day Detail Modal" not in html
     assert 'class="fixed inset-0 z-50 flex justify-end"' not in html
@@ -68,3 +68,11 @@ def test_controls_use_shadcn_compatible_primitives():
     assert 'v-model="icalOptions.lang" class="ui-select"' in html
     assert 'v-model="icalOptions.scope" class="ui-select"' in html
     assert 'v-model="icalOptions.markets" class="ui-select"' in html
+
+
+def test_watchlist_only_reloads_and_guards_calendar_rows():
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    assert 'v-model="watchlistOnly" @change="loadEarnings"' in html
+    assert "watchlistOnly.value" in html and "data.filter" in html
+    assert "watchlist.value.some(w => w.symbol === e.symbol && w.market === e.market)" in html
+    assert "selectedDay.value = calendarCells.value.find(cell => cell.isToday) || null" in html
