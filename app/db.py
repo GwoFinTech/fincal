@@ -26,6 +26,7 @@ def _get_pool():
 def db_cursor():
     pool = _get_pool()
     conn = pool.getconn()
+    cur = None
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         yield cur
@@ -34,7 +35,8 @@ def db_cursor():
         conn.rollback()
         raise
     finally:
-        cur.close()
+        if cur is not None:
+            cur.close()
         pool.putconn(conn)
 
 
