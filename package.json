@@ -1,0 +1,29 @@
+{
+  "name": "fincal",
+  "version": "1.0.0",
+  "description": "A financial earnings calendar with iCal subscription support.",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs",
+    "test": "tests"
+  },
+  "scripts": {
+    "generate-types": "bash scripts/generate_types.sh",
+    "check-types": "bash scripts/generate_types.sh --check"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/GwoFinTech/fincal.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/GwoFinTech/fincal/issues"
+  },
+  "homepage": "https://github.com/GwoFinTech/fincal#readme",
+  "devDependencies": {
+    "openapi-typescript": "^7.13.0"
+  }
+}

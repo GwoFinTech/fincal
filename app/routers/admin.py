@@ -6,13 +6,16 @@ from ..admin_watchlist import normalize_managed_symbol
 from ..auth import get_current_user, require_admin
 from ..watchlist import get_source
 from ..errors import AppError, NotFoundError, ConflictError, ForbiddenError
+from ..schemas import (
+    ManagedWatchlistItem, ManagedWatchlistInput as ManagedInput, SyncRun, SyncRunCancelResult,
+    SyncRunRecoverResult, SyncRunRetryResult, AuditLogEntry, HealthResponse, ReadyResponse,
+    DiagnosticsResponse, OverviewResponse,
+)
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 
-class ManagedWatchlistInput(BaseModel):
-    symbol: str
-    market: str = "US"
+# Moved to app/schemas.py
 
 
 def admin_user(user=Depends(get_current_user)):
@@ -31,7 +34,7 @@ def source_description() -> dict:
     }
 
 
-@router.get("/overview")
+@router.get("/overview", response_model=OverviewResponse)
 def overview(_: dict = Depends(admin_user)):
     source = get_source()
     result = source.get_symbols_with_status(force_refresh=True)
@@ -51,7 +54,7 @@ def overview(_: dict = Depends(admin_user)):
     }
 
 
-@router.get("/watchlist")
+@router.get("/watchlist", response_model=list[ManagedWatchlistItem])
 def list_managed_watchlist(_: dict = Depends(admin_user)):
     with db.db_cursor() as cur:
         cur.execute("SELECT id, symbol, market, created_at, updated_at FROM managed_watchlist ORDER BY market, symbol")
@@ -59,7 +62,7 @@ def list_managed_watchlist(_: dict = Depends(admin_user)):
 
 
 @router.post("/watchlist", status_code=201)
-def add_managed_watchlist(payload: ManagedWatchlistInput, _: dict = Depends(admin_user)):
+def add_managed_watchlist(payload: ManagedInput, _: dict = Depends(admin_user)):
     try:
         symbol, market = normalize_managed_symbol(payload.symbol, payload.market)
     except ValueError as exc:
@@ -74,8 +77,8 @@ def add_managed_watchlist(payload: ManagedWatchlistInput, _: dict = Depends(admi
         return dict(cur.fetchone())
 
 
-@router.put("/watchlist/{watchlist_id}")
-def update_managed_watchlist(watchlist_id: int, payload: ManagedWatchlistInput, _: dict = Depends(admin_user)):
+@router.put("/watchlist/{watchlist_id}", response_model=ManagedWatchlistItem)
+def update_managed_watchlist(watchlist_id: int, payload: ManagedInput, _: dict = Depends(admin_user)):
     try:
         symbol, market = normalize_managed_symbol(payload.symbol, payload.market)
     except ValueError as exc:
@@ -104,7 +107,7 @@ def delete_managed_watchlist(watchlist_id: int, _: dict = Depends(admin_user)):
     return {"status": "removed"}
 
 
-@router.get("/sync-runs")
+@router.get("/sync-runs", response_model=list[SyncRun])
 def list_sync_runs(limit: int = 50, _: dict = Depends(admin_user)):
     limit = min(max(limit, 1), 200)
     with db.db_cursor() as cur:
@@ -119,7 +122,7 @@ def list_sync_runs(limit: int = 50, _: dict = Depends(admin_user)):
         return [dict(row) for row in cur.fetchall()]
 
 
-@router.post("/sync-runs/{run_id}/cancel")
+@router.post("/sync-runs/{run_id}/cancel", response_model=SyncRunCancelResult)
 def cancel_sync_run(run_id: int, user=Depends(admin_user)):
     from ..sync_audit import request_cancel
     from ..audit import log_admin_action
@@ -131,7 +134,7 @@ def cancel_sync_run(run_id: int, user=Depends(admin_user)):
     return {"status": "cancelled", "run_id": run_id}
 
 
-@router.post("/sync-runs/recover")
+@router.post("/sync-runs/recover", response_model=SyncRunRecoverResult)
 def recover_stale_runs(user=Depends(admin_user)):
     from ..sync_audit import recover_stale_runs
     from ..audit import log_admin_action
@@ -140,13 +143,13 @@ def recover_stale_runs(user=Depends(admin_user)):
                      details={"recovered": count})
 
 
-@router.get("/audit-log")
+@router.get("/audit-log", response_model=list[AuditLogEntry])
 def list_audit_log(limit: int = 50, _: dict = Depends(admin_user)):
     from ..audit import get_audit_log
     return get_audit_log(limit)
 
 
-@router.get("/diagnostics")
+@router.get("/diagnostics", response_model=DiagnosticsResponse)
 def diagnostics(_: dict = Depends(admin_user)):
     """Provider metrics and cache diagnostics (Issue #15)."""
     from ..metrics import metrics
@@ -163,7 +166,7 @@ def diagnostics(_: dict = Depends(admin_user)):
     return result
 
 
-@router.get("/health")
+@router.get("/health", response_model=HealthResponse)
 def health_check():
     """Full dependency health status (Issue #11, #14, #20). No auth required."""
     from ..version import get_version
@@ -216,7 +219,7 @@ def health_check():
     return {"status": overall, "version": get_version(), "checks": checks}
 
 
-@router.get("/ready")
+@router.get("/ready", response_model=ReadyResponse)
 def readiness_check():
     """Readiness probe (Issue #14). Returns 200 only when core deps are OK.
 
@@ -231,7 +234,7 @@ def readiness_check():
         return JSONResponse(status_code=503, content={"status": "not_ready"})
 
 
-@router.post("/sync-runs/{run_id}/retry")
+@router.post("/sync-runs/{run_id}/retry", response_model=SyncRunRetryResult)
 def retry_sync_run(run_id: int, user=Depends(admin_user)):
     """Create a retry run from a failed/interrupted/cancelled run (Issue #19)."""
     from ..sync_audit import start_run

@@ -1,6 +1,7 @@
 """API routes for watchlist management and earnings data.
 
 Issue #7: layer cache for earnings and popular stocks.
+OpenAPI: all endpoints have response_model for schema generation.
 """
 import json
 from fastapi import APIRouter, Depends, HTTPException
@@ -10,6 +11,11 @@ from .. import db, config
 from ..symbol import normalize, sort_key, from_lb_counter_id
 from ..layer_cache import LayerCache
 from ..errors import AppError, NotFoundError, ForbiddenError
+from ..schemas import (
+    AppConfig, UserResponse, WatchlistItem, WatchlistAddResult,
+    WatchlistRemoveResult, EarningItem, DecisionResponse, PopularStocks,
+    SearchItem,
+)
 
 router = APIRouter(prefix="/api", tags=["api"])
 
@@ -18,7 +24,7 @@ _earnings_cache = LayerCache(default_ttl=120.0, stale_ttl=1800.0)
 _popular_cache = LayerCache(default_ttl=3600.0, stale_ttl=86400.0)
 
 
-@router.get("/config")
+@router.get("/config", response_model=AppConfig)
 def api_config():
     """Public config (no auth required)."""
     return {
@@ -26,7 +32,7 @@ def api_config():
     }
 
 
-@router.get("/me")
+@router.get("/me", response_model=UserResponse)
 def api_me(user=Depends(get_current_user)):
     """Get current user info + ical token."""
     fincal_user = ensure_user(user["id"], user["email"], user["name"])
@@ -42,7 +48,7 @@ def api_me(user=Depends(get_current_user)):
     }
 
 
-@router.get("/watchlist")
+@router.get("/watchlist", response_model=list[WatchlistItem])
 def api_watchlist(user=Depends(get_current_user)):
     """Get user's watchlist."""
     fincal_user = ensure_user(user["id"], user["email"], user["name"])
@@ -54,7 +60,7 @@ def api_watchlist(user=Depends(get_current_user)):
         return [dict(row) for row in cur.fetchall()]
 
 
-@router.post("/watchlist")
+@router.post("/watchlist", response_model=WatchlistAddResult)
 def api_add_watchlist(symbol: str, market: str = "US", user=Depends(get_current_user)):
     """Add a stock to watchlist."""
     fincal_user = ensure_user(user["id"], user["email"], user["name"])
@@ -74,7 +80,7 @@ def api_add_watchlist(symbol: str, market: str = "US", user=Depends(get_current_
     return dict(row) if row else {"status": "already_exists"}
 
 
-@router.delete("/watchlist")
+@router.delete("/watchlist", response_model=WatchlistRemoveResult)
 def api_remove_watchlist(symbol: str, market: str = "US", user=Depends(get_current_user)):
     """Remove a stock from watchlist."""
     fincal_user = ensure_user(user["id"], user["email"], user["name"])
@@ -90,7 +96,7 @@ def api_remove_watchlist(symbol: str, market: str = "US", user=Depends(get_curre
     return {"status": "removed"}
 
 
-@router.get("/earnings")
+@router.get("/earnings", response_model=list[EarningItem])
 def api_earnings(
     start: date | None = None,
     end: date | None = None,
@@ -142,7 +148,7 @@ def api_earnings(
         return data
 
 
-@router.get("/earnings/{earning_id}/decision")
+@router.get("/earnings/{earning_id}/decision", response_model=DecisionResponse)
 def api_earning_decision(earning_id: int, user=Depends(get_current_user)):
     """Decision-support facts with source-specific unavailable states, never synthetic values."""
     from ..phase3 import build_decision_metrics, revision_trend
@@ -171,7 +177,7 @@ def api_earning_decision(earning_id: int, user=Depends(get_current_user)):
     }
 
 
-@router.get("/popular")
+@router.get("/popular", response_model=PopularStocks)
 def api_popular():
     """Get the list of popular stocks shown by default. Cached (Issue #7)."""
     from ..earnings import POPULAR_STOCKS_US, POPULAR_STOCKS_HK
@@ -183,7 +189,7 @@ def api_popular():
     return data
 
 
-@router.get("/search")
+@router.get("/search", response_model=list[SearchItem])
 def api_search_stocks(q: str):
     """Search for stocks to add to watchlist."""
     with db.db_cursor() as cur:
