@@ -221,7 +221,7 @@ def api_search_stocks(q: str):
 
 
 @router.get("/export")
-def api_export(start: str, end: str, format: str = "csv"):
+def api_export(start: date, end: date, format: str = "csv"):
     """Export earnings data as CSV or JSON."""
     from ..earnings import fetch_earnings_from_db, POPULAR_STOCKS_US, POPULAR_STOCKS_HK
     from fastapi.responses import StreamingResponse
