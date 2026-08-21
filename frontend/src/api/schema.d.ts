@@ -552,7 +552,10 @@ export interface components {
              * @default
              */
             company_name: string;
-            /** Report Date */
+            /**
+             * Report Date
+             * Format: date
+             */
             report_date: string;
             /**
              * Report Type

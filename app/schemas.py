@@ -62,7 +62,7 @@ class EarningItem(BaseModel):
     symbol: str
     market: str
     company_name: str = ""
-    report_date: str
+    report_date: date
     report_type: str = "Q"
     fiscal_year: int | None = None
     fiscal_quarter: int | None = None
