@@ -486,7 +486,7 @@ export interface components {
             /** Revision Trend */
             revision_trend?: {
                 [key: string]: unknown;
-            }[] | null;
+            } | null;
             /** Institution Rating */
             institution_rating?: components["schemas"]["InstitutionRating"] | {
                 [key: string]: unknown;
@@ -936,7 +936,7 @@ export interface components {
             /** Id */
             id: number;
             /** Portal User Id */
-            portal_user_id: string;
+            portal_user_id: number;
             /** Email */
             email: string;
             /** Name */

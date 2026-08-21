@@ -26,7 +26,7 @@ class AppConfig(BaseModel):
 
 class UserResponse(BaseModel):
     id: int
-    portal_user_id: str
+    portal_user_id: int
     email: str
     name: str
     role: str
@@ -112,7 +112,7 @@ class Provenance(BaseModel):
 
 class DecisionResponse(BaseModel):
     status: str
-    revision_trend: list[dict] | None = None
+    revision_trend: dict | None = None
     institution_rating: InstitutionRating | dict | None = None
     guidance: GuidanceStatus | dict | None = None
     provenance: Provenance | dict | None = None
