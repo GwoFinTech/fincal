@@ -141,6 +141,7 @@ def recover_stale_runs(user=Depends(admin_user)):
     count = recover_stale_runs()
     log_admin_action("recover_stale_runs", actor_id=str(user.get("id")), actor_email=user.get("email"),
                      details={"recovered": count})
+    return {"recovered": count}
 
 
 @router.get("/audit-log", response_model=list[AuditLogEntry])
