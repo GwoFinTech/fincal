@@ -16,6 +16,7 @@
       try {
         const res = await fetch(path, { ...opts, headers: { 'Content-Type': 'application/json', ...opts.headers } });
         if (res.status === 401) { user.value = null; return null; }
+        if (res.status === 404) { return null; }
         if (!res.ok) {
           const text = await res.text().catch(() => '');
           throw new Error(text || `HTTP ${res.status}`);

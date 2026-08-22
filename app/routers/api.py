@@ -158,7 +158,7 @@ def api_earning_decision(earning_id: int, user=Depends(get_current_user)):
         cur.execute("SELECT * FROM earnings WHERE id=%s", (earning_id,))
         earning = cur.fetchone()
         if not earning:
-            return {"status": "not_found"}
+            raise NotFoundError("earning")
         earning = dict(earning)
         cur.execute("SELECT id,fiscal_year,fiscal_quarter,report_date,eps_actual,revenue_actual,eps_estimate FROM earnings WHERE symbol=%s AND market=%s ORDER BY report_date", (earning["symbol"], earning["market"]))
         history = [dict(row) for row in cur.fetchall()]
