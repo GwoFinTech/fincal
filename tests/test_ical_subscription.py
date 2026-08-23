@@ -114,3 +114,24 @@ def test_endpoint_uses_token_not_cookie():
     assert "token" in src
     # No cookie dependency
     assert "cookie" not in src.lower()
+
+
+# ── Issue #25: empty watchlist must not leak full data ─────────────────────
+
+def test_watchlist_scope_returns_empty_when_syms_empty():
+    """scope=watchlist with empty watchlist must return empty calendar, not full data.
+
+    Source-level assertion: the _generate() closure inside ical_feed must
+    contain an early-return guard that short-circuits when syms is empty.
+    """
+    import inspect
+    from app.routers.ical import ical_feed
+    src = inspect.getsource(ical_feed)
+    # The guard: if not syms → return empty calendar immediately
+    assert "if not syms" in src, (
+        "Missing empty watchlist guard — would leak full earnings data"
+    )
+    # Must return generate_ical([], ...) for the empty case
+    assert "generate_ical([]" in src or "generate_ical([]," in src, (
+        "Empty watchlist guard must return generate_ical([]) to produce valid empty VCALENDAR"
+    )

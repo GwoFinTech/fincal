@@ -90,6 +90,8 @@ def ical_feed(
                 syms = [normalize(r["symbol"], r["market"]) for r in cur.fetchall()]
         else:
             syms = [normalize(r["symbol"], r["market"]) for r in watchlist if r["market"] in selected_markets]
+            if not syms:
+                return generate_ical([], user.get("email", ""), title_lang=lang), []
         earn = fetch_earnings_from_db(
             symbols=syms, markets=selected_markets,
             start=date.today() - timedelta(days=7), end=date.today() + timedelta(days=120),
