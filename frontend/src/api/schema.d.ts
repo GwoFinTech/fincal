@@ -697,13 +697,12 @@ export interface components {
         };
         /** OverviewResponse */
         OverviewResponse: {
+            source: components["schemas"]["OverviewSource"];
             /**
-             * Source
-             * @default {}
+             * External Symbols
+             * @default []
              */
-            source: components["schemas"]["OverviewSource"] | {
-                [key: string]: unknown;
-            };
+            external_symbols: string[];
             /**
              * Managed Watchlist
              * @default []
@@ -713,24 +712,49 @@ export interface components {
         /** OverviewSource */
         OverviewSource: {
             /**
-             * Managed Watchlist Count
+             * Configured
+             * @default
+             */
+            configured: string;
+            /**
+             * Type
+             * @default
+             */
+            type: string;
+            /**
+             * Location
+             * @default
+             */
+            location: string;
+            /**
+             * Transport
+             * @default
+             */
+            transport: string;
+            /**
+             * External Dependency
+             * @default false
+             */
+            external_dependency: boolean;
+            /**
+             * Local Fallback
+             * @default false
+             */
+            local_fallback: boolean;
+            /**
+             * Symbol Count
              * @default 0
              */
-            managed_watchlist_count: number;
+            symbol_count: number;
+            /** Error Code */
+            error_code?: string | null;
             /**
-             * Last Sync
-             * @default {}
+             * Stale
+             * @default false
              */
-            last_sync: {
-                [key: string]: unknown;
-            };
-            /**
-             * Source Status
-             * @default {}
-             */
-            source_status: {
-                [key: string]: unknown;
-            };
+            stale: boolean;
+            /** Last Success At */
+            last_success_at?: string | null;
         };
         /** PopularStocks */
         PopularStocks: {

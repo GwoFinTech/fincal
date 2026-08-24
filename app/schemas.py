@@ -236,10 +236,18 @@ class DiagnosticsResponse(BaseModel):
     recent_syncs: list[RecentSync | dict] = []
 
 class OverviewSource(BaseModel):
-    managed_watchlist_count: int = 0
-    last_sync: dict = {}
-    source_status: dict = {}
+    configured: str = ""
+    type: str = ""
+    location: str = ""
+    transport: str = ""
+    external_dependency: bool = False
+    local_fallback: bool = False
+    symbol_count: int = 0
+    error_code: str | None = None
+    stale: bool = False
+    last_success_at: str | None = None
 
 class OverviewResponse(BaseModel):
-    source: OverviewSource | dict = {}
+    source: OverviewSource
+    external_symbols: list[str] = []
     managed_watchlist: list[ManagedWatchlistItem] = []
