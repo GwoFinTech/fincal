@@ -25,22 +25,45 @@ def require_admin(user: dict) -> dict:
 
 
 def ensure_user(portal_user_id: int, email: str, name: str) -> dict:
-    """Ensure user exists in fincal DB, create if not. Returns user dict."""
+    """Ensure user exists in fincal DB, create if not. Returns user dict.
+
+    Single upsert instead of SELECT-then-INSERT so concurrent first requests
+    from the same portal user cannot race into UniqueViolation (Issue #30).
+    The conditional DO UPDATE keeps unchanged rows from being rewritten
+    (no per-request write amplification). When the row already matches,
+    the DO UPDATE WHERE clause skips it and RETURNING yields nothing, so
+    fall back to a plain SELECT inside the same transaction.
+    """
+    token = secrets.token_urlsafe(24)
     with db.db_cursor() as cur:
         cur.execute(
-            "SELECT * FROM users WHERE portal_user_id = %s",
-            (portal_user_id,),
-        )
-        row = cur.fetchone()
-        if row:
-            cur.execute(
-                "UPDATE users SET email=%s, name=%s WHERE portal_user_id=%s RETURNING *",
-                (email, name, portal_user_id),
-            )
-            return dict(cur.fetchone())
-        token = secrets.token_urlsafe(24)
-        cur.execute(
-            "INSERT INTO users (portal_user_id, email, name, ical_token) VALUES (%s, %s, %s, %s) RETURNING *",
+            """
+            INSERT INTO users (portal_user_id, email, name, ical_token)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (portal_user_id) DO UPDATE
+               SET email = EXCLUDED.email,
+                   name  = EXCLUDED.name
+             WHERE users.email IS DISTINCT FROM EXCLUDED.email
+                OR users.name  IS DISTINCT FROM EXCLUDED.name
+            RETURNING *
+            """,
             (portal_user_id, email, name, token),
         )
-        return dict(cur.fetchone())
+        row = cur.fetchone()
+        if row is None:
+            # Existing row already had identical email/name: DO UPDATE was skipped.
+            # The conflicting row is committed by definition of conflict detection,
+            # so the read below always finds it within this transaction.
+            cur.execute(
+                "SELECT * FROM users WHERE portal_user_id = %s",
+                (portal_user_id,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            # Users rows are never deleted by the application; reaching here
+            # means the conflicting row vanished mid-request. Fail loudly
+            # instead of returning None to callers.
+            raise RuntimeError(
+                f"ensure_user: user row for portal_user_id={portal_user_id} vanished during upsert"
+            )
+        return dict(row)
