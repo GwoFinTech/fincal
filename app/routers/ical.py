@@ -4,6 +4,9 @@ from fastapi import APIRouter, Request, Response, Query
 from hashlib import sha256
 from email.utils import formatdate, parsedate_to_datetime
 from datetime import datetime, timezone
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def _not_modified(request: Request, etag: str, last_modified: str) -> bool:
@@ -100,7 +103,19 @@ def ical_feed(
             earn = [e for e in earn if not e.get("is_predicted")]
         return generate_ical(earn, user.get("email", ""), title_lang=lang), earn
 
-    ical_content, earnings = _ical_flight.do(str(cache_key), _generate)
+    try:
+        ical_content, earnings = _ical_flight.do(str(cache_key), _generate)
+    except TimeoutError:
+        # Issue #32: don't silently serve a stale/empty feed (and don't let a
+        # raw exception become a 500). Tell the calendar client to retry later.
+        from fastapi.responses import JSONResponse
+        logger.warning("ical feed generation timed out for token=%s scope=%s lang=%s",
+                       token, scope, lang)
+        return JSONResponse(
+            status_code=503,
+            content={"error": "calendar generation timed out, retry shortly"},
+            headers={"Retry-After": "30"},
+        )
     etag = '"' + sha256(ical_content.encode("utf-8")).hexdigest() + '"'
     timestamps = [e.get("updated_at") or e.get("created_at") for e in earnings]
     timestamps = [value for value in timestamps if value is not None]

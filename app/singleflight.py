@@ -12,11 +12,29 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 
+class _Flight:
+    """Mutable holder for a single in-flight keyed call.
+
+    Waiters keep a direct reference to the holder for the duration of
+    their wait, so they can read ``result`` / ``error`` even after the
+    entry has been cleaned out of the registry (which avoids losing a
+    real leader result to a racing cleanup). A separate ``event`` drives
+    the wait/timeout signalling.
+    """
+
+    __slots__ = ("event", "result", "error")
+
+    def __init__(self) -> None:
+        self.event = threading.Event()
+        self.result: Any = None
+        self.error: Exception | None = None
+
+
 class Singleflight:
     """Per-key singleflight with timeout."""
 
     def __init__(self):
-        self._inflight: dict[str, tuple[threading.Event, Any, Exception | None]] = {}
+        self._inflight: dict[str, _Flight] = {}
         self._mutex = threading.Lock()
 
     def do(self, key: str, fn: Callable[[], Any], timeout: float = 30.0) -> Any:
@@ -24,44 +42,49 @@ class Singleflight:
 
         Returns the result of fn(). If another caller is already executing
         for this key, waits for their result.
+
+        Raises :class:`TimeoutError` if the leader has not completed within
+        ``timeout`` seconds, so the caller can take a degrade path instead
+        of silently receiving ``None``.
         """
         with self._mutex:
-            if key in self._inflight:
-                event, result, error = self._inflight[key]
-                # Another caller is working — wait
-                self._mutex.release()
-                event.wait(timeout=timeout)
-                self._mutex.acquire()
-                _, result, error = self._inflight.get(key, (None, None, None))
-                if error:
-                    raise error
-                return result
+            flight = self._inflight.get(key)
+            if flight is None:
+                flight = _Flight()
+                self._inflight[key] = flight
+                is_leader = True
+            else:
+                is_leader = False
 
-            event = threading.Event()
-            self._inflight[key] = (event, None, None)
+        if is_leader:
+            try:
+                flight.result = fn()
+            except Exception as exc:
+                flight.error = exc
+                raise
+            finally:
+                flight.event.set()
+                self._schedule_cleanup(key, flight)
+            return flight.result
 
-        # We are the caller
-        try:
-            result = fn()
+        # Waiter: wait for the leader to finish, or raise on timeout.
+        if not flight.event.wait(timeout=timeout):
+            raise TimeoutError(
+                f"singleflight wait timed out for key={key!r} after {timeout}s"
+            )
+        if flight.error is not None:
+            raise flight.error
+        return flight.result
+
+    def _schedule_cleanup(self, key: str, flight: _Flight) -> None:
+        """Pop the resolved entry asynchronously so late joiners restart."""
+
+        def _cleanup() -> None:
             with self._mutex:
-                self._inflight[key] = (event, result, None)
-            event.set()
-            return result
-        except Exception as exc:
-            with self._mutex:
-                self._inflight[key] = (event, None, exc)
-            event.set()
-            raise
-        finally:
-            # Cleanup after a short delay to let waiters read
-            def _cleanup():
-                with self._mutex:
-                    entry = self._inflight.get(key)
-                    if entry and entry[0].is_set():
-                        self._inflight.pop(key, None)
+                if self._inflight.get(key) is flight:
+                    self._inflight.pop(key, None)
 
-            t = threading.Thread(target=_cleanup, daemon=True)
-            t.start()
+        threading.Thread(target=_cleanup, daemon=True).start()
 
 
 # Global instances for common use cases

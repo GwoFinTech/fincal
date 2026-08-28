@@ -1,5 +1,6 @@
 """Tests for singleflight (Issue #8)."""
 import sys
+import threading
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,3 +45,62 @@ def test_singleflight_propagates_errors():
             errors.append(str(e))
 
     assert all(e == "boom" for e in errors)
+
+
+# ── Issue #32: waiter must not silently receive None on leader timeout ──
+
+def test_singleflight_waiter_times_out_raises():
+    """Acceptance #1: leader exceeding waiter timeout raises, not None."""
+    import time
+    from app.singleflight import Singleflight
+    sf = Singleflight()
+
+    def slow_leader():
+        time.sleep(0.5)  # exceeds the waiter's timeout
+        return {"ok": True}
+
+    threading.Thread(target=lambda: sf.do("tk", slow_leader), daemon=True).start()
+    time.sleep(0.05)  # ensure the leader is registered before we join
+
+    start = time.monotonic()
+    try:
+        sf.do("tk", lambda: {"never": True}, timeout=0.1)
+    except TimeoutError as exc:
+        assert time.monotonic() - start < 1.0, "waiter should time out promptly"
+        assert "tk" in str(exc), f"timeout message should mention the key: {exc}"
+    else:
+        raise AssertionError("expected TimeoutError when leader exceeds waiter timeout")
+
+
+def test_singleflight_leader_returning_none_is_not_timeout():
+    """A leader that genuinely returns None must NOT be treated as a timeout."""
+    import time
+    from app.singleflight import Singleflight
+    sf = Singleflight()
+
+    def none_leader():
+        time.sleep(0.1)
+        return None
+
+    threading.Thread(target=lambda: sf.do("nk", none_leader), daemon=True).start()
+    time.sleep(0.05)
+
+    result = sf.do("nk", lambda: {"never": True}, timeout=2.0)
+    assert result is None
+
+
+def test_singleflight_waiter_receives_leader_real_result():
+    """Waiter must get the leader's real value, not be lost to cleanup."""
+    import time
+    from app.singleflight import Singleflight
+    sf = Singleflight()
+
+    def slow_leader():
+        time.sleep(0.15)
+        return {"ok": True}
+
+    threading.Thread(target=lambda: sf.do("vk", slow_leader), daemon=True).start()
+    time.sleep(0.05)
+
+    result = sf.do("vk", lambda: {"never": True}, timeout=2.0)
+    assert result == {"ok": True}
