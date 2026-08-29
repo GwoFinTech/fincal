@@ -178,7 +178,7 @@ def api_earning_decision(earning_id: int, user=Depends(get_current_user)):
 
 
 @router.get("/popular", response_model=PopularStocks)
-def api_popular():
+def api_popular(user=Depends(get_current_user)):
     """Get the list of popular stocks shown by default. Cached (Issue #7)."""
     from ..earnings import POPULAR_STOCKS_US, POPULAR_STOCKS_HK
 
@@ -190,7 +190,7 @@ def api_popular():
 
 
 @router.get("/search", response_model=list[SearchItem])
-def api_search_stocks(q: str):
+def api_search_stocks(q: str, user=Depends(get_current_user)):
     """Search for stocks to add to watchlist."""
     with db.db_cursor() as cur:
         cur.execute(
@@ -221,12 +221,13 @@ def api_search_stocks(q: str):
 
 
 @router.get("/export")
-def api_export(start: date, end: date, format: str = "csv"):
+def api_export(start: date, end: date, format: str = "csv", user=Depends(get_current_user)):
     """Export earnings data as CSV or JSON."""
     from ..earnings import fetch_earnings_from_db, POPULAR_STOCKS_US, POPULAR_STOCKS_HK
     from fastapi.responses import StreamingResponse
     import csv, io, json as json_mod
 
+    ensure_user(user["id"], user["email"], user["name"])
     symbols = POPULAR_STOCKS_US + POPULAR_STOCKS_HK
     markets = ["US", "HK"]
     data = fetch_earnings_from_db(symbols=symbols, markets=markets, start=start, end=end)
