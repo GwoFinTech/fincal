@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.db import db_cursor
 from app.symbol import from_lb_counter_id, normalize
+from app.sync_audit import check_cancelled
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -194,8 +195,12 @@ def flush_batch(cur, rows: list[tuple]):
         WHERE e.eps_estimate IS NOT NULL OR e.revenue_estimate IS NOT NULL""", keys)
 
 
-def sync_earnings():
-    """Full sync with wide date range, batched inserts."""
+def sync_earnings(run_id: int) -> int:
+    """Full sync with wide date range, batched inserts.
+
+    ``run_id`` is polled at each market/batch checkpoint so an admin cancel
+    stops the job promptly instead of burning the full API budget (Issue #28).
+    """
     today = date.today()
     start = (today - timedelta(days=180)).isoformat()
     end = (today + timedelta(days=365)).isoformat()
@@ -203,12 +208,14 @@ def sync_earnings():
     total = 0
 
     for market in ["US", "HK"]:
+        check_cancelled(run_id)
         logger.info(f"=== Fetching {market} earnings [{start} → {end}] ===")
         pages = fetch_calendar(market, start, end)
         logger.info(f"  Total pages received: {len(pages)}")
 
         batch = []
         for page in pages:
+            check_cancelled(run_id)
             for info in page.get("infos", []):
                 symbol, mkt = from_lb_counter_id(info.get("counter_id", ""))
                 if not symbol:
@@ -269,6 +276,7 @@ def sync_earnings():
                         flush_batch(cur, batch)
                     logger.info(f"  Flushed {len(batch)} records (total: {total})")
                     batch = []
+                    check_cancelled(run_id)
 
         # Flush remaining
         if batch:
@@ -282,7 +290,10 @@ def sync_earnings():
 
 if __name__ == "__main__":
     from app.db import init_db
-    from app.sync_audit import start_run, finish_run, heartbeat, advisory_lock, advisory_unlock, LOCK_LONGBRIDGE_EARNINGS
+    from app.sync_audit import (
+        start_run, finish_run, heartbeat, advisory_lock, advisory_unlock,
+        SyncCancelledError, LOCK_LONGBRIDGE_EARNINGS,
+    )
     from app.sync_quality import SyncQuality
     init_db()
     if not advisory_lock(LOCK_LONGBRIDGE_EARNINGS):
@@ -296,10 +307,15 @@ if __name__ == "__main__":
             logger.info("longbridge earnings sync already running, skipping")
             sys.exit(0)
         try:
-            total = sync_earnings()
+            total = sync_earnings(run_id)
             quality = SyncQuality(fetched=total, written=total)
             finish_run(run_id, status="success", record_count=total,
                        details=quality.to_dict())
+        except SyncCancelledError:
+            # Admin cancelled this run; keep the terminal 'cancelled' state.
+            finish_run(run_id, status="cancelled", error_code="cancelled_by_admin")
+            logger.warning("longbridge earnings sync cancelled by admin; stopping")
+            sys.exit(1)
         except Exception as exc:
             quality = SyncQuality(fetched=0, written=0, failed=1)
             finish_run(run_id, status="failed", error_code="longbridge_sync_failed",

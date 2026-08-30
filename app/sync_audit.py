@@ -16,6 +16,15 @@ logger = logging.getLogger(__name__)
 _DEFAULT_TIMEOUT_SECONDS = 3600  # 1 hour
 
 
+class SyncCancelledError(Exception):
+    """Raised by sync scripts when the run was cancelled by an admin.
+
+    Lets long-running scripts stop at the next checkpoint instead of burning
+    external API quota and then overwriting the terminal 'cancelled' state
+    (Issue #28).
+    """
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -88,16 +97,48 @@ def finish_run(
     record_count: int = 0,
     details: dict | None = None,
     error_code: str | None = None,
-) -> None:
+) -> bool:
+    """Transition a running sync run to a terminal state.
+
+    Only succeeds while the run is still ``'running'`` — a run that was
+    cancelled (or otherwise already transitioned) by an admin is never
+    overwritten back to ``success``/``failed`` (Issue #28).
+
+    Returns ``True`` if the row transitioned, ``False`` if the run was already
+    in a terminal state and was left untouched.
+    """
     with db.db_cursor() as cur:
         cur.execute(
             """UPDATE sync_runs
                SET status=%s, record_count=%s, details=%s, error_code=%s,
                    finished_at=%s, heartbeat_at=%s
-               WHERE id=%s""",
+               WHERE id=%s AND status='running'""",
             (status, record_count, db.psycopg2.extras.Json(details or {}),
              error_code, _utcnow(), _utcnow(), run_id),
         )
+        return cur.rowcount > 0
+
+
+# ── Cancellation awareness (Issue #28) ──────────────────────────────
+
+def is_cancelled(run_id: int) -> bool:
+    """Return ``True`` when the run is no longer in a 'running' state.
+
+    Sync scripts poll this at checkpoints so an admin ``cancel`` takes effect at
+    the next checkpoint instead of after the whole job has run.
+    """
+    with db.db_cursor() as cur:
+        cur.execute("SELECT status FROM sync_runs WHERE id=%s", (run_id,))
+        row = cur.fetchone()
+        if row is None:
+            return True
+        return row["status"] != "running"
+
+
+def check_cancelled(run_id: int) -> None:
+    """Raise :class:`SyncCancelledError` if the run is no longer running."""
+    if is_cancelled(run_id):
+        raise SyncCancelledError(f"sync run {run_id} cancelled")
 
 
 # ── Heartbeat ──────────────────────────────────────────────────────

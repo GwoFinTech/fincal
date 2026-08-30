@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.db import db_cursor
 from app import config
 from app.symbol import normalize, to_futu_code
+from app.sync_audit import check_cancelled
 from app.watchlist import get_source
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -76,7 +77,7 @@ def futu_audit_outcome(date_failures: int, actual_failures: int) -> tuple[str, s
     return "success", None
 
 
-def sync_earnings_dates(ctx) -> tuple[int, int]:
+def sync_earnings_dates(ctx, run_id: int) -> tuple[int, int]:
     """Fetch earnings calendar dates from Futu, single shared context."""
     batch = []
     total = 0
@@ -85,6 +86,7 @@ def sync_earnings_dates(ctx) -> tuple[int, int]:
     symbols = get_source().get_futu_symbols()
 
     for source_symbol in symbols:
+        check_cancelled(run_id)
         symbol, market = canonical_earnings_symbol(source_symbol)
         futu_code = to_futu_code(source_symbol)
         try:
@@ -145,13 +147,14 @@ def sync_earnings_dates(ctx) -> tuple[int, int]:
     return total, failed_symbols
 
 
-def sync_actuals(ctx) -> tuple[int, int]:
+def sync_actuals(ctx, run_id: int) -> tuple[int, int]:
     """Fetch actual EPS (fid=14020) and revenue (fid=8002) via shared context."""
     total = 0
     failed_symbols = 0
     symbols = get_source().get_futu_symbols()
 
     for source_symbol in symbols:
+        check_cancelled(run_id)
         symbol, market = canonical_earnings_symbol(source_symbol)
         futu_code = to_futu_code(source_symbol)
         try:
@@ -238,7 +241,10 @@ def sync_actuals(ctx) -> tuple[int, int]:
 
 if __name__ == "__main__":
     from app.db import init_db
-    from app.sync_audit import start_run, finish_run, heartbeat, advisory_lock, advisory_unlock, LOCK_FUTU_EARNINGS
+    from app.sync_audit import (
+        start_run, finish_run, heartbeat, advisory_lock, advisory_unlock,
+        SyncCancelledError, LOCK_FUTU_EARNINGS,
+    )
     init_db()
 
     if not advisory_lock(LOCK_FUTU_EARNINGS):
@@ -262,9 +268,14 @@ if __name__ == "__main__":
             sys.exit(0)
         try:
             heartbeat(run_id, phase="dates", current=0, total=len(symbols))
-            date_count, date_failures = sync_earnings_dates(ctx)
+            date_count, date_failures = sync_earnings_dates(ctx, run_id)
             heartbeat(run_id, phase="actuals", current=0, total=len(symbols))
-            actual_count, actual_failures = sync_actuals(ctx)
+            actual_count, actual_failures = sync_actuals(ctx, run_id)
+        except SyncCancelledError:
+            # Admin cancelled this run; keep the terminal 'cancelled' state.
+            finish_run(run_id, status="cancelled", error_code="cancelled_by_admin")
+            logger.warning("futu sync cancelled by admin; stopping")
+            sys.exit(1)
         except Exception:
             finish_run(run_id, status="failed", error_code="futu_sync_failed")
             raise
