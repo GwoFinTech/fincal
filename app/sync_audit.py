@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import psycopg2
 from datetime import datetime, timedelta, timezone
 
 from . import db
@@ -54,40 +55,50 @@ def start_run(
     existing running entry exists for the same key.
     """
     now = _utcnow()
-    with db.db_cursor() as cur:
-        if idempotency_key:
-            cur.execute(
-                "SELECT id, status FROM sync_runs WHERE idempotency_key=%s AND status='running'",
-                (idempotency_key,),
-            )
-            existing = cur.fetchone()
-            if existing:
-                logger.warning(
-                    "idempotent skip: key=%s existing_run=%s status=%s",
-                    idempotency_key, existing["id"], existing["status"],
+    try:
+        with db.db_cursor() as cur:
+            if idempotency_key:
+                cur.execute(
+                    "SELECT id, status FROM sync_runs WHERE idempotency_key=%s AND status='running'",
+                    (idempotency_key,),
                 )
-                return None
-            # Count previous attempts
-            cur.execute(
-                "SELECT COALESCE(MAX(attempt), 0) + 1 AS next FROM sync_runs WHERE idempotency_key=%s",
-                (idempotency_key,),
-            )
-            attempt = cur.fetchone()["next"]
-        else:
-            attempt = 1
+                existing = cur.fetchone()
+                if existing:
+                    logger.warning(
+                        "idempotent skip: key=%s existing_run=%s status=%s",
+                        idempotency_key, existing["id"], existing["status"],
+                    )
+                    return None
+                # Count previous attempts
+                cur.execute(
+                    "SELECT COALESCE(MAX(attempt), 0) + 1 AS next FROM sync_runs WHERE idempotency_key=%s",
+                    (idempotency_key,),
+                )
+                attempt = cur.fetchone()["next"]
+            else:
+                attempt = 1
 
-        cur.execute(
-            """INSERT INTO sync_runs
-               (stage, status, source, symbol_count, heartbeat_at, attempt,
-                idempotency_key, timeout_seconds)
-               VALUES (%s, 'running', %s, %s, %s, %s, %s, %s)
-               RETURNING id""",
-            (stage, source, symbol_count, now, attempt, idempotency_key, timeout_seconds),
-        )
-        run_id = cur.fetchone()["id"]
-        logger.info("sync run started: id=%d stage=%s attempt=%d key=%s",
-                     run_id, stage, attempt, idempotency_key)
-        return run_id
+            cur.execute(
+                """INSERT INTO sync_runs
+                   (stage, status, source, symbol_count, heartbeat_at, attempt,
+                    idempotency_key, timeout_seconds)
+                   VALUES (%s, 'running', %s, %s, %s, %s, %s, %s)
+                   RETURNING id""",
+                (stage, source, symbol_count, now, attempt, idempotency_key, timeout_seconds),
+            )
+            run_id = cur.fetchone()["id"]
+            logger.info("sync run started: id=%d stage=%s attempt=%d key=%s",
+                         run_id, stage, attempt, idempotency_key)
+            return run_id
+    except psycopg2.errors.UniqueViolation:
+        # A concurrent attempt for the same key inserted a *running* row
+        # between our running-check and our INSERT. The partial unique index
+        # (status='running', Issue #38) rejects the duplicate. Treat it as
+        # "already running" and skip rather than surfacing a bare 500. Terminal
+        # rows for the same key no longer conflict, so scheduled re-runs (the
+        # original #38 failure) create a fresh attempt instead of crashing.
+        logger.warning("idempotent skip (concurrent running): key=%s", idempotency_key)
+        return None
 
 
 def finish_run(

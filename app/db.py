@@ -200,8 +200,17 @@ def init_db():
         # Update CHECK constraint for new statuses
         cur.execute("ALTER TABLE sync_runs DROP CONSTRAINT IF EXISTS sync_runs_status_check")
         cur.execute("ALTER TABLE sync_runs ADD CONSTRAINT sync_runs_status_check CHECK (status IN ('running', 'success', 'failed', 'skipped', 'interrupted', 'cancelled'))")
-        # Unique index for idempotency key
-        cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_runs_idempotency_key ON sync_runs(idempotency_key) WHERE idempotency_key IS NOT NULL")
+        # Idempotency key uniqueness is enforced only among *running* rows.
+        # A scheduled sync that already reached a terminal state must be able to
+        # start a fresh attempt (new row) with the same fixed key on the next
+        # cron run, while still preventing two concurrent running attempts
+        # (Issue #38). The old all-time-unique index (previously created here)
+        # is dropped first so existing installations converge on this definition.
+        cur.execute("DROP INDEX IF EXISTS idx_sync_runs_idempotency_key")
+        cur.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_runs_idempotency_key "
+            "ON sync_runs(idempotency_key) WHERE idempotency_key IS NOT NULL AND status='running'"
+        )
 
         # Audit log for admin operations (Issue #11)
         cur.execute("""
