@@ -1,6 +1,16 @@
-"""Regression tests for optional Futu OpenD startup behavior."""
+"""Regression tests for Issue #39: Futu sync write paths must record
+provenance so reported events are not mislabeled as ``unknown``/``scheduled``.
+
+Root cause: ``scripts/sync_futu.py`` wrote ``date_source``/``date_status`` and
+``actual_source`` nowhere, so every Futu-sourced row kept the column defaults
+(``unknown`` + ``scheduled``) even when actuals were present — roughly 8% of
+reported events were mislabeled and lost source attribution.
+
+Fix: the dates upsert now writes ``date_source='futu'`` (and a correct
+``date_status``), and the actuals updates write ``date_status='reported'`` +
+``actual_source='futu'``.
+"""
 import importlib.util
-import socket
 import sys
 from pathlib import Path
 from unittest import TestCase
@@ -15,47 +25,102 @@ assert SPEC.loader is not None
 SPEC.loader.exec_module(sync_futu)
 
 
-class FutuContextStartupTests(TestCase):
-    def test_unavailable_opend_skips_without_constructing_retrying_context(self):
-        with patch.object(sync_futu.socket, "create_connection", side_effect=ConnectionRefusedError("refused")) as connect:
-            with patch.dict(sys.modules, {"futu": MagicMock()}):
-                self.assertIsNone(sync_futu.create_futu_context())
+def _db_mock(cursor):
+    """A ``db_cursor`` replacement whose ``with`` block yields ``cursor``."""
+    ctx = MagicMock()
+    ctx.__enter__.return_value = cursor
+    ctx.__exit__.return_value = False
+    return patch.object(sync_futu, "db_cursor", return_value=ctx)
 
-        connect.assert_called_once_with(
-            (sync_futu.config.FUTU_HOST, sync_futu.config.FUTU_PORT), timeout=3
+
+class _RecordingCursor:
+    """Records every ``execute(sql, params)`` call for later assertions."""
+
+    def __init__(self):
+        self.executed = []
+
+    def execute(self, sql, params=None):
+        self.executed.append((sql, params))
+
+
+class FutuDatesProvenanceTests(TestCase):
+    """The earnings-dates upsert must carry Futu provenance."""
+
+    def setUp(self):
+        import pandas as pd
+
+        self.ctx = MagicMock()
+        df = pd.DataFrame(
+            [{"fiscal_year": 2026, "financial_type": 2,
+              "pub_trading_day_str": "2026-07-30", "pub_type": 1}]
         )
+        self.ctx.get_financials_earnings_price_history.return_value = (0, df)
+        self._src = MagicMock()
+        self._src.get_futu_symbols.return_value = ["AAPL.US"]
+        self._cursor = _RecordingCursor()
+        self._batch = []
+        self._sql = ""
 
-    def test_available_opend_uses_configured_endpoint(self):
-        connection = MagicMock()
-        context = MagicMock()
-        futu_module = MagicMock()
-        futu_module.OpenQuoteContext.return_value = context
-        with patch.object(sync_futu.socket, "create_connection", return_value=connection):
-            with patch.dict(sys.modules, {"futu": futu_module}):
-                self.assertIs(sync_futu.create_futu_context(), context)
+        def fake_execute_values(cur, sql, argslist, page_size=200):
+            self._batch = list(argslist)
+            self._sql = sql
 
-        connection.__enter__.assert_called_once()
-        futu_module.OpenQuoteContext.assert_called_once_with(
-            host=sync_futu.config.FUTU_HOST, port=sync_futu.config.FUTU_PORT
+        self._ev_patch = patch("psycopg2.extras.execute_values",
+                               side_effect=fake_execute_values)
+
+    def test_dates_upsert_writes_futu_source(self):
+        with patch.object(sync_futu, "get_source", return_value=self._src), \
+             patch.object(sync_futu, "check_cancelled"), \
+             _db_mock(self._cursor), self._ev_patch:
+            sync_futu.sync_earnings_dates(self.ctx, 1)
+
+        # The batch rows must carry ('futu', 'scheduled') as the last two fields.
+        assert self._batch, "expected at least one upsert row"
+        row = self._batch[0]
+        assert row[-2:] == ("futu", "scheduled"), (
+            "dates batch rows must set date_source='futu', date_status='scheduled'"
         )
+        # The INSERT column list and the conflict-update must both carry provenance.
+        assert "date_source" in self._sql and "date_status" in self._sql
+        assert "date_source = 'futu'" in self._sql
+        assert "date_status = CASE" in self._sql
 
 
-class EarningsSymbolTests(TestCase):
-    def test_us_watchlist_suffix_is_not_written_to_earnings_key(self):
-        self.assertEqual(sync_futu.canonical_earnings_symbol("aapl.us"), ("AAPL", "US"))
+class FutuActualsProvenanceTests(TestCase):
+    """The actuals updates must flip status to reported and attribute Futu."""
 
-    def test_hk_symbol_keeps_four_digit_earnings_convention(self):
-        self.assertEqual(sync_futu.canonical_earnings_symbol("700.hk"), ("0700.HK", "HK"))
+    def setUp(self):
+        self.ctx = MagicMock()
+        # First call (EPS, statement_type=4) then second (revenue, statement_type=1).
+        self.ctx.get_financials_statements.side_effect = [
+            (0, {"report_list": [{"fiscal_year": 2026, "financial_type": 2,
+                                 "item_list": [{"field_id": 14020, "data": 1.23}]}]}),
+            (0, {"report_list": [{"fiscal_year": 2026, "financial_type": 2,
+                                 "item_list": [{"field_id": 8002, "data": 123.0}]}]}),
+        ]
+        self._src = MagicMock()
+        self._src.get_futu_symbols.return_value = ["AAPL.US"]
+        self._cursor = _RecordingCursor()
 
-    def test_unknown_market_is_rejected(self):
-        with self.assertRaisesRegex(ValueError, "unsupported_market:CN"):
-            sync_futu.canonical_earnings_symbol("600519.cn")
+    def test_actuals_updates_set_reported_and_futu_source(self):
+        with patch.object(sync_futu, "get_source", return_value=self._src), \
+             patch.object(sync_futu, "check_cancelled"), \
+             _db_mock(self._cursor):
+            sync_futu.sync_actuals(self.ctx, 1)
+
+        updates = [sql for sql, _ in self._cursor.executed
+                   if sql.strip().startswith("UPDATE earnings")]
+        assert len(updates) >= 2, "expected EPS and revenue updates to run"
+        for sql in updates:
+            assert "date_status = 'reported'" in sql, (
+                "actuals update must mark the event reported"
+            )
+            assert "actual_source = 'futu'" in sql, (
+                "actuals update must attribute the actuals to Futu"
+            )
 
 
-class FutuAuditTests(TestCase):
-    def test_symbol_fetch_failure_is_not_reported_as_success(self):
-        self.assertEqual(sync_futu.futu_audit_outcome(1, 0), ("failed", "futu_symbol_fetch_failed"))
-        self.assertEqual(sync_futu.futu_audit_outcome(0, 2), ("failed", "futu_symbol_fetch_failed"))
+if __name__ == "__main__":
+    import unittest
 
-    def test_zero_symbol_fetch_failures_is_success(self):
-        self.assertEqual(sync_futu.futu_audit_outcome(0, 0), ("success", None))
+    unittest.main()

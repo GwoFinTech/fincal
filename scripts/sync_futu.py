@@ -112,7 +112,9 @@ def sync_earnings_dates(ctx, run_id: int) -> tuple[int, int]:
                 if report_date < cutoff:
                     continue
                 pub_type = PUB_TYPE_MAP.get(int(row.get("pub_type", 0)))
-                batch.append((symbol, market, "", pub_date_str, "Q", fy, fq, pub_type))
+                # Futu confirms the date; no actuals fetched here yet, so status
+                # stays 'scheduled' until sync_actuals() marks it reported.
+                batch.append((symbol, market, "", pub_date_str, "Q", fy, fq, pub_type, "futu", "scheduled"))
                 total += 1
         except Exception as e:
             signal.alarm(0)
@@ -127,7 +129,7 @@ def sync_earnings_dates(ctx, run_id: int) -> tuple[int, int]:
             execute_values(
                 cur,
                 """INSERT INTO earnings (symbol, market, company_name, report_date, report_type,
-                   fiscal_year, fiscal_quarter, before_after)
+                   fiscal_year, fiscal_quarter, before_after, date_source, date_status)
                 VALUES %s
                 ON CONFLICT (symbol, market, report_date, report_type)
                 DO UPDATE SET
@@ -136,6 +138,8 @@ def sync_earnings_dates(ctx, run_id: int) -> tuple[int, int]:
                     before_after = COALESCE(EXCLUDED.before_after, earnings.before_after),
                     is_predicted = FALSE,
                     company_name = CASE WHEN earnings.company_name = '' THEN EXCLUDED.company_name ELSE earnings.company_name END,
+                    date_source = 'futu',
+                    date_status = CASE WHEN earnings.eps_actual IS NOT NULL OR earnings.revenue_actual IS NOT NULL THEN 'reported' ELSE 'scheduled' END,
                     updated_at = NOW()
                 """,
                 batch,
@@ -186,7 +190,8 @@ def sync_actuals(ctx, run_id: int) -> tuple[int, int]:
                     if eps_val is not None:
                         with db_cursor() as cur:
                             cur.execute(
-                                """UPDATE earnings SET eps_actual = %s, updated_at = NOW()
+                                """UPDATE earnings SET eps_actual = %s, date_status = 'reported',
+                                   actual_source = 'futu', updated_at = NOW()
                                 WHERE symbol = %s AND market = %s AND fiscal_year = %s
                                 AND fiscal_quarter = %s AND (eps_actual IS NULL OR ABS(eps_actual) > 1000)
                                 """,
@@ -220,7 +225,8 @@ def sync_actuals(ctx, run_id: int) -> tuple[int, int]:
                     if rev_val is not None:
                         with db_cursor() as cur:
                             cur.execute(
-                                """UPDATE earnings SET revenue_actual = %s, updated_at = NOW()
+                                """UPDATE earnings SET revenue_actual = %s, date_status = 'reported',
+                                   actual_source = 'futu', updated_at = NOW()
                                 WHERE symbol = %s AND market = %s AND fiscal_year = %s
                                 AND fiscal_quarter = %s AND revenue_actual IS NULL
                                 """,
