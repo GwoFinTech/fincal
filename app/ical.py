@@ -85,6 +85,65 @@ def _event_sequence(event: dict, summary: str, desc: str, report_date: date) -> 
     return int.from_bytes(__import__("hashlib").sha256(payload.encode()).digest()[:4], "big") & 0x7FFFFFFF
 
 
+def _event_uid(event: dict, report_date: date) -> str:
+    """Persistent VEVENT identity for an earnings record (RFC 5545).
+
+    RFC 5545 treats the UID as the identity of a calendar component: when the
+    same logical event is revised — a predicted date confirmed, or a date
+    rescheduled — it must keep the same UID so clients update the event in place
+    rather than delete + recreate it.  Deriving the UID from ``report_date``
+    (the previous behaviour) broke that for exactly this revision path.  The
+    persistent identity is therefore the fiscal key
+    (``symbol + market + fiscal_year + fiscal_quarter``); when those are missing
+    we fall back to the report date (Issue #40).
+    """
+    symbol = event.get("symbol", "?")
+    market = event.get("market", "US")
+    fy = event.get("fiscal_year")
+    fq = event.get("fiscal_quarter")
+    if fy not in (None, "") and fq not in (None, ""):
+        return f"fincal-{symbol}-{market}-FY{fy}-Q{fq}@{config.APP_NAME}"
+    return f"fincal-{symbol}-{market}-{report_date.strftime('%Y%m%d')}@{config.APP_NAME}"
+
+
+def _authority_key(event: dict, report_date: date) -> tuple:
+    """Rank the row that should represent a UID group.
+
+    One fiscal period can appear as both a predicted and a confirmed row in the
+    same batch (defensive — ``mark_confirmed`` normally removes the predicted
+    row upstream).  The authoritative row is the confirmed (non-predicted) one;
+    ties break on the most recently updated, then the latest report date.
+    """
+    predicted = 1 if event.get("is_predicted") else 0
+    ts = event.get("updated_at") or event.get("created_at")
+    ts_key = -ts.timestamp() if isinstance(ts, datetime) else 0
+    return (predicted, ts_key, -report_date.toordinal())
+
+
+def _dedupe_events(earnings: list[dict]) -> tuple[list[str], dict]:
+    """Collapse rows that map to the same UID so one fiscal period emits one VEVENT.
+
+    Returns ``(uid_order, chosen)`` where ``uid_order`` preserves first-seen
+    order and ``chosen`` maps each UID to its authoritative ``(event, date)``.
+    Rows without a usable report date are dropped (mirrors the generator).
+    """
+    uid_order: list[str] = []
+    chosen: dict[str, tuple[dict, date]] = {}
+    for e in earnings:
+        report_date = e.get("report_date")
+        if isinstance(report_date, datetime):
+            report_date = report_date.date()
+        if not report_date:
+            continue
+        uid = _event_uid(e, report_date)
+        if uid not in chosen:
+            chosen[uid] = (e, report_date)
+            uid_order.append(uid)
+        elif _authority_key(e, report_date) < _authority_key(*chosen[uid]):
+            chosen[uid] = (e, report_date)
+    return uid_order, chosen
+
+
 def generate_ical(earnings: list[dict], user_email: str = "", title_lang: str = "en") -> str:
     """Generate iCal content from earnings records."""
     lines = [
@@ -99,12 +158,9 @@ def generate_ical(earnings: list[dict], user_email: str = "", title_lang: str = 
         "REFRESH-INTERVAL;VALUE=DURATION:PT12H",
     ]
 
-    for e in earnings:
-        report_date = e.get("report_date")
-        if isinstance(report_date, datetime):
-            report_date = report_date.date()
-        if not report_date:
-            continue
+    uid_order, chosen = _dedupe_events(earnings)
+    for uid in uid_order:
+        e, report_date = chosen[uid]
 
         symbol = e.get("symbol", "?")
         market = e.get("market", "US")
@@ -163,7 +219,9 @@ def generate_ical(earnings: list[dict], user_email: str = "", title_lang: str = 
         desc = "\n".join(p for p in desc_parts if p)
 
         dt_str = report_date.strftime("%Y%m%d")
-        uid = f"fincal-{symbol}-{market}-{dt_str}@{config.APP_NAME}"
+        # UID is the persistent fiscal identity computed during dedup, so a
+        # predicted -> confirmed (or rescheduled) revision keeps the same UID
+        # and clients update the event in place (Issue #40).
         stamp = _stable_event_stamp(e, report_date)
         sequence = _event_sequence(e, summary, desc, report_date)
 

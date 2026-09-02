@@ -208,6 +208,95 @@ def test_uid_stable_across_regenerations():
     assert "fincal-" in uid1
 
 
+# ── Scenario 8b: UID identity drives in-place modify semantics (Issue #40) ──
+
+def test_uid_stable_when_report_date_revised():
+    """Same fiscal period predicted->confirmed revision keeps the same UID.
+
+    The UID identifies the logical event, so a corrected report date is an
+    in-place update (DTSTART / DTSTAMP / SEQUENCE change) rather than a
+    delete-then-recreate.  Deriving the UID from report_date broke this.
+    """
+    def _make(report_date: date, is_predicted: bool):
+        return [{
+            "symbol": "AAPL", "market": "US", "company_name": "Apple",
+            "report_date": report_date, "fiscal_year": 2026, "fiscal_quarter": 3,
+            "before_after": "before", "is_predicted": is_predicted,
+        }]
+    predicted = generate_ical(_make(date(2026, 8, 3), True))
+    confirmed = generate_ical(_make(date(2026, 8, 5), False))
+    ev_p = _events(_parse(predicted))[0]
+    ev_c = _events(_parse(confirmed))[0]
+    assert str(ev_p["UID"]) == str(ev_c["UID"])
+    assert str(ev_p["UID"]) == "fincal-AAPL-US-FY2026-Q3@fincal"
+    # Only the revision-sensitive fields change; the identity does not.
+    assert ev_p["DTSTART"].dt != ev_c["DTSTART"].dt
+    assert int(ev_p["SEQUENCE"]) != int(ev_c["SEQUENCE"])
+    assert str(ev_p["STATUS"]) == "TENTATIVE"
+    assert str(ev_c["STATUS"]) == "CONFIRMED"
+
+
+def test_uid_differs_across_fiscal_quarters():
+    """Different fiscal periods must produce different UIDs."""
+    rows = [
+        {"symbol": "AAPL", "market": "US", "report_date": date(2026, 8, 3),
+         "fiscal_year": 2026, "fiscal_quarter": 3, "before_after": "before"},
+        {"symbol": "AAPL", "market": "US", "report_date": date(2026, 11, 5),
+         "fiscal_year": 2026, "fiscal_quarter": 4, "before_after": "before"},
+    ]
+    uids = [str(ev["UID"]) for ev in _events(_parse(generate_ical(rows)))]
+    assert uids[0] != uids[1]
+    assert uids[0] == "fincal-AAPL-US-FY2026-Q3@fincal"
+    assert uids[1] == "fincal-AAPL-US-FY2026-Q4@fincal"
+
+
+def test_uid_unique_across_mixed_fiscal_and_fallback_rows():
+    """Mixed rows (with and without a fiscal key) must stay globally unique."""
+    rows = [
+        {"symbol": "AAPL", "market": "US", "report_date": date(2026, 8, 3),
+         "fiscal_year": 2026, "fiscal_quarter": 3, "before_after": "before"},
+        {"symbol": "AAPL", "market": "US", "report_date": date(2026, 11, 5),
+         "fiscal_year": 2026, "fiscal_quarter": 4, "before_after": "before"},
+        {"symbol": "MSFT", "market": "US", "report_date": date(2026, 8, 3),
+         "before_after": "before"},
+    ]
+    uids = [str(ev["UID"]) for ev in _events(_parse(generate_ical(rows)))]
+    assert len(uids) == len(set(uids)) == 3
+    # Fallback row carries the report date instead of a fiscal key.
+    assert any("FY" not in u and "20260803" in u for u in uids)
+
+
+def test_uid_falls_back_to_report_date_when_no_fiscal_key():
+    """Rows without fiscal_year/quarter fall back to report_date, still unique."""
+    event = {"symbol": "MSFT", "market": "US", "report_date": date(2026, 8, 3),
+             "before_after": "before"}
+    uid = str(_events(_parse(generate_ical([event])))[0]["UID"])
+    assert uid == "fincal-MSFT-US-20260803@fincal"
+
+
+def test_same_fiscal_period_deduped_prefer_confirmed():
+    """A predicted + confirmed pair for one fiscal period emits one VEVENT.
+
+    Defensive dedup on the persistent UID: the confirmed (non-predicted) row is
+    authoritative, so the client never sees the predicted and confirmed events
+    as two separate calendar entries.
+    """
+    rows = [
+        {"symbol": "AAPL", "market": "US", "company_name": "Apple",
+         "report_date": date(2026, 8, 3), "fiscal_year": 2026, "fiscal_quarter": 3,
+         "before_after": "before", "is_predicted": True},
+        {"symbol": "AAPL", "market": "US", "company_name": "Apple",
+         "report_date": date(2026, 8, 5), "fiscal_year": 2026, "fiscal_quarter": 3,
+         "before_after": "before", "is_predicted": False},
+    ]
+    evts = _events(_parse(generate_ical(rows)))
+    assert len(evts) == 1
+    ev = evts[0]
+    assert str(ev["UID"]) == "fincal-AAPL-US-FY2026-Q3@fincal"
+    assert str(ev["STATUS"]) == "CONFIRMED"
+    assert ev["DTSTART"].dt.date() == date(2026, 8, 5)
+
+
 # ── Scenario 9: Multiple events in single calendar ────────────────────────
 
 def test_multiple_events_parse_correctly():
