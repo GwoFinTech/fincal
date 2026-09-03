@@ -291,18 +291,18 @@ def sync_earnings(run_id: int) -> int:
 if __name__ == "__main__":
     from app.db import init_db
     from app.sync_audit import (
-        start_run, finish_run, heartbeat, advisory_lock, advisory_unlock,
+        start_run, finish_run, heartbeat, advisory_lock,
         SyncCancelledError, LOCK_LONGBRIDGE_EARNINGS,
     )
     from app.sync_quality import SyncQuality
     init_db()
-    if not advisory_lock(LOCK_LONGBRIDGE_EARNINGS):
-        logger.info("longbridge earnings sync locked by another process, skipping")
-        sys.exit(0)
-    try:
+    with advisory_lock(LOCK_LONGBRIDGE_EARNINGS) as acquired:
+        if not acquired:
+            logger.info("longbridge earnings sync locked by another process, skipping")
+            sys.exit(0)
         run_id = start_run("longbridge", "longbridge",
-                            idempotency_key="longbridge:earnings:full",
-                            symbol_count=0)
+                           idempotency_key="longbridge:earnings:full",
+                           symbol_count=0)
         if run_id is None:
             logger.info("longbridge earnings sync already running, skipping")
             sys.exit(0)
@@ -321,5 +321,3 @@ if __name__ == "__main__":
             finish_run(run_id, status="failed", error_code="longbridge_sync_failed",
                        details=quality.to_dict())
             raise
-    finally:
-        advisory_unlock(LOCK_LONGBRIDGE_EARNINGS)

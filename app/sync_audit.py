@@ -8,7 +8,10 @@ from __future__ import annotations
 import hashlib
 import logging
 import psycopg2
+import psycopg2.extras
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from typing import Iterator
 
 from . import db
 
@@ -248,33 +251,44 @@ def reap_timeout_runs(timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS) -> int:
         return count
 
 
-# ── Advisory lock (Issue #8) ────────────────────────────────────────
+# ── Advisory lock (Issue #8 / #31) ─────────────────────────────────
 
-def advisory_lock(lock_key: int, *, timeout: float = 0) -> bool:
-    """Acquire a PostgreSQL advisory lock. Returns True if acquired.
+@contextmanager
+def advisory_lock(lock_key: int, *, timeout: float = 0) -> Iterator[bool]:
+    """Acquire a PostgreSQL advisory lock, held for the whole context.
 
-    Use timeout=0 for immediate (non-blocking). Use timeout>0 for bounded wait.
+    The lock is acquired and released on the *same* dedicated (non-pooled)
+    connection. PostgreSQL advisory locks are session-scoped, so a release must
+    run on the session that acquired it. The old pool-based helper used
+    ``db_cursor`` for both halves, which could return a different connection for
+    each call — ``pg_advisory_unlock`` then landed on a session that never held
+    the lock and silently failed, leaking the lock (Issue #31).
+
+    ``timeout=0`` is non-blocking (``pg_try_advisory_lock``). ``timeout>0``
+    waits up to ``timeout`` seconds (``SET lock_timeout`` + ``pg_advisory_lock``).
+
+    Yields ``True`` when the lock was acquired, ``False`` otherwise. The lock is
+    released automatically when the context exits, including on abnormal exit.
     """
-    with db.db_cursor() as cur:
-        if timeout > 0:
-            cur.execute("SET lock_timeout = %s", (int(timeout * 1000),))
-            try:
-                cur.execute("SELECT pg_advisory_lock(%s)", (lock_key,))
-                return True
-            except Exception:
-                return False
-            finally:
-                cur.execute("RESET lock_timeout")
-        else:
-            cur.execute("SELECT pg_try_advisory_lock(%s)", (lock_key,))
-            row = cur.fetchone()
-            return bool(row and row.get("pg_try_advisory_lock"))
-
-
-def advisory_unlock(lock_key: int) -> None:
-    """Release a PostgreSQL advisory lock."""
-    with db.db_cursor() as cur:
-        cur.execute("SELECT pg_advisory_unlock(%s)", (lock_key,))
+    with db.db_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            if timeout > 0:
+                cur.execute("SET lock_timeout = %s", (int(timeout * 1000),))
+                try:
+                    cur.execute("SELECT pg_advisory_lock(%s)", (lock_key,))
+                    acquired = True
+                except Exception:
+                    acquired = False
+            else:
+                cur.execute("SELECT pg_try_advisory_lock(%s)", (lock_key,))
+                row = cur.fetchone()
+                acquired = bool(row and row.get("pg_try_advisory_lock"))
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute("SELECT pg_advisory_unlock(%s)", (lock_key,))
 
 
 # Lock keys for different sync stages (must be stable, unique per resource)

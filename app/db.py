@@ -40,6 +40,30 @@ def db_cursor():
         pool.putconn(conn)
 
 
+@contextmanager
+def db_connection():
+    """Yield a dedicated (non-pooled) connection, closed on exit.
+
+    Needed for session-scoped state that must live on a single connection for
+    its whole lifetime — e.g. PostgreSQL advisory locks (Issue #31). A pooled
+    cursor (``db_cursor``) may hand out a *different* connection for a later
+    call, so a lock taken on one session and released via another would never
+    actually free. Holding one fresh connection for the full duration avoids
+    that class of bug entirely.
+    """
+    conn = psycopg2.connect(
+        host=config.DB_HOST,
+        port=config.DB_PORT,
+        database=config.DB_NAME,
+        user=config.DB_USER,
+        password=config.DB_PASSWORD,
+    )
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
 def init_db():
     """Create tables if not exist."""
     with db_cursor() as cur:
