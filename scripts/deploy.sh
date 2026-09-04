@@ -12,6 +12,26 @@ if [ -n "$(git -C "$SRC" status --porcelain)" ]; then
     echo "WARNING: working tree has uncommitted changes"
 fi
 
+# Frontend asset gate (Issue #42): the SPA must not depend on runtime CDNs.
+# The vendored Vue prod build and the prerendered Tailwind CSS are committed
+# artifacts; fail the deploy if they are missing/empty or if index.html still
+# references a runtime CDN (unpkg / cdn.tailwindcss.com). fonts.googleapis.com
+# is a progressive enhancement only (system-ui fallback), so it is allowed.
+VENDOR="$SRC/app/static/assets/vendor/vue.global.prod.js"
+FRONTEND_CSS="$SRC/app/static/assets/tailwind.css"
+INDEX_HTML="$SRC/app/static/index.html"
+echo "=== Frontend asset gate (Issue #42) ==="
+if [ ! -s "$VENDOR" ]; then
+    echo "FAIL: vendor Vue prod build missing or empty: $VENDOR"; exit 1
+fi
+if [ ! -s "$FRONTEND_CSS" ]; then
+    echo "FAIL: prerendered tailwind.css missing or empty: $FRONTEND_CSS"; exit 1
+fi
+if grep -qE 'unpkg\.com|cdn\.tailwindcss\.com' "$INDEX_HTML"; then
+    echo "FAIL: index.html still references a runtime CDN (unpkg/cdn.tailwindcss.com)"; exit 1
+fi
+echo "Frontend assets OK"
+
 echo "=== Syncing: $SRC → $DST ==="
 rsync -av --delete \
   --exclude='.env' \
