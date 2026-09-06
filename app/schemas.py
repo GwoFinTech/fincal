@@ -81,6 +81,8 @@ class EarningItem(BaseModel):
     consensus_revenue: float | None = None
     consensus_ebit: float | None = None
     consensus_net_income: float | None = None
+    consensus_currency: str | None = None
+    consensus_fetched_at: datetime | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

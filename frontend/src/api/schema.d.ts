@@ -599,6 +599,10 @@ export interface components {
             consensus_ebit?: number | null;
             /** Consensus Net Income */
             consensus_net_income?: number | null;
+            /** Consensus Currency */
+            consensus_currency?: string | null;
+            /** Consensus Fetched At */
+            consensus_fetched_at?: string | null;
             /** Created At */
             created_at?: string | null;
             /** Updated At */
