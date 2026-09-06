@@ -54,15 +54,28 @@ def normalize(symbol: str, market: str) -> str:
       - HK codes with or without leading zeros (700, 0700, 00700)
       - Case insensitivity
       - With or without .HK suffix for HK codes
+      - US codes with a stray ``.US`` suffix (AAPL.US) or a Futu-style
+        ``US.`` prefix (US.AAPL), stripping both to the canonical bare ticker
     """
     market = market.strip().upper()
-    s = symbol.strip().upper().replace(".HK", "") if market == "HK" else symbol.strip().upper()
+    s = symbol.strip().upper()
 
-    if market == "HK" and s.isdigit():
-        # Ensure 4-digit canonical: 700 → 0700
-        s = (s.lstrip("0") or "0").zfill(4)
+    if market == "HK":
+        s = s.replace(".HK", "")
+        if s.isdigit():
+            # Ensure 4-digit canonical: 700 → 0700
+            s = (s.lstrip("0") or "0").zfill(4)
+        return f"{s}.{market}"
 
-    return f"{s}.{market}" if market == "HK" else s
+    # US stocks are stored as bare tickers (no market suffix, matching the
+    # earnings table). Strip any user-supplied ".US" suffix or Futu-style
+    # "US." prefix so a pasted code (AAPL.US / US.AAPL) matches the canonical
+    # form used by watchlist → earnings lookups (Issue #43).
+    if s.startswith("US."):
+        s = s[3:]
+    if s.endswith(".US"):
+        s = s[:-3]
+    return s
 
 
 # ── Longbridge helpers ─────────────────────────────────────────────
