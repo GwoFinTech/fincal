@@ -92,7 +92,11 @@ def fetch_from_futu(symbol: str, market: str) -> str:
         from app.symbol import to_futu_code
     except ImportError:
         return ""
-    code = to_futu_code(f"{symbol}.{market}" if market == "HK" else symbol)
+    # Build a canonical TICKER.MARKET before converting so both markets yield a
+    # complete Futu code (Issue #41): HK rows already carry ".HK" (e.g. 0700.HK),
+    # US rows are bare tickers (e.g. AAPL) and must gain the ".US" suffix.
+    canonical = f"{symbol}.{market}" if "." not in symbol else symbol
+    code = to_futu_code(canonical)
     ctx = None
     try:
         ctx = OpenQuoteContext(host=config.FUTU_HOST, port=config.FUTU_PORT)
