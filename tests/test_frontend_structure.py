@@ -89,3 +89,23 @@ def test_watchlist_only_reloads_and_guards_calendar_rows():
     assert "watchlistOnly.value" in js and "data.filter" in js
     assert "watchlist.value.some(w => w.symbol === e.symbol && w.market === e.market)" in js
     assert "calendarCells.value.find(cell => cell.isToday)" in js
+
+
+def test_date_window_uses_local_ymd_not_utc_toiso_string():
+    """Issue #46: window dates and 'today' must be built from local date
+    parts, not toISOString().slice(0,10) (UTC), which shifts early by one
+    day for UTC+8 (primary CN/HK market). Guards a regression."""
+    html, js = _read_all()
+
+    # The UTC-based date-string generation must be gone.
+    assert ".toISOString().slice(0, 10)" not in js
+
+    # localYmd helper exists and formats the local date.
+    assert "function localYmd(d)" in js
+    assert "d.getFullYear()" in js and "padStart(2, '0')" in js
+
+    # Both call sites use localYmd: today in watchlistInsight and the
+    # start/end window in loadEarnings.
+    assert js.count("localYmd(new Date())") == 1
+    assert js.count("localYmd(new Date(d.getFullYear(), d.getMonth() - 1, 1))") == 1
+    assert js.count("localYmd(new Date(d.getFullYear(), d.getMonth() + 2, 0))") == 1

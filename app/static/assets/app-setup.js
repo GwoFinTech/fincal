@@ -1,5 +1,17 @@
   const { createApp, ref, computed, onMounted, watch } = Vue;
 
+  // ── localYmd: format a Date as a local YYYY-MM-DD string ──────────
+  // Previously the date window (`start`/`end`), `today`, and the calendar
+  // grid used inconsistent zones: the grid built local dates, but the
+  // request window + "today" used toISOString().slice(0,10), which is UTC.
+  // In UTC+8 (the product's primary market, X-WR-TIMEZONE:Asia/Shanghai)
+  // that shifted every window date/today one day early. This helper formats
+  // from local date parts so every caller agrees (Issue #46).
+  function localYmd(d) {
+    const p = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  }
+
   // ══════════════════════════════════════════════════════════════════
   // Composables (Issue #13 — domain logic extracted from setup)
   // ══════════════════════════════════════════════════════════════════
@@ -201,7 +213,7 @@
     }
 
     function watchlistInsight(item, earningsData) {
-      const today = new Date().toISOString().slice(0, 10);
+      const today = localYmd(new Date());
       const matches = earningsData.filter(e => e.symbol === item.symbol && e.market === item.market);
       return matches.find(e => e.report_date >= today) || matches[0] || {};
     }
@@ -391,8 +403,8 @@
         error.value = null;
         try {
           const d = cal.currentDate.value;
-          const start = new Date(d.getFullYear(), d.getMonth() - 1, 1).toISOString().slice(0, 10);
-          const end = new Date(d.getFullYear(), d.getMonth() + 2, 0).toISOString().slice(0, 10);
+          const start = localYmd(new Date(d.getFullYear(), d.getMonth() - 1, 1));
+          const end = localYmd(new Date(d.getFullYear(), d.getMonth() + 2, 0));
           const params = new URLSearchParams({ start, end, watchlistOnly: watchlistOnly.value });
           const data = await apiFetch(`/api/earnings?${params}`);
           if (data) {
