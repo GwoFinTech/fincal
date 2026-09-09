@@ -237,17 +237,34 @@ def api_export(start: date, end: date, format: str = "csv", user=Depends(get_cur
 
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["symbol", "market", "company_name", "report_date", "fiscal_year",
-                     "fiscal_quarter", "before_after", "eps_estimate", "eps_actual",
-                     "revenue_estimate", "revenue_actual", "is_predicted"])
+    # Derive the column set from the actual rows so the CSV field set stays in
+    # lockstep with the JSON export (which returns `data` verbatim). This keeps
+    # provenance/status (date_source, date_status, estimate_source, actual_source)
+    # and consensus_* fields from drifting out of sync with the EarningItem
+    # contract (Issue #47). Columns follow first-appearance order across rows;
+    # empty data falls back to a canonical list so the header is still emitted.
+    fields: list[str] = []
+    seen: set[str] = set()
     for r in data:
-        writer.writerow([
-            r.get("symbol"), r.get("market"), r.get("company_name", ""),
-            r.get("report_date"), r.get("fiscal_year"), r.get("fiscal_quarter"),
-            r.get("before_after", ""), r.get("eps_estimate", ""),
-            r.get("eps_actual", ""), r.get("revenue_estimate", ""),
-            r.get("revenue_actual", ""), r.get("is_predicted", False),
-        ])
+        for k in r.keys():
+            if k not in seen:
+                seen.add(k)
+                fields.append(k)
+    if not fields:
+        fields = [
+            "symbol", "market", "company_name", "report_date", "report_type",
+            "fiscal_year", "fiscal_quarter", "before_after", "eps_estimate",
+            "eps_actual", "revenue_estimate", "revenue_actual", "is_predicted",
+            "date_source", "date_status", "estimate_source", "estimate_as_of",
+            "estimate_currency", "estimate_basis", "actual_source", "actual_as_of",
+            "updated_at", "consensus_currency", "consensus_eps_gaap",
+            "consensus_eps_adjusted", "consensus_revenue", "consensus_ebit",
+            "consensus_net_income", "consensus_normalized_net_income",
+            "consensus_fetched_at",
+        ]
+    writer.writerow(fields)
+    for r in data:
+        writer.writerow([r.get(f) for f in fields])
     output.seek(0)
     return StreamingResponse(
         output,

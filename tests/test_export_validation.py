@@ -8,6 +8,7 @@ Covers:
 - OpenAPI schema reflects date types
 """
 import sys
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -122,6 +123,67 @@ def test_export_valid_json_returns_200():
     client = next(_patched_client())
     resp = client.get("/api/export?start=2026-08-01&end=2026-08-20&format=json")
     assert resp.status_code == 200
+
+
+# ── Issue #47: CSV exposes provenance/status and consensus fields ──
+
+def test_export_csv_headers_include_provenance_and_consensus():
+    """CSV export must expose provenance/status + consensus_* columns, matching
+    the JSON export and the EarningItem contract (Issue #47)."""
+    sample = [{
+        "symbol": "AAPL", "market": "US", "company_name": "Apple Inc.",
+        "report_date": "2026-07-30", "report_type": "Q",
+        "fiscal_year": 2026, "fiscal_quarter": 3,
+        "before_after": "after", "eps_estimate": None, "eps_actual": 1.45,
+        "revenue_estimate": None, "revenue_actual": 95000,
+        "is_predicted": False,
+        "date_source": "futu", "date_status": "reported",
+        "estimate_source": "longbridge", "estimate_as_of": None,
+        "estimate_currency": "USD", "estimate_basis": None,
+        "actual_source": "futu", "actual_as_of": None,
+        "updated_at": "2026-07-30T00:00:00Z",
+        "consensus_currency": "USD", "consensus_eps_gaap": 1.50,
+        "consensus_eps_adjusted": 1.52, "consensus_revenue": 96000,
+        "consensus_ebit": 12000, "consensus_net_income": 9000,
+        "consensus_normalized_net_income": None,
+        "consensus_fetched_at": "2026-07-29T00:00:00Z",
+    }]
+    with patch.object(db, "db_cursor", lambda: _FakeConn()), \
+         patch("app.earnings.fetch_earnings_from_db", return_value=sample):
+        app.dependency_overrides[get_current_user] = lambda: {
+            "id": 1, "email": "t@t.com", "name": "T", "role": "admin",
+        }
+        client = TestClient(app, raise_server_exceptions=False)
+        csv_resp = client.get("/api/export?start=2026-07-01&end=2026-08-31&format=csv")
+        json_resp = client.get("/api/export?start=2026-07-01&end=2026-08-31&format=json")
+    app.dependency_overrides = {}
+
+    assert csv_resp.status_code == 200, f"Expected 200, got {csv_resp.status_code}"
+    header_line = csv_resp.text.splitlines()[0]
+    headers = header_line.split(",")
+    for f in ("date_source", "date_status", "estimate_source", "actual_source",
+              "consensus_currency", "consensus_eps_gaap", "consensus_eps_adjusted",
+              "consensus_revenue", "consensus_ebit", "consensus_net_income",
+              "consensus_fetched_at"):
+        assert f in headers, f"CSV header missing '{f}': {header_line}"
+
+    # CSV field set must equal the JSON field set (Issue #47 criterion 2).
+    json_list = json.loads(json_resp.text)
+    assert json_list, "expected a non-empty JSON export"
+    expected = set(json_list[0].keys())
+    assert set(headers) == expected, (
+        f"CSV header set {sorted(headers)} != JSON field set {sorted(expected)}"
+    )
+
+
+def test_export_csv_empty_still_emits_header():
+    """Empty dataset keeps producing a header (canonical fallback), not a blank body."""
+    client = next(_patched_client())
+    resp = client.get("/api/export?start=2026-08-01&end=2026-08-20&format=csv")
+    assert resp.status_code == 200
+    lines = resp.text.splitlines()
+    assert lines, "expected at least a header row"
+    assert "symbol" in lines[0] and "date_status" in lines[0]
 
 
 # ── Issue #36: unauthenticated → 401, authenticated → 200 ────────
