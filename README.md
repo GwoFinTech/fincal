@@ -116,6 +116,8 @@ All configuration is via environment variables. See [`.env.example`](.env.exampl
 | `ICAL_BASE_URL` | — | Public URL for iCal feeds |
 | `FUTU_HOST` | `127.0.0.1` | Futu OpenD host |
 | `FUTU_PORT` | `11112` | Futu OpenD port |
+| `FUTU_DATES_TIMEOUT_SECONDS` | `15` | Per-symbol earnings-date call watchdog |
+| `FUTU_ACTUALS_TIMEOUT_SECONDS` | `20` | Per-symbol EPS/revenue call watchdog |
 
 ## Watchlist Source
 
@@ -159,6 +161,14 @@ constructing its client, the script performs a 3-second TCP preflight against
 `FUTU_HOST:FUTU_PORT`. When OpenD is unavailable, the Futu stage is logged as
 skipped and the Longbridge/prediction stages continue instead of waiting for
 the OpenD client's indefinite reconnect loop.
+
+Each per-symbol OpenD call is additionally bounded by a wall-clock watchdog
+(`FUTU_DATES_TIMEOUT_SECONDS` / `FUTU_ACTUALS_TIMEOUT_SECONDS`, Issue #48). The
+watchdog raises a catchable `TimeoutError`, so a single wedged symbol is counted
+as a failed symbol and the rest of the batch continues — it no longer kills the
+whole process and strands a `running` audit row that would block every later
+sync. The audited run is also wrapped in a `finally` that forces a terminal
+state on any exit path.
 
 ## Tech Stack
 

@@ -38,6 +38,12 @@ FUTU_HOST = os.getenv("FUTU_HOST", "127.0.0.1")
 # The host's OpenD relay listens on 11112.  Production containers override
 # this through .env, but the default must also work for host-run sync scripts.
 FUTU_PORT = int(os.getenv("FUTU_PORT", "11112"))
+# Per-symbol call watchdog for scripts/sync_futu.py (Issue #48). Each OpenD call
+# is bounded by wall clock so a wedged symbol is counted as a failure instead of
+# hanging the batch; the windows stay configurable because a slow-but-healthy
+# response must not be misread as a timeout.
+FUTU_DATES_TIMEOUT_SECONDS = int(os.getenv("FUTU_DATES_TIMEOUT_SECONDS", "15"))
+FUTU_ACTUALS_TIMEOUT_SECONDS = int(os.getenv("FUTU_ACTUALS_TIMEOUT_SECONDS", "20"))
 
 # Longbridge CLI (optional - primary earnings data source)
 LONGBRIDGE_APP_KEY = os.getenv("LONGBRIDGE_APP_KEY", "")
