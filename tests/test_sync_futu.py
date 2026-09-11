@@ -429,6 +429,7 @@ class FutuFailureClassificationTests(TestCase):
             outcome, _ = sync_futu.futu_call(
                 "US.AAPL", "EPS", lambda: (-1, self.RATE_LIMIT_MSG),
                 _fake_limiter(clock, _RecordingSleep(clock)), stats,
+                timeout_seconds=0,
             )
         assert outcome == sync_futu.OUTCOME_RATE_LIMITED
         assert self.RATE_LIMIT_MSG in "\n".join(logs.output), (
@@ -521,6 +522,31 @@ class FutuFailureClassificationTests(TestCase):
         assert stats.total == 1
         assert stats.unsupported_symbols == 1, "two rejected calls must not double-count the symbol"
         assert sync_futu.futu_audit_outcome(stats) == ("success", None)
+
+    def test_pacing_wait_is_not_counted_as_a_watchdog_timeout(self):
+        """The watchdog bounds one provider call, not the wait for a quota slot.
+
+        With the watchdog armed around the pacer, a 1.5 s pacing sleep inside a
+        1 s window raised ``FutuCallTimeout`` and the symbol was recorded as a
+        failed symbol — throttling masqueraded as wedged symbols (observed on
+        the first production run of the Issue #49 change).
+        """
+        import pandas as pd
+
+        limiter = sync_futu.FutuRateLimiter(max_calls=1, window_seconds=1.5,
+                                            clock=time.monotonic, sleep=time.sleep)
+        ctx = MagicMock()
+        ctx.get_financials_earnings_price_history.return_value = (
+            0, pd.DataFrame([{"fiscal_year": 2026, "financial_type": 2,
+                              "pub_trading_day_str": "2026-07-30", "pub_type": 1}]),
+        )
+
+        with _stage_env(limiter), \
+             patch.object(sync_futu.config, "FUTU_DATES_TIMEOUT_SECONDS", 1):
+            stats = sync_futu.sync_earnings_dates(ctx, 1, ["AAPL.US", "MSFT.US"])
+
+        assert stats.failed_symbols == 0, "waiting for a quota slot must not look like a timeout"
+        assert stats.total == 2
 
 
 class FutuAuditDetailsTests(TestCase):

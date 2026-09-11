@@ -267,7 +267,8 @@ def merge_outcome(current: str, new: str) -> str:
     return new if _OUTCOME_PRIORITY[new] > _OUTCOME_PRIORITY[current] else current
 
 
-def futu_call(futu_code: str, description: str, call, limiter, stats) -> tuple[str, Any]:
+def futu_call(futu_code: str, description: str, call, limiter, stats,
+              *, timeout_seconds: int) -> tuple[str, Any]:
     """Pace, retry and classify one OpenD call (Issue #49).
 
     Returns ``(outcome, data)`` where ``outcome`` is ``ok`` / ``rate_limited`` /
@@ -275,11 +276,18 @@ def futu_call(futu_code: str, description: str, call, limiter, stats) -> tuple[s
     retried at most ``FUTU_RATE_LIMIT_MAX_RETRIES`` times; the provider's
     message is always logged, so an operator can tell a rate limit from an
     unsupported instrument or an unknown error without extra probing.
+
+    The quota slot is acquired (and a back-off waited out) *outside* the
+    ``timeout_seconds`` watchdog window: the watchdog bounds one provider call,
+    and waiting for the pacer is not a call. Arming it around the wait made
+    every pacing sleep look like a wedged symbol and turned throttling into
+    per-symbol failures.
     """
     retries = max(config.FUTU_RATE_LIMIT_MAX_RETRIES, 0)
     for attempt in range(retries + 1):
         limiter.acquire()
-        ret, data = call()
+        with futu_call_timeout(timeout_seconds):
+            ret, data = call()
         if ret == 0:  # RET_OK = 0
             stats.consecutive_rate_limited = 0
             return OUTCOME_OK, data
@@ -420,12 +428,12 @@ def sync_earnings_dates(ctx, run_id: int, symbols: list[str]) -> FutuStageStats:
         symbol, market = canonical_earnings_symbol(source_symbol)
         futu_code = to_futu_code(source_symbol)
         try:
-            with futu_call_timeout(config.FUTU_DATES_TIMEOUT_SECONDS):
-                outcome, data = futu_call(
-                    futu_code, "Dates",
-                    lambda: ctx.get_financials_earnings_price_history(futu_code),
-                    limiter, stats,
-                )
+            outcome, data = futu_call(
+                futu_code, "Dates",
+                lambda: ctx.get_financials_earnings_price_history(futu_code),
+                limiter, stats,
+                timeout_seconds=config.FUTU_DATES_TIMEOUT_SECONDS,
+            )
             if outcome != OUTCOME_OK:
                 stats.count_symbol(outcome)
                 if stats.rate_limited:
@@ -512,14 +520,14 @@ def sync_actuals(ctx, run_id: int, symbols: list[str]) -> FutuStageStats:
         outcome = OUTCOME_OK
         try:
             # MainIndex for EPS (fid=14020)
-            with futu_call_timeout(config.FUTU_ACTUALS_TIMEOUT_SECONDS):
-                eps_outcome, main_data = futu_call(
-                    futu_code, "EPS",
-                    lambda: ctx.get_financials_statements(
-                        futu_code, statement_type=4, financial_type=9, num=4
-                    ),
-                    limiter, stats,
-                )
+            eps_outcome, main_data = futu_call(
+                futu_code, "EPS",
+                lambda: ctx.get_financials_statements(
+                    futu_code, statement_type=4, financial_type=9, num=4
+                ),
+                limiter, stats,
+                timeout_seconds=config.FUTU_ACTUALS_TIMEOUT_SECONDS,
+            )
             outcome = merge_outcome(outcome, eps_outcome)
             if eps_outcome == OUTCOME_OK and main_data.get("report_list"):
                 for report in main_data["report_list"]:
@@ -548,14 +556,14 @@ def sync_actuals(ctx, run_id: int, symbols: list[str]) -> FutuStageStats:
                             )
 
             # Income Statement for revenue (fid=8002)
-            with futu_call_timeout(config.FUTU_ACTUALS_TIMEOUT_SECONDS):
-                rev_outcome, income_data = futu_call(
-                    futu_code, "Revenue",
-                    lambda: ctx.get_financials_statements(
-                        futu_code, statement_type=1, financial_type=9, num=4
-                    ),
-                    limiter, stats,
-                )
+            rev_outcome, income_data = futu_call(
+                futu_code, "Revenue",
+                lambda: ctx.get_financials_statements(
+                    futu_code, statement_type=1, financial_type=9, num=4
+                ),
+                limiter, stats,
+                timeout_seconds=config.FUTU_ACTUALS_TIMEOUT_SECONDS,
+            )
             outcome = merge_outcome(outcome, rev_outcome)
             if rev_outcome == OUTCOME_OK and income_data.get("report_list"):
                 for report in income_data["report_list"]:
