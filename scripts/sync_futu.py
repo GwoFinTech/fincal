@@ -9,7 +9,11 @@ import sys
 import os
 import socket
 import threading
+import time
+from collections import deque
+from dataclasses import dataclass
 from datetime import date, timedelta
+from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -89,6 +93,232 @@ def futu_call_timeout(seconds: int):
         signal.alarm(0)
 
 
+# ── OpenD pacing, error classification, circuit breaker (Issue #49) ──
+#
+# OpenD refuses both ``get_financials_statements`` and
+# ``get_financials_earnings_price_history`` once the window budget is spent
+# ("…频率太高，请求失败，每30秒最多30次。"). A full sync used to issue ~3
+# unpaced calls per symbol (~6.5 calls/s), tripped the quota within seconds,
+# and then failed every remaining symbol with ``ret=-1`` while throwing the
+# provider's message away — so a rate limit, a structurally unsupported
+# instrument and a genuine bug all looked identical in ``sync_runs``.
+#
+# The pieces below fix that at the source:
+#   * :class:`FutuRateLimiter` paces every OpenD call through one shared
+#     sliding window (``FUTU_MAX_CALLS_PER_30S`` per
+#     ``FUTU_RATE_LIMIT_WINDOW_SECONDS``);
+#   * :func:`futu_call` keeps the provider message, retries a quota rejection
+#     after waiting out one window (bounded by ``FUTU_RATE_LIMIT_MAX_RETRIES``)
+#     and classifies the outcome;
+#   * :class:`FutuStageStats` separates quota rejections from unsupported
+#     instruments and real symbol failures, so the audit can report them
+#     individually;
+#   * a stage that keeps getting refused stops early
+#     (``FUTU_RATE_LIMIT_CIRCUIT_BREAKER``) and is audited as
+#     ``futu_rate_limited`` instead of blaming the symbols.
+
+# Provider wording that identifies each failure mode. Messages are matched as
+# substrings because OpenD localises them (and may append extra detail).
+RATE_LIMIT_MARKERS = ("频率太高", "频率限制", "每30秒最多", "too frequent")
+UNSUPPORTED_MARKERS = ("仅支持正股",)
+
+OUTCOME_OK = "ok"
+OUTCOME_RATE_LIMITED = "rate_limited"
+OUTCOME_UNSUPPORTED = "unsupported"
+OUTCOME_FAILED = "failed"
+
+_OUTCOME_PRIORITY = {
+    OUTCOME_OK: 0,
+    OUTCOME_UNSUPPORTED: 1,
+    OUTCOME_FAILED: 2,
+    OUTCOME_RATE_LIMITED: 3,
+}
+
+
+def futu_provider_message(data) -> str:
+    """Return OpenD's human-readable reason for a ``ret != 0`` response.
+
+    On failure the second tuple slot carries the reason (e.g. ``该接口仅支持正股``)
+    rather than a frame. It used to be discarded, which made the production
+    failure impossible to diagnose from the logs (Issue #49).
+    """
+    if data is None:
+        return ""
+    return " ".join(str(data).split())[:200]
+
+
+def classify_futu_error(message: str) -> str:
+    """Map a provider message to ``rate_limited`` / ``unsupported`` / ``failed``."""
+    if any(marker in message for marker in RATE_LIMIT_MARKERS):
+        return OUTCOME_RATE_LIMITED
+    if any(marker in message for marker in UNSUPPORTED_MARKERS):
+        return OUTCOME_UNSUPPORTED
+    return OUTCOME_FAILED
+
+
+class FutuRateLimiter:
+    """Sliding-window pacer shared by every OpenD call in this process.
+
+    Both financials interfaces draw on the same OpenD session quota, so one
+    limiter is shared by the dates and actuals stages. ``clock``/``sleep`` are
+    injectable so tests can exercise the pacing without real waiting.
+    """
+
+    def __init__(self, max_calls: int | None = None, window_seconds: float | None = None,
+                 *, clock=time.monotonic, sleep=time.sleep):
+        self.max_calls = int(config.FUTU_MAX_CALLS_PER_30S if max_calls is None else max_calls)
+        self.window_seconds = float(
+            config.FUTU_RATE_LIMIT_WINDOW_SECONDS if window_seconds is None else window_seconds
+        )
+        self.waited_seconds = 0.0
+        self._clock = clock
+        self._sleep = sleep
+        self._calls: deque[float] = deque()
+        self._lock = threading.Lock()
+
+    def _evict(self, now: float) -> None:
+        while self._calls and now - self._calls[0] >= self.window_seconds:
+            self._calls.popleft()
+
+    def acquire(self) -> float:
+        """Block until a call slot is free; return the seconds spent waiting."""
+        with self._lock:
+            slept = 0.0
+            now = self._clock()
+            self._evict(now)
+            if len(self._calls) >= self.max_calls:
+                wait = self.window_seconds - (now - self._calls[0])
+                if wait > 0:
+                    self._sleep(wait)
+                    slept = wait
+                    now = self._clock()
+                    self._evict(now)
+            self._calls.append(now)
+            self.waited_seconds += slept
+            return slept
+
+    def cool_down(self) -> float:
+        """Wait out a whole quota window after the provider refused a call.
+
+        A rejection means the window is already spent, so retrying sooner would
+        just be refused again. Sleeping a full window empties the tracker.
+        """
+        with self._lock:
+            wait = self.window_seconds
+            if wait > 0:
+                self._sleep(wait)
+            self._calls.clear()
+            self.waited_seconds += max(wait, 0.0)
+            return wait
+
+
+_rate_limiter: FutuRateLimiter | None = None
+
+
+def get_rate_limiter() -> FutuRateLimiter:
+    """Return the process-wide OpenD pacer, creating it on first use.
+
+    Lazy creation (rather than an import-time singleton) keeps the configured
+    budget patchable in tests and honours ``FUTU_*`` overrides.
+    """
+    global _rate_limiter
+    if _rate_limiter is None:
+        _rate_limiter = FutuRateLimiter()
+    return _rate_limiter
+
+
+def reset_rate_limiter() -> None:
+    """Drop the process-wide pacer (used by tests and by long-lived callers)."""
+    global _rate_limiter
+    _rate_limiter = None
+
+
+@dataclass
+class FutuStageStats:
+    """Outcome counters for one Futu stage, classified by failure kind.
+
+    ``total`` keeps its historical per-stage meaning (dates: rows upserted,
+    actuals: symbols processed) because existing ``sync_runs.details``
+    consumers read it; the remaining fields are the Issue #49 classification.
+    """
+
+    total: int = 0
+    symbols_attempted: int = 0
+    failed_symbols: int = 0
+    unsupported_symbols: int = 0
+    rate_limited_symbols: int = 0
+    rate_limited_calls: int = 0
+    retries: int = 0
+    consecutive_rate_limited: int = 0
+    rate_limited: bool = False  # circuit breaker tripped
+
+    def count_symbol(self, outcome: str) -> None:
+        """Count one symbol-level outcome (``ok`` outcomes count nothing)."""
+        if outcome == OUTCOME_FAILED:
+            self.failed_symbols += 1
+        elif outcome == OUTCOME_UNSUPPORTED:
+            self.unsupported_symbols += 1
+        elif outcome == OUTCOME_RATE_LIMITED:
+            self.rate_limited_symbols += 1
+
+
+def merge_outcome(current: str, new: str) -> str:
+    """Return the more severe of two outcomes for the same symbol."""
+    return new if _OUTCOME_PRIORITY[new] > _OUTCOME_PRIORITY[current] else current
+
+
+def futu_call(futu_code: str, description: str, call, limiter, stats) -> tuple[str, Any]:
+    """Pace, retry and classify one OpenD call (Issue #49).
+
+    Returns ``(outcome, data)`` where ``outcome`` is ``ok`` / ``rate_limited`` /
+    ``unsupported`` / ``failed``. A quota rejection waits out one window and is
+    retried at most ``FUTU_RATE_LIMIT_MAX_RETRIES`` times; the provider's
+    message is always logged, so an operator can tell a rate limit from an
+    unsupported instrument or an unknown error without extra probing.
+    """
+    retries = max(config.FUTU_RATE_LIMIT_MAX_RETRIES, 0)
+    for attempt in range(retries + 1):
+        limiter.acquire()
+        ret, data = call()
+        if ret == 0:  # RET_OK = 0
+            stats.consecutive_rate_limited = 0
+            return OUTCOME_OK, data
+
+        message = futu_provider_message(data)
+        kind = classify_futu_error(message)
+        if kind == OUTCOME_RATE_LIMITED:
+            if attempt < retries:
+                stats.retries += 1
+                logger.warning(
+                    "%s request rate limited for %s (retry %d/%d): ret=%s msg=%s; "
+                    "waiting one quota window (%.0fs)",
+                    description, futu_code, attempt + 1, retries, ret, message,
+                    limiter.window_seconds,
+                )
+                limiter.cool_down()
+                continue
+            stats.rate_limited_calls += 1
+            stats.consecutive_rate_limited += 1
+            if stats.consecutive_rate_limited >= config.FUTU_RATE_LIMIT_CIRCUIT_BREAKER:
+                stats.rate_limited = True
+            logger.warning(
+                "%s request rate limited for %s after %d retries: ret=%s msg=%s",
+                description, futu_code, retries, ret, message,
+            )
+        elif kind == OUTCOME_UNSUPPORTED:
+            logger.info(
+                "%s request unsupported for %s: ret=%s msg=%s",
+                description, futu_code, ret, message,
+            )
+        else:
+            logger.warning(
+                "%s request failed for %s: ret=%s msg=%s",
+                description, futu_code, ret, message,
+            )
+        return kind, data
+    raise AssertionError("unreachable: retry loop must return")  # pragma: no cover
+
+
 def create_futu_context():
     """Return a connected OpenD context, or ``None`` when it is unavailable.
 
@@ -135,31 +365,76 @@ def canonical_earnings_symbol(symbol: str) -> tuple[str, str]:
     raise ValueError(f"unsupported_market:{market}")
 
 
-def futu_audit_outcome(date_failures: int, actual_failures: int) -> tuple[str, str | None]:
-    """Classify a stage honestly while allowing other stages to continue."""
-    if date_failures or actual_failures:
+def futu_audit_outcome(*stages: FutuStageStats) -> tuple[str, str | None]:
+    """Classify a run honestly while allowing other stages to continue.
+
+    A provider quota rejection is not a symbol-level failure: OpenD refused the
+    request because the window budget was spent, so it gets its own error code
+    instead of the catch-all ``futu_symbol_fetch_failed`` that made every
+    weekly run look like the same permanent regression (Issue #49).
+    Structurally unsupported instruments (ETFs) are expected and never fail a
+    run by themselves.
+    """
+    if any(stage.rate_limited or stage.rate_limited_calls for stage in stages):
+        return "failed", "futu_rate_limited"
+    if any(stage.failed_symbols for stage in stages):
         return "failed", "futu_symbol_fetch_failed"
     return "success", None
 
 
-def sync_earnings_dates(ctx, run_id: int) -> tuple[int, int]:
-    """Fetch earnings calendar dates from Futu, single shared context."""
+def futu_audit_details(date_stats: FutuStageStats, actual_stats: FutuStageStats,
+                       skipped_symbols: list[str]) -> dict:
+    """Build ``sync_runs.details``: the historical keys plus the Issue #49
+    failure classification, so an operator can tell a rate limit from an
+    unsupported instrument from a real symbol failure without probing OpenD."""
+    return {
+        # Historical keys — unchanged so existing consumers keep working.
+        "actual_symbols": actual_stats.total,
+        "date_failed_symbols": date_stats.failed_symbols,
+        "actual_failed_symbols": actual_stats.failed_symbols,
+        # Issue #49 classification.
+        "date_symbols": date_stats.total,
+        "unsupported_symbols": date_stats.unsupported_symbols + actual_stats.unsupported_symbols,
+        "rate_limited_calls": date_stats.rate_limited_calls + actual_stats.rate_limited_calls,
+        "rate_limited_symbols": date_stats.rate_limited_symbols + actual_stats.rate_limited_symbols,
+        "rate_limit_retries": date_stats.retries + actual_stats.retries,
+        "rate_limited": bool(date_stats.rate_limited or actual_stats.rate_limited),
+        "skipped_symbols": len(skipped_symbols),
+    }
+
+
+def sync_earnings_dates(ctx, run_id: int, symbols: list[str]) -> FutuStageStats:
+    """Fetch earnings calendar dates from Futu, single shared context.
+
+    ``symbols`` are the Futu-routable watchlist codes resolved once by the
+    caller; OpenD pacing and failure classification live in :func:`futu_call`.
+    """
+    stats = FutuStageStats()
+    limiter = get_rate_limiter()
     batch = []
-    total = 0
-    failed_symbols = 0
     cutoff = date.today() - timedelta(days=365)
-    symbols = get_source().get_futu_symbols()
 
     for source_symbol in symbols:
         check_cancelled(run_id)
+        stats.symbols_attempted += 1
         symbol, market = canonical_earnings_symbol(source_symbol)
         futu_code = to_futu_code(source_symbol)
         try:
             with futu_call_timeout(config.FUTU_DATES_TIMEOUT_SECONDS):
-                ret, data = ctx.get_financials_earnings_price_history(futu_code)
-            if ret != 0:  # RET_OK = 0
-                failed_symbols += 1
-                logger.warning("Dates request failed for %s: ret=%s", futu_code, ret)
+                outcome, data = futu_call(
+                    futu_code, "Dates",
+                    lambda: ctx.get_financials_earnings_price_history(futu_code),
+                    limiter, stats,
+                )
+            if outcome != OUTCOME_OK:
+                stats.count_symbol(outcome)
+                if stats.rate_limited:
+                    logger.warning(
+                        "Dates stage stopped: %d consecutive rate-limit rejections "
+                        "(OpenD quota), %d symbol(s) left unfetched",
+                        stats.consecutive_rate_limited, len(symbols) - stats.symbols_attempted,
+                    )
+                    break
                 continue
 
             df = data.drop_duplicates(subset=["fiscal_year", "financial_type"], keep="first")
@@ -179,9 +454,9 @@ def sync_earnings_dates(ctx, run_id: int) -> tuple[int, int]:
                 # Futu confirms the date; no actuals fetched here yet, so status
                 # stays 'scheduled' until sync_actuals() marks it reported.
                 batch.append((symbol, market, "", pub_date_str, "Q", fy, fq, pub_type, "futu", "scheduled"))
-                total += 1
+                stats.total += 1
         except Exception as e:
-            failed_symbols += 1
+            stats.count_symbol(OUTCOME_FAILED)
             logger.warning("Dates failed %s: %s", futu_code, e)
             continue
 
@@ -210,31 +485,43 @@ def sync_earnings_dates(ctx, run_id: int) -> tuple[int, int]:
             )
         logger.info(f"Flushed {len(batch)} earnings dates")
 
-    logger.info("Futu earnings dates: %s records; %s symbol failures", total, failed_symbols)
-    return total, failed_symbols
+    logger.info(
+        "Futu earnings dates: %s records; %s symbol failures "
+        "(%s unsupported, %s rate limited)",
+        stats.total, stats.failed_symbols, stats.unsupported_symbols,
+        stats.rate_limited_symbols,
+    )
+    return stats
 
 
-def sync_actuals(ctx, run_id: int) -> tuple[int, int]:
-    """Fetch actual EPS (fid=14020) and revenue (fid=8002) via shared context."""
-    total = 0
-    failed_symbols = 0
-    symbols = get_source().get_futu_symbols()
+def sync_actuals(ctx, run_id: int, symbols: list[str]) -> FutuStageStats:
+    """Fetch actual EPS (fid=14020) and revenue (fid=8002) via shared context.
+
+    Each symbol issues two OpenD calls; the symbol is counted once, using the
+    most severe of the two outcomes, so ``failed_symbols`` keeps its historical
+    per-symbol meaning (Issue #49).
+    """
+    stats = FutuStageStats()
+    limiter = get_rate_limiter()
 
     for source_symbol in symbols:
         check_cancelled(run_id)
+        stats.symbols_attempted += 1
         symbol, market = canonical_earnings_symbol(source_symbol)
         futu_code = to_futu_code(source_symbol)
+        outcome = OUTCOME_OK
         try:
-            symbol_failed = False
             # MainIndex for EPS (fid=14020)
             with futu_call_timeout(config.FUTU_ACTUALS_TIMEOUT_SECONDS):
-                ret, main_data = ctx.get_financials_statements(
-                    futu_code, statement_type=4, financial_type=9, num=4
+                eps_outcome, main_data = futu_call(
+                    futu_code, "EPS",
+                    lambda: ctx.get_financials_statements(
+                        futu_code, statement_type=4, financial_type=9, num=4
+                    ),
+                    limiter, stats,
                 )
-            if ret != 0:
-                symbol_failed = True
-                logger.warning("EPS request failed for %s: ret=%s", futu_code, ret)
-            if ret == 0 and main_data.get("report_list"):
+            outcome = merge_outcome(outcome, eps_outcome)
+            if eps_outcome == OUTCOME_OK and main_data.get("report_list"):
                 for report in main_data["report_list"]:
                     fy = report.get("fiscal_year")
                     ft = report.get("financial_type")
@@ -262,13 +549,15 @@ def sync_actuals(ctx, run_id: int) -> tuple[int, int]:
 
             # Income Statement for revenue (fid=8002)
             with futu_call_timeout(config.FUTU_ACTUALS_TIMEOUT_SECONDS):
-                ret, income_data = ctx.get_financials_statements(
-                    futu_code, statement_type=1, financial_type=9, num=4
+                rev_outcome, income_data = futu_call(
+                    futu_code, "Revenue",
+                    lambda: ctx.get_financials_statements(
+                        futu_code, statement_type=1, financial_type=9, num=4
+                    ),
+                    limiter, stats,
                 )
-            if ret != 0:
-                symbol_failed = True
-                logger.warning("Revenue request failed for %s: ret=%s", futu_code, ret)
-            if ret == 0 and income_data.get("report_list"):
+            outcome = merge_outcome(outcome, rev_outcome)
+            if rev_outcome == OUTCOME_OK and income_data.get("report_list"):
                 for report in income_data["report_list"]:
                     fy = report.get("fiscal_year")
                     ft = report.get("financial_type")
@@ -293,16 +582,28 @@ def sync_actuals(ctx, run_id: int) -> tuple[int, int]:
                                 """,
                                 (rev_val, symbol, market, fy, fq),
                             )
-            if symbol_failed:
-                failed_symbols += 1
-            total += 1
         except Exception as e:
-            failed_symbols += 1
+            outcome = merge_outcome(outcome, OUTCOME_FAILED)
             logger.warning("Actuals failed %s: %s", futu_code, e)
-            continue
+        finally:
+            stats.total += 1
+            stats.count_symbol(outcome)
 
-    logger.info("Futu actuals synced: %s symbols; %s symbol failures", total, failed_symbols)
-    return total, failed_symbols
+        if stats.rate_limited:
+            logger.warning(
+                "Actuals stage stopped: %d consecutive rate-limit rejections "
+                "(OpenD quota), %d symbol(s) left unfetched",
+                stats.consecutive_rate_limited, len(symbols) - stats.symbols_attempted,
+            )
+            break
+
+    logger.info(
+        "Futu actuals synced: %s symbols; %s symbol failures "
+        "(%s unsupported, %s rate limited)",
+        stats.total, stats.failed_symbols, stats.unsupported_symbols,
+        stats.rate_limited_symbols,
+    )
+    return stats
 
 
 def run_sync(ctx) -> int | None:
@@ -315,23 +616,30 @@ def run_sync(ctx) -> int | None:
     A leftover ``running`` row makes ``futu:earnings:full`` take the idempotent
     skip on every later sync, stalling Futu data until a service restart or a
     manual recover (Issue #48).
+
+    The watchlist is resolved once, filtering codes OpenD cannot route (Issue
+    #49): both stages then share the same symbol list, and the skipped codes are
+    recorded in the run's ``details`` instead of being turned into impossible
+    ``US.000651.SZ`` requests.
     """
     from app.sync_audit import (
         start_run, finish_run, heartbeat, SyncCancelledError,
     )
 
-    symbols = get_source().get_futu_symbols()
+    symbols, skipped = get_source().get_futu_symbols_with_skipped()
     run_id = start_run("futu", "futu", symbol_count=len(symbols),
                        idempotency_key="futu:earnings:full")
     if run_id is None:
         logger.info("futu sync already running, skipping")
         return None
+    date_stats = FutuStageStats()
+    actual_stats = FutuStageStats()
     try:
         try:
             heartbeat(run_id, phase="dates", current=0, total=len(symbols))
-            date_count, date_failures = sync_earnings_dates(ctx, run_id)
+            date_stats = sync_earnings_dates(ctx, run_id, symbols)
             heartbeat(run_id, phase="actuals", current=0, total=len(symbols))
-            actual_count, actual_failures = sync_actuals(ctx, run_id)
+            actual_stats = sync_actuals(ctx, run_id, symbols)
         except SyncCancelledError:
             # Admin cancelled this run; keep the terminal 'cancelled' state.
             finish_run(run_id, status="cancelled", error_code="cancelled_by_admin")
@@ -341,14 +649,10 @@ def run_sync(ctx) -> int | None:
             finish_run(run_id, status="failed", error_code="futu_sync_failed")
             raise
         else:
-            status, error_code = futu_audit_outcome(date_failures, actual_failures)
+            status, error_code = futu_audit_outcome(date_stats, actual_stats)
             finish_run(
-                run_id, status=status, record_count=date_count,
-                details={
-                    "actual_symbols": actual_count,
-                    "date_failed_symbols": date_failures,
-                    "actual_failed_symbols": actual_failures,
-                },
+                run_id, status=status, record_count=date_stats.total,
+                details=futu_audit_details(date_stats, actual_stats, skipped),
                 error_code=error_code,
             )
         return run_id

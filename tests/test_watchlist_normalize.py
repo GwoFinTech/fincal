@@ -39,6 +39,23 @@ def test_get_futu_symbols_pads_hk_codes():
     assert "NVDA.US" in futu
 
 
+# ── Issue #49: codes OpenD cannot route must be skipped, not suffixed ────
+
+def test_get_futu_symbols_skips_non_us_hk_codes():
+    src = FakeSource(["AAPL.US", "0700.HK", "000651.SZ", "600519.SH", "NVDA"])
+    symbols, skipped = src.get_futu_symbols_with_skipped(force_refresh=True)
+    assert symbols == ["AAPL.US", "0700.HK", "NVDA.US"]
+    assert skipped == ["000651.SZ", "600519.SH"]
+
+
+def test_get_futu_symbols_never_fabricates_malformed_codes():
+    """``000651.SZ`` + ".US" produced ``US.000651.SZ``, which OpenD can never serve."""
+    src = FakeSource(["000651.SZ", "159326.SZ"])
+    futu = src.get_futu_symbols(force_refresh=True)
+    assert futu == [], "no symbol may be invented for an unsupported exchange"
+    assert src.get_futu_symbols_with_skipped(force_refresh=True)[1] == ["000651.SZ", "159326.SZ"]
+
+
 # ── Issue #43: US suffix / Futu prefix must normalize to bare ticker ──────
 
 def test_normalize_us_strips_suffix():

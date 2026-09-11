@@ -127,18 +127,45 @@ class WatchlistSource(ABC):
         return result
 
     def get_futu_symbols(self, *, force_refresh: bool = False) -> list[str]:
-        """Symbols in fincal canonical format (``AAPL.US``, ``0700.HK``)."""
+        """Symbols in fincal canonical format (``AAPL.US``, ``0700.HK``).
+
+        Codes that OpenD cannot route (A-shares, other exchanges) are dropped
+        rather than suffixed with ``.US`` — see
+        :meth:`get_futu_symbols_with_skipped` (Issue #49).
+        """
+        symbols, _skipped = self.get_futu_symbols_with_skipped(force_refresh=force_refresh)
+        return symbols
+
+    def get_futu_symbols_with_skipped(
+        self, *, force_refresh: bool = False
+    ) -> tuple[list[str], list[str]]:
+        """Return ``(futu_symbols, skipped_codes)`` in fincal canonical format.
+
+        Only codes that map onto a Futu market FinCal can sync (US / HK) are
+        returned. Any other exchange suffix (``000651.SZ``, ``600519.SH``, …)
+        is skipped and reported: blindly appending ``.US`` used to produce
+        impossible codes such as ``US.000651.SZ``, which failed on every Futu
+        run and inflated the sync's failure counts (Issue #49).
+        """
         codes = self.get_symbols(force_refresh=force_refresh)
-        result: list[str] = []
+        symbols: list[str] = []
+        skipped: list[str] = []
         for code in codes:
             code = code.strip().upper()
             if code.endswith(".HK"):
-                result.append(normalize(code[:-3], "HK"))
+                symbols.append(normalize(code[:-3], "HK"))
             elif code.endswith(".US"):
-                result.append(code)
+                symbols.append(code)
+            elif "." in code:
+                skipped.append(code)
             else:
-                result.append(f"{code}.US")
-        return result
+                symbols.append(f"{code}.US")
+        if skipped:
+            logger.info(
+                "%d watchlist code(s) skipped for Futu sync (not US/HK): %s",
+                len(skipped), ", ".join(skipped[:10]),
+            )
+        return symbols, skipped
 
     def refresh(self) -> None:
         """Bust the cache."""

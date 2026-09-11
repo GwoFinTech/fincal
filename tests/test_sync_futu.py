@@ -13,6 +13,13 @@ Fix: the dates upsert now writes ``date_source='futu'`` (and a correct
 Issue #48 coverage (same module): the per-symbol OpenD watchdog must raise a
 catchable ``TimeoutError`` instead of letting the default SIGALRM disposition
 kill the whole process, and the audited run must always end in a terminal state.
+
+Issue #49 coverage (same module): OpenD refuses both financials interfaces
+above 30 calls / 30 s, so the sync must pace its calls, retry a quota rejection
+after waiting out the window, keep the provider's message, and classify a
+rejection apart from an unsupported instrument (ETF) and a real symbol failure
+— otherwise 91% of a run failed for one systemic reason under a single opaque
+``ret=-1``.
 """
 import contextlib
 import importlib.util
@@ -52,6 +59,56 @@ class _RecordingCursor:
         self.executed.append((sql, params))
 
 
+class _FakeClock:
+    """Deterministic ``time.monotonic`` replacement for pacing tests."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+
+class _RecordingSleep:
+    """Records requested sleeps and advances the fake clock instead of waiting."""
+
+    def __init__(self, clock):
+        self.clock = clock
+        self.slept = []
+
+    def __call__(self, seconds):
+        self.slept.append(seconds)
+        self.clock.now += seconds
+
+
+def _fake_limiter(clock, sleep, *, max_calls=10_000, window_seconds=30):
+    """A limiter that never blocks unless the test asks it to."""
+    return sync_futu.FutuRateLimiter(
+        max_calls=max_calls, window_seconds=window_seconds, clock=clock, sleep=sleep
+    )
+
+
+@contextlib.contextmanager
+def _stage_env(limiter, *, retries=None, breaker=None, cursor=None):
+    """Patch a Futu stage's collaborators (limiter, config knobs, DB, cancel check).
+
+    Keeps the stage tests hermetic: no real OpenD calls, no real DB writes and
+    no real waiting.
+    """
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(patch.object(sync_futu, "get_rate_limiter", return_value=limiter))
+        stack.enter_context(patch.object(sync_futu, "check_cancelled"))
+        stack.enter_context(_db_mock(cursor or _RecordingCursor()))
+        stack.enter_context(patch("psycopg2.extras.execute_values"))
+        if retries is not None:
+            stack.enter_context(
+                patch.object(sync_futu.config, "FUTU_RATE_LIMIT_MAX_RETRIES", retries))
+        if breaker is not None:
+            stack.enter_context(
+                patch.object(sync_futu.config, "FUTU_RATE_LIMIT_CIRCUIT_BREAKER", breaker))
+        yield
+
+
 class FutuDatesProvenanceTests(TestCase):
     """The earnings-dates upsert must carry Futu provenance."""
 
@@ -64,8 +121,6 @@ class FutuDatesProvenanceTests(TestCase):
               "pub_trading_day_str": "2026-07-30", "pub_type": 1}]
         )
         self.ctx.get_financials_earnings_price_history.return_value = (0, df)
-        self._src = MagicMock()
-        self._src.get_futu_symbols.return_value = ["AAPL.US"]
         self._cursor = _RecordingCursor()
         self._batch = []
         self._sql = ""
@@ -78,10 +133,9 @@ class FutuDatesProvenanceTests(TestCase):
                                side_effect=fake_execute_values)
 
     def test_dates_upsert_writes_futu_source(self):
-        with patch.object(sync_futu, "get_source", return_value=self._src), \
-             patch.object(sync_futu, "check_cancelled"), \
+        with patch.object(sync_futu, "check_cancelled"), \
              _db_mock(self._cursor), self._ev_patch:
-            sync_futu.sync_earnings_dates(self.ctx, 1)
+            sync_futu.sync_earnings_dates(self.ctx, 1, ["AAPL.US"])
 
         # The batch rows must carry ('futu', 'scheduled') as the last two fields.
         assert self._batch, "expected at least one upsert row"
@@ -107,15 +161,12 @@ class FutuActualsProvenanceTests(TestCase):
             (0, {"report_list": [{"fiscal_year": 2026, "financial_type": 2,
                                  "item_list": [{"field_id": 8002, "data": 123.0}]}]}),
         ]
-        self._src = MagicMock()
-        self._src.get_futu_symbols.return_value = ["AAPL.US"]
         self._cursor = _RecordingCursor()
 
     def test_actuals_updates_set_reported_and_futu_source(self):
-        with patch.object(sync_futu, "get_source", return_value=self._src), \
-             patch.object(sync_futu, "check_cancelled"), \
+        with patch.object(sync_futu, "check_cancelled"), \
              _db_mock(self._cursor):
-            sync_futu.sync_actuals(self.ctx, 1)
+            sync_futu.sync_actuals(self.ctx, 1, ["AAPL.US"])
 
         updates = [sql for sql, _ in self._cursor.executed
                    if sql.strip().startswith("UPDATE earnings")]
@@ -196,25 +247,22 @@ class FutuTimeoutIsolationTests(TestCase):
             return 0, df
 
         ctx.get_financials_earnings_price_history.side_effect = fetch
-        src = MagicMock()
-        src.get_futu_symbols.return_value = ["AAPL.US", "MSFT.US"]
         captured = {}
 
         def fake_execute_values(cur, sql, argslist, page_size=200):
             captured["batch"] = list(argslist)
 
-        with patch.object(sync_futu, "get_source", return_value=src), \
-             patch.object(sync_futu, "check_cancelled"), \
+        with patch.object(sync_futu, "check_cancelled"), \
              patch.object(sync_futu.config, "FUTU_DATES_TIMEOUT_SECONDS", timeout), \
              _db_mock(_RecordingCursor()), \
              patch("psycopg2.extras.execute_values", side_effect=fake_execute_values):
-            total, failures = sync_futu.sync_earnings_dates(ctx, 1)
-        return total, failures, captured.get("batch", [])
+            stats = sync_futu.sync_earnings_dates(ctx, 1, ["AAPL.US", "MSFT.US"])
+        return stats, captured.get("batch", [])
 
     def test_hanging_symbol_is_counted_and_loop_continues(self):
-        total, failures, batch = self._run_dates(hang_time=5, timeout=1)
-        assert failures == 1, "the wedged symbol must be counted as a failed symbol"
-        assert total == 1, "the remaining symbols must still be fetched in this batch"
+        stats, batch = self._run_dates(hang_time=5, timeout=1)
+        assert stats.failed_symbols == 1, "the wedged symbol must be counted as a failed symbol"
+        assert stats.total == 1, "the remaining symbols must still be fetched in this batch"
         assert [row[0] for row in batch] == ["MSFT"]
 
 
@@ -224,14 +272,14 @@ class FutuRunTerminalStateTests(TestCase):
     def _run_sync(self, *, dates_result, actuals_result, finished):
         ctx = MagicMock()
         src = MagicMock()
-        src.get_futu_symbols.return_value = ["AAPL.US"]
+        src.get_futu_symbols_with_skipped.return_value = (["AAPL.US"], [])
 
-        def dates(ctx_, run_id):
+        def dates(ctx_, run_id, symbols):
             if isinstance(dates_result, BaseException):
                 raise dates_result
             return dates_result
 
-        def actuals(ctx_, run_id):
+        def actuals(ctx_, run_id, symbols):
             if isinstance(actuals_result, BaseException):
                 raise actuals_result
             return actuals_result
@@ -250,8 +298,10 @@ class FutuRunTerminalStateTests(TestCase):
 
     def test_success_path_is_terminal(self):
         finished = []
-        assert self._run_sync(dates_result=(2, 0), actuals_result=(1, 0),
-                              finished=finished) == 42
+        assert self._run_sync(
+            dates_result=sync_futu.FutuStageStats(total=2),
+            actuals_result=sync_futu.FutuStageStats(total=1),
+            finished=finished) == 42
         assert finished[0] == "success"
         assert "running" not in finished
 
@@ -259,7 +309,7 @@ class FutuRunTerminalStateTests(TestCase):
         finished = []
         with self.assertRaises(RuntimeError):
             self._run_sync(dates_result=RuntimeError("boom"),
-                           actuals_result=(0, 0), finished=finished)
+                           actuals_result=sync_futu.FutuStageStats(), finished=finished)
         assert finished[0] == "failed"
         assert "running" not in finished
 
@@ -268,7 +318,7 @@ class FutuRunTerminalStateTests(TestCase):
         finished = []
         with self.assertRaises(KeyboardInterrupt):
             self._run_sync(dates_result=KeyboardInterrupt(),
-                           actuals_result=(0, 0), finished=finished)
+                           actuals_result=sync_futu.FutuStageStats(), finished=finished)
         assert finished == ["interrupted"], (
             "an unhandled BaseException must still force a terminal state"
         )
@@ -319,6 +369,230 @@ class FutuIdempotencyRecoveryTests(TestCase):
                                 (key,))
                     row = cur.fetchone() or {}
                     assert row.get("n") == 0, "self-test must not persist rows"
+
+
+class FutuRateLimiterTests(TestCase):
+    """Issue #49: OpenD calls must be paced, not fired as fast as possible."""
+
+    def test_calls_within_budget_do_not_wait(self):
+        clock = _FakeClock()
+        sleep = _RecordingSleep(clock)
+        limiter = _fake_limiter(clock, sleep, max_calls=3, window_seconds=30)
+        waited = [limiter.acquire() for _ in range(3)]
+        assert waited == [0.0, 0.0, 0.0]
+        assert sleep.slept == []
+
+    def test_exceeding_the_budget_waits_out_the_window(self):
+        clock = _FakeClock()
+        sleep = _RecordingSleep(clock)
+        limiter = _fake_limiter(clock, sleep, max_calls=3, window_seconds=30)
+        for _ in range(3):
+            limiter.acquire()
+        waited = limiter.acquire()
+        assert waited == 30.0, "the 4th call in the same window must wait"
+        assert sleep.slept == [30.0]
+
+    def test_budget_recovers_after_the_window_slides(self):
+        clock = _FakeClock()
+        sleep = _RecordingSleep(clock)
+        limiter = _fake_limiter(clock, sleep, max_calls=2, window_seconds=30)
+        limiter.acquire()
+        limiter.acquire()
+        clock.now += 30  # oldest calls leave the window
+        assert limiter.acquire() == 0.0
+        assert sleep.slept == []
+
+    def test_cool_down_clears_the_window(self):
+        clock = _FakeClock()
+        sleep = _RecordingSleep(clock)
+        limiter = _fake_limiter(clock, sleep, max_calls=2, window_seconds=30)
+        limiter.acquire()
+        assert limiter.cool_down() == 30.0
+        assert sleep.slept == [30.0]
+        # The window was spent when OpenD refused us, so it is empty afterwards.
+        assert limiter.acquire() == 0.0
+
+
+class FutuFailureClassificationTests(TestCase):
+    """Issue #49: a quota rejection, an unsupported instrument and a real
+    failure must not collapse into the same opaque ``ret=-1``."""
+
+    RATE_LIMIT_MSG = "获取财务报表频率太高，请求失败，每30秒最多30次。"
+
+    def _env(self, clock, sleep, *, retries=0, breaker=99):
+        return _stage_env(_fake_limiter(clock, sleep), retries=retries, breaker=breaker)
+
+    def test_provider_message_is_kept_in_the_log(self):
+        clock = _FakeClock()
+        stats = sync_futu.FutuStageStats()
+        with self.assertLogs("sync_futu", level="WARNING") as logs:
+            outcome, _ = sync_futu.futu_call(
+                "US.AAPL", "EPS", lambda: (-1, self.RATE_LIMIT_MSG),
+                _fake_limiter(clock, _RecordingSleep(clock)), stats,
+            )
+        assert outcome == sync_futu.OUTCOME_RATE_LIMITED
+        assert self.RATE_LIMIT_MSG in "\n".join(logs.output), (
+            "the provider's reason must survive into the logs (Issue #49)"
+        )
+
+    def test_rate_limited_call_is_retried_then_counted(self):
+        clock = _FakeClock()
+        sleep = _RecordingSleep(clock)
+        ctx = MagicMock()
+        ctx.get_financials_earnings_price_history.return_value = (-1, self.RATE_LIMIT_MSG)
+
+        with self._env(clock, sleep, retries=2), \
+             self.assertLogs("sync_futu", level="WARNING") as logs:
+            stats = sync_futu.sync_earnings_dates(ctx, 1, ["AAPL.US"])
+
+        assert ctx.get_financials_earnings_price_history.call_count == 3, (
+            "a quota rejection must be retried (1 call + FUTU_RATE_LIMIT_MAX_RETRIES)"
+        )
+        assert stats.retries == 2
+        assert stats.rate_limited_calls == 1
+        assert stats.rate_limited_symbols == 1
+        assert stats.failed_symbols == 0, "a quota rejection is not a symbol failure"
+        assert sleep.slept == [30.0, 30.0], "each rejection waits out one quota window"
+        assert self.RATE_LIMIT_MSG in "\n".join(logs.output)
+
+    def test_unsupported_symbol_is_not_retried_or_fatal(self):
+        clock = _FakeClock()
+        sleep = _RecordingSleep(clock)
+        ctx = MagicMock()
+        ctx.get_financials_earnings_price_history.return_value = (-1, "该接口仅支持正股")
+
+        with self._env(clock, sleep, retries=2), \
+             self.assertLogs("sync_futu", level="INFO") as logs:
+            stats = sync_futu.sync_earnings_dates(ctx, 1, ["SPY.US"])
+
+        assert ctx.get_financials_earnings_price_history.call_count == 1, (
+            "an unsupported instrument fails permanently — retrying wastes quota"
+        )
+        assert stats.unsupported_symbols == 1
+        assert stats.failed_symbols == 0
+        assert stats.rate_limited_calls == 0
+        assert sleep.slept == []
+        assert sync_futu.futu_audit_outcome(stats) == ("success", None), (
+            "structurally unsupported instruments must not fail the run"
+        )
+        assert "该接口仅支持正股" in "\n".join(logs.output)
+
+    def test_unknown_provider_error_stays_a_symbol_failure(self):
+        clock = _FakeClock()
+        sleep = _RecordingSleep(clock)
+        ctx = MagicMock()
+        ctx.get_financials_earnings_price_history.return_value = (-1, "some unknown OpenD error")
+
+        with self._env(clock, sleep, retries=2):
+            stats = sync_futu.sync_earnings_dates(ctx, 1, ["AAPL.US"])
+
+        assert stats.failed_symbols == 1
+        assert stats.unsupported_symbols == 0
+        assert stats.rate_limited_calls == 0
+        assert sync_futu.futu_audit_outcome(stats) == ("failed", "futu_symbol_fetch_failed")
+
+    def test_circuit_breaker_stops_hammering_the_provider(self):
+        clock = _FakeClock()
+        sleep = _RecordingSleep(clock)
+        symbols = [f"SYM{i}.US" for i in range(40)]
+        ctx = MagicMock()
+        ctx.get_financials_earnings_price_history.return_value = (-1, self.RATE_LIMIT_MSG)
+
+        with self._env(clock, sleep, retries=0, breaker=3):
+            stats = sync_futu.sync_earnings_dates(ctx, 1, symbols)
+
+        calls = ctx.get_financials_earnings_price_history.call_count
+        assert stats.rate_limited is True, "the breaker must be flagged in the stats"
+        assert stats.symbols_attempted == 3
+        assert calls == 3 and calls < len(symbols), (
+            "a persistent quota rejection must short-circuit the stage, not brute-force "
+            "every remaining symbol"
+        )
+
+    def test_actuals_symbols_are_counted_once_each(self):
+        clock = _FakeClock()
+        sleep = _RecordingSleep(clock)
+        ctx = MagicMock()
+        ctx.get_financials_statements.return_value = (-1, "该接口仅支持正股")
+
+        with self._env(clock, sleep):
+            stats = sync_futu.sync_actuals(ctx, 1, ["SPY.US"])
+
+        assert stats.total == 1
+        assert stats.unsupported_symbols == 1, "two rejected calls must not double-count the symbol"
+        assert sync_futu.futu_audit_outcome(stats) == ("success", None)
+
+
+class FutuAuditDetailsTests(TestCase):
+    """Issue #49: ``sync_runs.details`` must separate the failure kinds."""
+
+    def test_details_keep_historical_keys_and_add_classification(self):
+        date_stats = sync_futu.FutuStageStats(
+            total=3, failed_symbols=1, unsupported_symbols=2, rate_limited_calls=4, retries=8,
+        )
+        actual_stats = sync_futu.FutuStageStats(
+            total=9, unsupported_symbols=1, rate_limited_symbols=2,
+        )
+        details = sync_futu.futu_audit_details(date_stats, actual_stats, ["000651.SZ"])
+
+        assert details["actual_symbols"] == 9
+        assert details["date_failed_symbols"] == 1
+        assert details["actual_failed_symbols"] == 0
+        assert details["unsupported_symbols"] == 3
+        assert details["rate_limited_calls"] == 4
+        assert details["rate_limited_symbols"] == 2
+        assert details["rate_limit_retries"] == 8
+        assert details["rate_limited"] is False
+        assert details["skipped_symbols"] == 1
+
+    def test_rate_limit_outranks_symbol_failures(self):
+        stats = sync_futu.FutuStageStats(failed_symbols=7, rate_limited_calls=1)
+        assert sync_futu.futu_audit_outcome(stats) == ("failed", "futu_rate_limited")
+
+
+class FutuRateLimitAuditTests(TestCase):
+    """Issue #49 criterion 1: the audited run must report the provider refusal."""
+
+    def _run(self, date_stats, actual_stats, skipped=()):
+        finished = []
+        ctx = MagicMock()
+        src = MagicMock()
+        src.get_futu_symbols_with_skipped.return_value = (["AAPL.US"], list(skipped))
+
+        def fake_finish(run_id, **kwargs):
+            finished.append(kwargs)
+            return True
+
+        with patch.object(sync_futu, "get_source", return_value=src), \
+             patch("app.sync_audit.start_run", return_value=11), \
+             patch("app.sync_audit.finish_run", side_effect=fake_finish), \
+             patch("app.sync_audit.heartbeat"), \
+             patch.object(sync_futu, "sync_earnings_dates", return_value=date_stats), \
+             patch.object(sync_futu, "sync_actuals", return_value=actual_stats):
+            sync_futu.run_sync(ctx)
+        return finished
+
+    def test_rate_limited_run_is_audited_as_futu_rate_limited(self):
+        finished = self._run(
+            sync_futu.FutuStageStats(total=35, rate_limited_calls=12,
+                                     rate_limited_symbols=12, rate_limited=True, retries=24),
+            sync_futu.FutuStageStats(total=4, rate_limited_symbols=4),
+            skipped=["000651.SZ"],
+        )
+        assert finished[0]["status"] == "failed"
+        assert finished[0]["error_code"] == "futu_rate_limited"
+        assert finished[0]["details"]["rate_limited_calls"] == 12
+        assert finished[0]["details"]["rate_limited"] is True
+        assert finished[0]["details"]["skipped_symbols"] == 1
+
+    def test_unsupported_only_run_stays_successful(self):
+        finished = self._run(
+            sync_futu.FutuStageStats(total=0, unsupported_symbols=4),
+            sync_futu.FutuStageStats(total=5, unsupported_symbols=4),
+        )
+        assert finished[0]["status"] == "success"
+        assert finished[0]["error_code"] is None
+        assert finished[0]["details"]["unsupported_symbols"] == 8
 
 
 if __name__ == "__main__":

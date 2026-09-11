@@ -44,6 +44,19 @@ FUTU_PORT = int(os.getenv("FUTU_PORT", "11112"))
 # response must not be misread as a timeout.
 FUTU_DATES_TIMEOUT_SECONDS = int(os.getenv("FUTU_DATES_TIMEOUT_SECONDS", "15"))
 FUTU_ACTUALS_TIMEOUT_SECONDS = int(os.getenv("FUTU_ACTUALS_TIMEOUT_SECONDS", "20"))
+# OpenD pacing for scripts/sync_futu.py (Issue #49). OpenD rejects both
+# financials interfaces with "…频率太高，请求失败，每30秒最多30次。" once the
+# window budget is spent, and a full sync used to fire ~3 unpaced calls per
+# symbol and trip the quota within seconds. The defaults keep headroom under
+# the documented "30 calls / 30 s" limit; one limiter is shared by every Futu
+# call in the process, and a rejected call waits out a whole window before its
+# bounded retry.
+FUTU_MAX_CALLS_PER_30S = int(os.getenv("FUTU_MAX_CALLS_PER_30S", "28"))
+FUTU_RATE_LIMIT_WINDOW_SECONDS = float(os.getenv("FUTU_RATE_LIMIT_WINDOW_SECONDS", "30"))
+FUTU_RATE_LIMIT_MAX_RETRIES = int(os.getenv("FUTU_RATE_LIMIT_MAX_RETRIES", "2"))
+# Consecutive identical quota rejections after which a stage stops hammering
+# OpenD and reports the provider outage instead of per-symbol failures.
+FUTU_RATE_LIMIT_CIRCUIT_BREAKER = int(os.getenv("FUTU_RATE_LIMIT_CIRCUIT_BREAKER", "10"))
 
 # Longbridge CLI (optional - primary earnings data source)
 LONGBRIDGE_APP_KEY = os.getenv("LONGBRIDGE_APP_KEY", "")
