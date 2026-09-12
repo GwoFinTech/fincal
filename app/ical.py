@@ -2,7 +2,7 @@
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from . import config
+from . import config, fiscal
 
 
 _MARKET_TZ = {
@@ -107,17 +107,16 @@ def _event_uid(event: dict, report_date: date) -> str:
 
 
 def _authority_key(event: dict, report_date: date) -> tuple:
-    """Rank the row that should represent a UID group.
+    """Rank the row that should represent a fiscal period.
 
-    One fiscal period can appear as both a predicted and a confirmed row in the
-    same batch (defensive — ``mark_confirmed`` normally removes the predicted
-    row upstream).  The authoritative row is the confirmed (non-predicted) one;
-    ties break on the most recently updated, then the latest report date.
+    One fiscal period can appear as several ``earnings`` rows — a predicted row
+    next to a confirmed one, or two confirmed rows when the provider rescheduled
+    the event (Issue #50).  The ranking lives in :func:`app.fiscal.authority_key`
+    so iCal, the API, the export and the reconciliation script all pick the same
+    row; this wrapper only keeps the ``report_date`` argument the generator
+    already has at hand.
     """
-    predicted = 1 if event.get("is_predicted") else 0
-    ts = event.get("updated_at") or event.get("created_at")
-    ts_key = -ts.timestamp() if isinstance(ts, datetime) else 0
-    return (predicted, ts_key, -report_date.toordinal())
+    return fiscal.authority_key(event, report_date)
 
 
 def _dedupe_events(earnings: list[dict]) -> tuple[list[str], dict]:

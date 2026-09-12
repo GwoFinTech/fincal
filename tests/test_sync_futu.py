@@ -50,13 +50,23 @@ def _db_mock(cursor):
 
 
 class _RecordingCursor:
-    """Records every ``execute(sql, params)`` call for later assertions."""
+    """Records every ``execute(sql, params)`` call for later assertions.
+
+    ``fetchall`` returns an empty result set: the pre-upsert fiscal-period guard
+    (Issue #50, ``app.fiscal.reschedule_confirmed_rows``) asks for the period's
+    existing confirmed rows, and "none exist" is exactly the state under which
+    these tests assert the upsert SQL itself.
+    """
 
     def __init__(self):
         self.executed = []
+        self.rowcount = 0
 
     def execute(self, sql, params=None):
         self.executed.append((sql, params))
+
+    def fetchall(self):
+        return []
 
 
 class _FakeClock:

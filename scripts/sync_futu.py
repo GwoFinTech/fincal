@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.db import db_cursor
 from app import config
+from app import fiscal
 from app.symbol import normalize, to_futu_code
 from app.sync_audit import check_cancelled
 from app.watchlist import get_source
@@ -411,6 +412,60 @@ def futu_audit_details(date_stats: FutuStageStats, actual_stats: FutuStageStats,
     }
 
 
+def flush_date_batch(batch: list[tuple]) -> int:
+    """Upsert fetched Futu dates, one row per fiscal period (Issue #50).
+
+    The ``earnings`` unique key is ``(symbol, market, report_date, report_type)``
+    — the *display* date.  A provider that moves an announcement would therefore
+    be inserted as a second row for a fiscal period that already has one.  Two
+    guards keep the identity intact before the upsert:
+
+    * a single response carrying one period at two dates is collapsed to the
+      newest date (adjacent calendar windows overlap);
+    * the period's existing confirmed row is re-dated onto the incoming date
+      instead of gaining a twin.
+
+    Both live in ``app/fiscal.py`` so the Longbridge sync behaves identically.
+    """
+    from psycopg2.extras import execute_values
+
+    batch = fiscal.collapse_rows_by_period(
+        batch,
+        identity_of=lambda r: fiscal.fiscal_key_from_parts(r[0], r[1], r[5], r[6]),
+        date_of=lambda r: r[3],
+    )
+    if not batch:
+        return 0
+    with db_cursor() as cur:
+        for move in fiscal.reschedule_confirmed_rows(cur, batch):
+            logger.info(
+                "rescheduled %s.%s FY%s Q%s: %s → %s (row %s, Issue #50)",
+                move["symbol"], move["market"], move["fiscal_year"], move["fiscal_quarter"],
+                move["from"], move["to"], move["id"],
+            )
+        execute_values(
+            cur,
+            """INSERT INTO earnings (symbol, market, company_name, report_date, report_type,
+               fiscal_year, fiscal_quarter, before_after, date_source, date_status)
+            VALUES %s
+            ON CONFLICT (symbol, market, report_date, report_type)
+            DO UPDATE SET
+                fiscal_year = EXCLUDED.fiscal_year,
+                fiscal_quarter = EXCLUDED.fiscal_quarter,
+                before_after = COALESCE(EXCLUDED.before_after, earnings.before_after),
+                is_predicted = FALSE,
+                company_name = CASE WHEN earnings.company_name = '' THEN EXCLUDED.company_name ELSE earnings.company_name END,
+                date_source = 'futu',
+                date_status = CASE WHEN earnings.eps_actual IS NOT NULL OR earnings.revenue_actual IS NOT NULL THEN 'reported' ELSE 'scheduled' END,
+                updated_at = NOW()
+            """,
+            batch,
+            page_size=200,
+        )
+    logger.info(f"Flushed {len(batch)} earnings dates")
+    return len(batch)
+
+
 def sync_earnings_dates(ctx, run_id: int, symbols: list[str]) -> FutuStageStats:
     """Fetch earnings calendar dates from Futu, single shared context.
 
@@ -470,28 +525,7 @@ def sync_earnings_dates(ctx, run_id: int, symbols: list[str]) -> FutuStageStats:
 
     # Batch upsert all earnings dates
     if batch:
-        from psycopg2.extras import execute_values
-        with db_cursor() as cur:
-            execute_values(
-                cur,
-                """INSERT INTO earnings (symbol, market, company_name, report_date, report_type,
-                   fiscal_year, fiscal_quarter, before_after, date_source, date_status)
-                VALUES %s
-                ON CONFLICT (symbol, market, report_date, report_type)
-                DO UPDATE SET
-                    fiscal_year = EXCLUDED.fiscal_year,
-                    fiscal_quarter = EXCLUDED.fiscal_quarter,
-                    before_after = COALESCE(EXCLUDED.before_after, earnings.before_after),
-                    is_predicted = FALSE,
-                    company_name = CASE WHEN earnings.company_name = '' THEN EXCLUDED.company_name ELSE earnings.company_name END,
-                    date_source = 'futu',
-                    date_status = CASE WHEN earnings.eps_actual IS NOT NULL OR earnings.revenue_actual IS NOT NULL THEN 'reported' ELSE 'scheduled' END,
-                    updated_at = NOW()
-                """,
-                batch,
-                page_size=200,
-            )
-        logger.info(f"Flushed {len(batch)} earnings dates")
+        flush_date_batch(batch)
 
     logger.info(
         "Futu earnings dates: %s records; %s symbol failures "

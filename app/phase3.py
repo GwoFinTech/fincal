@@ -1,6 +1,8 @@
 """Pure Phase 3 earnings decision transformations with explicit unavailable states."""
 from decimal import Decimal
 
+from . import fiscal
+
 
 def as_decimal(value):
     try:
@@ -43,6 +45,29 @@ def _growth(current, prior):
     return None if current is None or prior in (None, Decimal("0")) else (current - prior) / abs(prior)
 
 
+def _period_lookup(rows, earning_id):
+    """Map each fiscal period to the row that represents it.
+
+    Duplicate rows for one period used to silently overwrite each other in
+    ``ORDER BY report_date`` order, so growth could be computed from a different
+    row than the one the detail panel showed (Issue #50).  The period the user
+    opened always keeps the row the user opened; every other period resolves to
+    the same authoritative row the calendar/API/iCal show.
+    """
+    lookup: dict[tuple, dict] = {}
+    for row in rows:
+        fy, fq = row.get("fiscal_year"), row.get("fiscal_quarter")
+        if fy is None or fq is None:
+            continue
+        key = (fy, fq)
+        current = lookup.get(key)
+        if current is None or row.get("id") == earning_id:
+            lookup[key] = row
+        elif current.get("id") != earning_id and fiscal.authority_key(row) < fiscal.authority_key(current):
+            lookup[key] = row
+    return lookup
+
+
 def build_decision_metrics(rows, earning_id):
     """Calculate actual-only growth and contiguous EPS beat/miss streak for one earning."""
     by_id = {row.get("id"): row for row in rows}
@@ -51,7 +76,7 @@ def build_decision_metrics(rows, earning_id):
     if not current or not current.get("fiscal_year") or not current.get("fiscal_quarter"):
         return {"actual_growth": unavailable, "beat_miss_streak": {"kind": "unavailable", "count": 0}, "price_reaction": {"status": "unavailable", "reason": "no_reliable_provider_configured", "source": None}}
     fy, fq = int(current["fiscal_year"]), int(current["fiscal_quarter"])
-    lookup = {(r.get("fiscal_year"), r.get("fiscal_quarter")): r for r in rows}
+    lookup = _period_lookup(rows, earning_id)
     yoy = lookup.get((fy - 1, fq))
     qoq = lookup.get((fy - 1, 4) if fq == 1 else (fy, fq - 1))
     growth = {
@@ -60,7 +85,9 @@ def build_decision_metrics(rows, earning_id):
         "revenue_yoy": _growth(current.get("revenue_actual"), yoy.get("revenue_actual") if yoy else None),
         "revenue_qoq": _growth(current.get("revenue_actual"), qoq.get("revenue_actual") if qoq else None),
     }
-    ordered = sorted(rows, key=lambda row: str(row.get("report_date") or ""), reverse=True)
+    # One row per fiscal period: a duplicated period must not be counted twice in
+    # the streak, and must not hide the streak behind a staleness mismatch.
+    ordered = sorted(lookup.values(), key=lambda row: str(row.get("report_date") or ""), reverse=True)
     kind, count = None, 0
     for row in ordered:
         actual, estimate = as_decimal(row.get("eps_actual")), as_decimal(row.get("eps_estimate"))

@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.db import db_cursor
 from app.symbol import from_lb_counter_id, normalize
 from app.sync_audit import check_cancelled
+from app import fiscal
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -153,10 +154,31 @@ def dedupe_batch(rows: list[tuple]) -> list[tuple]:
 
 
 def flush_batch(cur, rows: list[tuple]):
-    """Batch upsert using execute_values."""
+    """Batch upsert using execute_values.
+
+    Two Issue #50 guards run before the upsert, because the table's unique key is
+    the report date — not the fiscal period:
+
+    * a provider response that carries one fiscal period at two dates is
+      collapsed to the newest date (adjacent calendar windows overlap);
+    * a period that already has a confirmed row on a different date is re-dated
+      onto the incoming one instead of being inserted as a second row.
+    """
     rows = dedupe_batch(rows)
+    rows = fiscal.collapse_rows_by_period(
+        rows,
+        identity_of=lambda r: fiscal.fiscal_key_from_parts(r[0], r[1], r[5], r[6]),
+        date_of=lambda r: r[3],
+    )
     if not rows:
         return
+    moves = fiscal.reschedule_confirmed_rows(cur, rows)
+    for move in moves:
+        logger.info(
+            "rescheduled %s.%s FY%s Q%s: %s → %s (row %s, Issue #50)",
+            move["symbol"], move["market"], move["fiscal_year"], move["fiscal_quarter"],
+            move["from"], move["to"], move["id"],
+        )
     from psycopg2.extras import execute_values
     execute_values(
         cur,

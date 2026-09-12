@@ -1,8 +1,11 @@
 import psycopg2
 import psycopg2.extras
 import psycopg2.pool
+import logging
 from contextlib import contextmanager
 from . import config
+
+logger = logging.getLogger(__name__)
 
 _pool = None
 
@@ -249,3 +252,58 @@ def init_db():
             )
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_admin_audit_log_created_at ON admin_audit_log(created_at DESC)")
+
+    ensure_fiscal_identity_index()
+
+
+def ensure_fiscal_identity_index() -> bool:
+    """Enforce one confirmed row per fiscal period (Issue #50).
+
+    ``UNIQUE(symbol, market, report_date, report_type)`` keys a row by its
+    *display* date, so a provider that moves an announcement (or a second
+    provider with a different date) inserts a duplicate row for the same fiscal
+    period — 439 confirmed duplicate groups in production, 913 rows.  The fiscal
+    identity ``(symbol, market, fiscal_year, fiscal_quarter)`` is the real key;
+    a partial unique index over confirmed rows makes a recurrence impossible.
+
+    The index can only be built once the historical duplicates are gone, so the
+    creation is attempted *after* the schema body and skipped (with a warning
+    naming the reconciliation script) while duplicates remain — otherwise
+    ``init_db()`` would abort at startup on any pre-existing installation.  The
+    check runs in its own transaction, so a failed build cannot poison the
+    schema transaction above.  It converges automatically: after
+    ``scripts/reconcile_fiscal_rows.py --apply`` the next startup creates it.
+    """
+    from psycopg2 import errors
+
+    try:
+        with db_cursor() as cur:
+            cur.execute("""
+                SELECT count(*) AS groups FROM (
+                    SELECT 1 FROM earnings
+                    WHERE is_predicted = FALSE AND fiscal_year IS NOT NULL AND fiscal_quarter IS NOT NULL
+                    GROUP BY symbol, market, fiscal_year, fiscal_quarter
+                    HAVING count(*) > 1
+                ) duplicated_periods
+            """)
+            row = cur.fetchone()
+            duplicates = row["groups"] if row else 0
+            if duplicates:
+                logger.warning(
+                    "fiscal identity index not created: %d confirmed duplicate "
+                    "fiscal period(s) still present — run "
+                    "scripts/reconcile_fiscal_rows.py (dry-run first, then --apply) "
+                    "to merge them (Issue #50)",
+                    duplicates,
+                )
+                return False
+            cur.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_earnings_fiscal_identity "
+                "ON earnings(symbol, market, fiscal_year, fiscal_quarter) "
+                "WHERE is_predicted = FALSE AND fiscal_year IS NOT NULL AND fiscal_quarter IS NOT NULL"
+            )
+        logger.info("fiscal identity index present (idx_earnings_fiscal_identity)")
+        return True
+    except (errors.UniqueViolation, errors.DuplicateObject) as exc:
+        logger.warning("fiscal identity index not created this startup: %s", exc)
+        return False

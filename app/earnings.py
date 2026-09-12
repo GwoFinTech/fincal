@@ -64,7 +64,13 @@ def fetch_earnings_from_db(
             WHERE {where} ORDER BY e.report_date, e.market, e.symbol""",
             params,
         )
-        return [dict(row) for row in cur.fetchall()]
+        rows = [dict(row) for row in cur.fetchall()]
+
+    # One fiscal period is one event: collapsing here (the single read entry point
+    # of the API, the CSV/JSON export and the iCal feed) keeps the three outlets
+    # in agreement instead of letting each of them pick its own row (Issue #50).
+    from . import fiscal
+    return fiscal.collapse_fiscal_duplicates(rows)
 
 
 def seed_earnings_if_empty():

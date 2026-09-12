@@ -152,9 +152,9 @@ def predict_for_symbol(symbol: str, market: str) -> int:
                 VALUES (%s, %s, %s, %s, 'Q', %s, %s, %s, TRUE, 'algorithm', 'predicted')
                 ON CONFLICT (symbol, market, report_date, report_type)
                 DO UPDATE SET
-                    is_predicted = TRUE,
-                    date_source = 'algorithm',
-                    date_status = 'predicted',
+                    is_predicted = CASE WHEN earnings.date_source = 'algorithm' THEN TRUE ELSE earnings.is_predicted END,
+                    date_source = CASE WHEN earnings.date_source = 'algorithm' THEN 'algorithm' ELSE earnings.date_source END,
+                    date_status = CASE WHEN earnings.date_source = 'algorithm' THEN 'predicted' ELSE earnings.date_status END,
                     before_after = COALESCE(EXCLUDED.before_after, earnings.before_after),
                     company_name = CASE WHEN earnings.company_name = '' THEN EXCLUDED.company_name ELSE earnings.company_name END,
                     updated_at = NOW()

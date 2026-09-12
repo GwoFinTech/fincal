@@ -251,7 +251,7 @@
               <span v-if="cell.earnings.length > 0" class="text-[10px]" style="color:var(--text-muted);">{{ cell.earnings.length }}</span>
             </div>
             <div class="cal-scroll space-y-0.5" style="max-height: 72px;">
-              <div v-for="e in cell.earnings.slice(0, 4)" :key="e.symbol+e.market"
+              <div v-for="e in cell.earnings.slice(0, 4)" :key="e.symbol+e.market+e.report_date"
                    class="badge cursor-pointer" :class="[('badge-' + e.market), { 'badge-mine': isMine(e), 'badge-predicted': e.is_predicted }]"
                    style="font-size:10px;padding:1px 5px;"
                    :title="e.company_name + (e.is_predicted ? ' (预测)' : '')"
@@ -392,7 +392,7 @@
           <h3 class="text-[15px] font-semibold text-zinc-100">{{ selectedDay.date.toLocaleDateString('zh-CN', { weekday: 'long', month: 'long', day: 'numeric' }) }}</h3>
         </div>
         <div class="space-y-1.5">
-          <div v-for="e in selectedDay.earnings" :key="e.symbol+e.market"
+          <div v-for="e in selectedDay.earnings" :key="e.symbol+e.market+e.report_date"
                class="flex items-center gap-2.5 p-2.5 rounded-lg cursor-pointer transition"
                style="background:var(--surface-raised);"
                @mouseenter="$event.target.style.background='var(--border)'" @mouseleave="$event.target.style.background='var(--surface-raised)'"
