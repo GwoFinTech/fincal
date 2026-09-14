@@ -582,9 +582,11 @@ def sync_actuals(ctx, run_id: int, symbols: list[str]) -> FutuStageStats:
                         with db_cursor() as cur:
                             cur.execute(
                                 """UPDATE earnings SET eps_actual = %s, date_status = 'reported',
-                                   actual_source = 'futu', updated_at = NOW()
+                                   actual_source = 'futu', actual_as_of = NOW(), updated_at = NOW()
                                 WHERE symbol = %s AND market = %s AND fiscal_year = %s
-                                AND fiscal_quarter = %s AND (eps_actual IS NULL OR ABS(eps_actual) > 1000)
+                                AND fiscal_quarter = %s
+                                AND COALESCE(actual_source, 'unknown') IN
+                                    ('unknown', 'algorithm', 'longbridge', 'futu')
                                 """,
                                 (eps_val, symbol, market, fy, fq),
                             )
@@ -618,9 +620,11 @@ def sync_actuals(ctx, run_id: int, symbols: list[str]) -> FutuStageStats:
                         with db_cursor() as cur:
                             cur.execute(
                                 """UPDATE earnings SET revenue_actual = %s, date_status = 'reported',
-                                   actual_source = 'futu', updated_at = NOW()
+                                   actual_source = 'futu', actual_as_of = NOW(), updated_at = NOW()
                                 WHERE symbol = %s AND market = %s AND fiscal_year = %s
-                                AND fiscal_quarter = %s AND revenue_actual IS NULL
+                                AND fiscal_quarter = %s
+                                AND COALESCE(actual_source, 'unknown') IN
+                                    ('unknown', 'algorithm', 'longbridge', 'futu')
                                 """,
                                 (rev_val, symbol, market, fy, fq),
                             )

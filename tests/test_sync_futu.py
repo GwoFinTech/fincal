@@ -189,6 +189,22 @@ class FutuActualsProvenanceTests(TestCase):
                 "actuals update must attribute the actuals to Futu"
             )
 
+    def test_futu_updates_higher_priority_actuals_and_records_timestamp(self):
+        """Issue #45: Futu must replace Longbridge actuals, not only fill NULL."""
+        with patch.object(sync_futu, "check_cancelled"), \
+             _db_mock(self._cursor):
+            sync_futu.sync_actuals(self.ctx, 1, ["AAPL.US"])
+
+        updates = [sql for sql, _ in self._cursor.executed
+                   if sql.strip().startswith("UPDATE earnings")]
+        assert len(updates) >= 2
+        for sql in updates:
+            assert "actual_as_of = NOW()" in sql
+            assert "COALESCE(actual_source, 'unknown') IN" in sql
+            assert "'longbridge'" in sql
+            assert "IS NULL" not in sql
+            assert "ABS(" not in sql
+
 
 class FutuWatchdogTests(TestCase):
     """Issue #48: an expired watchdog must be catchable, not fatal."""
