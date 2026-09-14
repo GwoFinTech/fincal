@@ -176,9 +176,52 @@ def init_db():
             source TEXT NOT NULL DEFAULT 'longbridge', checked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             payload JSONB NOT NULL DEFAULT '{}'::jsonb, UNIQUE(symbol, market, source)
         )""")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_watchlist_user ON watchlist(user_id)")
+        # Converge legacy US watchlist rows written before normalize() stripped
+        # market decorations. Rank all rows by their canonical key first so the
+        # update cannot collide with an already-canonical row.
         cur.execute("""
-            CREATE INDEX IF NOT EXISTS idx_watchlist_user ON watchlist(user_id);
+            WITH normalized AS (
+                SELECT id, user_id, market,
+                       CASE
+                           WHEN UPPER(symbol) LIKE 'US.%' THEN SUBSTRING(symbol FROM 4)
+                           WHEN UPPER(symbol) LIKE '%.US' THEN LEFT(symbol, LENGTH(symbol) - 3)
+                           ELSE UPPER(symbol)
+                       END AS canonical_symbol
+                FROM watchlist
+                WHERE UPPER(market) = 'US'
+            ), ranked AS (
+                SELECT id,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY user_id, UPPER(market), canonical_symbol
+                           ORDER BY id
+                       ) AS duplicate_rank
+                FROM normalized
+            )
+            DELETE FROM watchlist w
+            USING ranked r
+            WHERE w.id = r.id AND r.duplicate_rank > 1
         """)
+        removed_legacy_duplicates = cur.rowcount
+        cur.execute("""
+            UPDATE watchlist
+            SET symbol = CASE
+                    WHEN UPPER(symbol) LIKE 'US.%' THEN SUBSTRING(UPPER(symbol) FROM 4)
+                    WHEN UPPER(symbol) LIKE '%.US' THEN LEFT(UPPER(symbol), LENGTH(symbol) - 3)
+                    ELSE UPPER(symbol)
+                END,
+                market = 'US'
+            WHERE UPPER(market) = 'US'
+              AND (UPPER(symbol) LIKE 'US.%' OR UPPER(symbol) LIKE '%.US'
+                   OR market <> 'US' OR symbol <> UPPER(symbol))
+        """)
+        normalized_legacy_rows = cur.rowcount
+        if removed_legacy_duplicates or normalized_legacy_rows:
+            logger.info(
+                "normalized legacy US watchlist rows: removed=%d updated=%d",
+                removed_legacy_duplicates, normalized_legacy_rows,
+            )
+
         cur.execute("""
             CREATE TABLE IF NOT EXISTS managed_watchlist (
                 id SERIAL PRIMARY KEY,

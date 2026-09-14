@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from app.symbol import normalize  # noqa: E402
+from app.admin_watchlist import normalize_managed_symbol  # noqa: E402
 from app.watchlist.base import WatchlistSource  # noqa: E402
 
 
@@ -78,3 +79,17 @@ def test_normalize_hk_still_pads_and_keeps_suffix():
     assert normalize("700.HK", "HK") == "0700.HK"
     assert normalize("00700", "HK") == "0700.HK"
     assert normalize("9988.HK", "HK") == "9988.HK"
+
+
+def test_managed_watchlist_uses_same_us_normalization():
+    assert normalize_managed_symbol("AAPL.US", "US") == ("AAPL", "US")
+    assert normalize_managed_symbol("US.AAPL", "US") == ("AAPL", "US")
+
+
+def test_legacy_watchlist_migration_is_present():
+    """Guard the startup migration that converges pre-existing decorated rows."""
+    from app import db
+    source = db.init_db.__code__.co_consts
+    sql = " ".join(str(value) for value in source)
+    assert "canonical_symbol" in sql
+    assert "ROW_NUMBER" in sql

@@ -17,6 +17,4 @@ def normalize_managed_symbol(symbol: str, market: str) -> tuple[str, str]:
     value = symbol.strip().upper()
     if not value:
         raise ValueError("symbol_required")
-    if market == "US":
-        value = value.removesuffix(".US")
     return normalize(value, market), market
