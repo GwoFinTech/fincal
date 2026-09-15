@@ -7,19 +7,61 @@ import json
 import logging
 import sys
 import os
+from dataclasses import dataclass
 from datetime import date, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.db import db_cursor
 from app.symbol import from_lb_counter_id, normalize
-from app.sync_audit import check_cancelled
+from app.sync_audit import check_cancelled, SyncCancelledError
+from app.sync_quality import SyncQuality
 from app import fiscal
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 BATCH_SIZE = 200
+
+
+@dataclass
+class FlushStats:
+    """Outcome of one batch upsert (Issue #52).
+
+    ``rows`` is what the batch actually committed; ``moves`` are the fiscal
+    periods re-dated onto the provider's date, ``skipped`` the periods whose
+    provider date was already owned by another row (a data conflict to
+    reconcile, not a failure).
+    """
+
+    rows: int = 0
+    moves: int = 0
+    skipped: int = 0
+
+
+@dataclass
+class SyncStats:
+    """Entry counts for one Longbridge run.
+
+    The counts are accumulated as batches commit, so a run that dies mid-way —
+    or loses single batches to a data conflict — still reports what it really
+    wrote.  Before Issue #52 the failure path hard-coded ``fetched=0,
+    written=0`` and recorded ~0 for a run that had already committed ~10.8k rows.
+    """
+
+    fetched: int = 0
+    written: int = 0
+    rescheduled: int = 0
+    skipped: int = 0
+    failed_batches: int = 0
+
+    def quality(self) -> SyncQuality:
+        return SyncQuality(
+            fetched=self.fetched,
+            written=self.written,
+            skipped=self.skipped,
+            failed=self.failed_batches,
+        )
 
 
 def next_calendar_cursor(api_next_date: str, last_report_date: str, current_start: str) -> str | None:
@@ -153,7 +195,7 @@ def dedupe_batch(rows: list[tuple]) -> list[tuple]:
     return list(unique.values())
 
 
-def flush_batch(cur, rows: list[tuple]):
+def flush_batch(cur, rows: list[tuple]) -> FlushStats:
     """Batch upsert using execute_values.
 
     Two Issue #50 guards run before the upsert, because the table's unique key is
@@ -163,6 +205,14 @@ def flush_batch(cur, rows: list[tuple]):
       collapsed to the newest date (adjacent calendar windows overlap);
     * a period that already has a confirmed row on a different date is re-dated
       onto the incoming one instead of being inserted as a second row.
+
+    Issue #52: the re-dating step can be impossible (another fiscal period, or a
+    prediction, already owns the provider's date).  Those periods are reported
+    back in ``FlushStats`` instead of aborting the batch, and the upsert below
+    no longer rewrites an existing row's ``fiscal_year``/``fiscal_quarter`` —
+    the fiscal period is the row's persistent identity, so letting a provider
+    candidate of a *different* period overwrite it would re-create exactly the
+    duplicate-period disease #50 removed.
     """
     rows = dedupe_batch(rows)
     rows = fiscal.collapse_rows_by_period(
@@ -171,9 +221,9 @@ def flush_batch(cur, rows: list[tuple]):
         date_of=lambda r: r[3],
     )
     if not rows:
-        return
-    moves = fiscal.reschedule_confirmed_rows(cur, rows)
-    for move in moves:
+        return FlushStats()
+    outcome = fiscal.reschedule_confirmed_rows(cur, rows)
+    for move in outcome.moves:
         logger.info(
             "rescheduled %s.%s FY%s Q%s: %s → %s (row %s, Issue #50)",
             move["symbol"], move["market"], move["fiscal_year"], move["fiscal_quarter"],
@@ -189,8 +239,8 @@ def flush_batch(cur, rows: list[tuple]):
         ON CONFLICT (symbol, market, report_date, report_type)
         DO UPDATE SET
             company_name = EXCLUDED.company_name,
-            fiscal_year = EXCLUDED.fiscal_year,
-            fiscal_quarter = EXCLUDED.fiscal_quarter,
+            fiscal_year = CASE WHEN earnings.fiscal_year IS NULL THEN EXCLUDED.fiscal_year ELSE earnings.fiscal_year END,
+            fiscal_quarter = CASE WHEN earnings.fiscal_quarter IS NULL THEN EXCLUDED.fiscal_quarter ELSE earnings.fiscal_quarter END,
             eps_estimate = COALESCE(EXCLUDED.eps_estimate, earnings.eps_estimate),
             eps_actual = COALESCE(EXCLUDED.eps_actual, earnings.eps_actual),
             revenue_estimate = COALESCE(EXCLUDED.revenue_estimate, earnings.revenue_estimate),
@@ -215,19 +265,71 @@ def flush_batch(cur, rows: list[tuple]):
         SELECT e.id, 'longbridge', e.eps_estimate, e.revenue_estimate, '{"endpoint":"finance-calendar"}'::jsonb
         FROM earnings e JOIN (VALUES %s) AS v(symbol,market,report_date) ON (e.symbol,e.market,e.report_date)=(v.symbol,v.market,(v.report_date)::date)
         WHERE e.eps_estimate IS NOT NULL OR e.revenue_estimate IS NOT NULL""", keys)
+    return FlushStats(rows=len(rows), moves=len(outcome.moves), skipped=len(outcome.skipped))
 
 
-def sync_earnings(run_id: int) -> int:
+def _flush_batch(run_stats: SyncStats, batch: list[tuple], label: str) -> None:
+    """Commit one batch, isolating its failure from the rest of the run.
+
+    Issue #52: one unmovable row (a data conflict inside a 200-row batch) used to
+    raise out of ``flush_batch`` and abort the whole run — killing the Longbridge
+    stage, the remaining pages and every later stage of ``sync_all.sh``.  A batch
+    that still fails (e.g. the database rejected something unforeseen) is counted
+    and logged, then the run continues with the next batch so a single bad batch
+    costs 200 records instead of the whole calendar.
+    """
+    try:
+        with db_cursor() as cur:
+            flushed = flush_batch(cur, batch)
+    except SyncCancelledError:
+        raise
+    except Exception as exc:
+        run_stats.failed_batches += 1
+        logger.error(
+            "  batch failed %s (%d records, fetched: %d, written: %d): %s",
+            label, len(batch), run_stats.fetched, run_stats.written, exc,
+        )
+        return
+    run_stats.written += flushed.rows
+    run_stats.rescheduled += flushed.moves
+    run_stats.skipped += flushed.skipped
+    logger.info(
+        "  Flushed %d records (written: %d, fetched: %d, skipped: %d)",
+        flushed.rows, run_stats.written, run_stats.fetched, run_stats.skipped,
+    )
+
+
+def run_terminal_state(stats: SyncStats) -> tuple[str, str | None]:
+    """Terminal ``sync_runs`` status/error_code for a finished Longbridge run.
+
+    Issue #52: batch-level isolation means a run can finish *without* raising and
+    still have written nothing (every batch failed).  Such a run must not be
+    recorded as ``success``.  A run where only some batches failed stays
+    ``success`` with ``details.status='partial'`` (see :meth:`SyncStats.quality`)
+    so the remaining stages of ``sync_all.sh`` still run.
+    """
+    if stats.failed_batches and stats.written == 0:
+        return ("failed", "longbridge_batch_failed")
+    return ("success", None)
+
+
+def sync_earnings(run_id: int, stats: SyncStats | None = None) -> SyncStats:
     """Full sync with wide date range, batched inserts.
 
     ``run_id`` is polled at each market/batch checkpoint so an admin cancel
     stops the job promptly instead of burning the full API budget (Issue #28).
+
+    Returns the run's :class:`SyncStats`: what was fetched, what each committed
+    batch actually wrote, and the reschedule conflicts the identity guards
+    skipped (Issue #52) — so the audit row reflects the run instead of a
+    hard-coded zero.  ``stats`` may be supplied by the caller to keep the
+    counters of a run that ends in an exception.
     """
     today = date.today()
     start = (today - timedelta(days=180)).isoformat()
     end = (today + timedelta(days=365)).isoformat()
 
-    total = 0
+    run_stats = stats if stats is not None else SyncStats()
 
     for market in ["US", "HK"]:
         check_cancelled(run_id)
@@ -290,24 +392,25 @@ def sync_earnings(run_id: int) -> int:
                     kv.get("revenue_estimate"), kv.get("revenue_actual"),
                     date_type,
                 ))
-                total += 1
+                run_stats.fetched += 1
 
                 # Flush when batch is full
                 if len(batch) >= BATCH_SIZE:
-                    with db_cursor() as cur:
-                        flush_batch(cur, batch)
-                    logger.info(f"  Flushed {len(batch)} records (total: {total})")
+                    _flush_batch(run_stats, batch, f"{market} page batch")
                     batch = []
                     check_cancelled(run_id)
 
         # Flush remaining
         if batch:
-            with db_cursor() as cur:
-                flush_batch(cur, batch)
-            logger.info(f"  Flushed final {len(batch)} records")
+            _flush_batch(run_stats, batch, f"{market} final batch")
 
-    logger.info(f"=== Sync complete: {total} records processed ===")
-    return total
+    logger.info(
+        "=== Sync complete: %d records fetched, %d written, %d rescheduled, "
+        "%d reschedule conflicts, %d failed batches ===",
+        run_stats.fetched, run_stats.written, run_stats.rescheduled,
+        run_stats.skipped, run_stats.failed_batches,
+    )
+    return run_stats
 
 
 if __name__ == "__main__":
@@ -316,7 +419,6 @@ if __name__ == "__main__":
         start_run, finish_run, heartbeat, advisory_lock,
         SyncCancelledError, LOCK_LONGBRIDGE_EARNINGS,
     )
-    from app.sync_quality import SyncQuality
     init_db()
     with advisory_lock(LOCK_LONGBRIDGE_EARNINGS) as acquired:
         if not acquired:
@@ -328,18 +430,42 @@ if __name__ == "__main__":
         if run_id is None:
             logger.info("longbridge earnings sync already running, skipping")
             sys.exit(0)
+        run_stats = SyncStats()
         try:
-            total = sync_earnings(run_id)
-            quality = SyncQuality(fetched=total, written=total)
-            finish_run(run_id, status="success", record_count=total,
-                       details=quality.to_dict())
+            sync_earnings(run_id, run_stats)
+            status, error_code = run_terminal_state(run_stats)
+            finish_run(run_id, status=status, error_code=error_code,
+                       record_count=run_stats.written,
+                       details=run_stats.quality().to_dict())
+            if status == "failed":
+                # Every batch died: the stage is recorded as failed even though no
+                # exception escaped sync_earnings, while the exit code stays 0 so
+                # sync_all.sh still runs the Futu/prediction stages (Issue #52) —
+                # one broken stage must not cost the whole weekly refresh.
+                logger.error(
+                    "longbridge earnings sync wrote nothing (%d failed batch(es))",
+                    run_stats.failed_batches,
+                )
+            elif run_stats.failed_batches:
+                # A partial run is not a green run: the details carry
+                # status='partial' (SyncQuality.classify) for the admin.
+                logger.warning(
+                    "longbridge earnings sync finished with %d failed batch(es): "
+                    "%d written, %d skipped",
+                    run_stats.failed_batches, run_stats.written, run_stats.skipped,
+                )
         except SyncCancelledError:
             # Admin cancelled this run; keep the terminal 'cancelled' state.
             finish_run(run_id, status="cancelled", error_code="cancelled_by_admin")
             logger.warning("longbridge earnings sync cancelled by admin; stopping")
             sys.exit(1)
-        except Exception as exc:
-            quality = SyncQuality(fetched=0, written=0, failed=1)
+        except Exception:
+            # Report what the run did before it died.  Issue #52's incident wrote
+            # ~10.8k rows and recorded ``fetched:0, written:0`` — the counters now
+            # follow the batches that actually committed, so a mid-run failure
+            # stays auditable instead of looking like a no-op.
+            run_stats.failed_batches = max(run_stats.failed_batches, 1)
             finish_run(run_id, status="failed", error_code="longbridge_sync_failed",
-                       details=quality.to_dict())
+                       record_count=run_stats.written,
+                       details=run_stats.quality().to_dict())
             raise

@@ -25,10 +25,18 @@ picking the value is a product decision (Issue #50 risk section — the source
 priority alone would promote suspicious Futu magnitudes).  The read paths
 therefore only collapse rows and never merge conflicting values; the
 reconciliation script preserves every dropped value in a backup table.
+
+Issue #52 hardening: ``reschedule_confirmed_rows`` moves a period's row onto the
+provider's new date, but the table's unique key is the *display* key
+``(symbol, market, report_date, report_type)``, which a **different** fiscal
+period (or a predicted row) may already own.  Each move is therefore validated
+against that natural key and wrapped in a savepoint, so one unmovable row can
+never abort a whole sync run.
 """
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from datetime import date, datetime
 
 logger = logging.getLogger(__name__)
@@ -196,8 +204,51 @@ def _identity_query() -> str:
     )
 
 
+#: Savepoint guarding a single reschedule UPDATE (Issue #52).
+_RESCHEDULE_SAVEPOINT = "fincal_reschedule"
+
+
+@dataclass
+class RescheduleOutcome:
+    """What one :func:`reschedule_confirmed_rows` pass changed and left alone.
+
+    ``moves`` are the rows that were re-dated onto the provider's date;
+    ``skipped`` records the periods that could **not** be re-dated because
+    another row already owns the target
+    ``(symbol, market, report_date, report_type)`` key.  A skip is a data
+    conflict to be logged/reconciled, not a failure: before Issue #52 the
+    corresponding ``UPDATE`` raised ``UniqueViolation`` and aborted the synced
+    run after ~10.8k of ~17.8k rows.
+    """
+
+    moves: list[dict] = field(default_factory=list)
+    skipped: list[dict] = field(default_factory=list)
+
+
+def _target_holder(cur, symbol, market, new_date, report_type) -> dict | None:
+    """Return the row already occupying a natural key, whoever it belongs to.
+
+    ``earnings`` is unique on ``(symbol, market, report_date, report_type)`` —
+    the *display* key — so the occupant decides whether a date move is possible
+    at all.  Unlike :func:`_identity_query` this query deliberately filters
+    neither by fiscal period (a row of another quarter is exactly the collision
+    in Issue #52) nor by ``is_predicted`` (a prediction holds the same unique
+    key and would raise just the same).
+    """
+    cur.execute(
+        "SELECT e.id, e.fiscal_year, e.fiscal_quarter, e.is_predicted"
+        " FROM earnings e"
+        " WHERE e.symbol = %s AND e.market = %s AND e.report_date = %s"
+        " AND e.report_type = %s"
+        " LIMIT 1",
+        (symbol, market, new_date, report_type),
+    )
+    row = cur.fetchone()
+    return dict(row) if row else None
+
+
 def reschedule_confirmed_rows(cur, rows, *, symbol=0, market=1, report_date=3,
-                              report_type=4, fiscal_year=5, fiscal_quarter=6) -> list[dict]:
+                              report_type=4, fiscal_year=5, fiscal_quarter=6) -> RescheduleOutcome:
     """Move each fiscal period's confirmed row onto the provider's new date.
 
     ``rows`` are the raw provider tuples about to be upserted (the default
@@ -208,11 +259,20 @@ def reschedule_confirmed_rows(cur, rows, *, symbol=0, market=1, report_date=3,
     Without this step a rescheduled event is *inserted* as a second row, because
     the table's unique key is the report date.  The row chosen to move is the one
     :func:`authority_key` already shows for that period, so the visible event
-    follows the provider instead of gaining a twin.  Returns the moves performed
-    (for logging/audit); no-op when the period already sits on the new date, or
-    when another row already occupies it (then the caller's ``ON CONFLICT``
-    merge handles it).
+    follows the provider instead of gaining a twin.
+
+    A move is issued only while the target natural key is free: the unique
+    constraint is ``(symbol, market, report_date, report_type)``, while the
+    period grouping below is ``(symbol, market, fiscal_year, fiscal_quarter)``,
+    so another quarter's row (or a prediction) may already sit on the provider's
+    date — updating onto it raised ``UniqueViolation`` and killed the run
+    (Issue #52).  Such a period is reported in ``skipped`` and the caller's
+    ``ON CONFLICT`` merge handles the incoming row instead.  Every ``UPDATE``
+    additionally runs inside a savepoint, so a conflict that slips past the
+    check (a concurrent writer) degrades to one skipped period instead of a
+    failed batch.  Returns the :class:`RescheduleOutcome` for logging/audit.
     """
+    from psycopg2 import errors as pg_errors
     from psycopg2.extras import execute_values
 
     entries: dict[tuple, dict] = {}
@@ -232,8 +292,9 @@ def reschedule_confirmed_rows(cur, rows, *, symbol=0, market=1, report_date=3,
         if current is None or _is_newer(candidate["report_date"], current["report_date"]):
             entries[key] = candidate
 
+    outcome = RescheduleOutcome()
     if not entries:
-        return []
+        return outcome
 
     execute_values(cur, _identity_query(), [list(k) for k in entries])
     existing: dict[tuple, list[dict]] = {}
@@ -244,7 +305,6 @@ def reschedule_confirmed_rows(cur, rows, *, symbol=0, market=1, report_date=3,
             continue
         existing.setdefault(key, []).append(row)
 
-    moves: list[dict] = []
     for key, entry in entries.items():
         group = existing.get(key) or []
         if not group:
@@ -253,26 +313,41 @@ def reschedule_confirmed_rows(cur, rows, *, symbol=0, market=1, report_date=3,
         new_date = report_date_of(entry)
         if new_date is None or winner["report_date"] == new_date:
             continue
-        if any(
-            row["id"] != winner["id"]
-            and row["report_date"] == new_date
-            and row.get("report_type") == entry["report_type"]
-            for row in group
-        ):
-            continue
-        cur.execute(
-            "UPDATE earnings SET report_date = %s, updated_at = NOW()"
-            " WHERE id = %s AND report_date = %s",
-            (new_date, winner["id"], winner["report_date"]),
+        record = {
+            "id": winner["id"],
+            "symbol": key[0],
+            "market": key[1],
+            "fiscal_year": key[2],
+            "fiscal_quarter": key[3],
+            "report_type": entry["report_type"],
+            "from": winner["report_date"].isoformat(),
+            "to": new_date.isoformat(),
+        }
+        cur.execute(f"SAVEPOINT {_RESCHEDULE_SAVEPOINT}")
+        try:
+            holder = _target_holder(cur, key[0], key[1], new_date, entry["report_type"])
+            if holder is not None:
+                # The provider's date is owned by another period (or by a
+                # prediction).  Leave both rows and their fiscal labels alone;
+                # the caller's ON CONFLICT merge still lands the incoming values.
+                outcome.skipped.append({**record, "reason": "target_occupied", "holder": holder})
+            else:
+                cur.execute(
+                    "UPDATE earnings SET report_date = %s, updated_at = NOW()"
+                    " WHERE id = %s AND report_date = %s",
+                    (new_date, winner["id"], winner["report_date"]),
+                )
+                if cur.rowcount:
+                    outcome.moves.append(record)
+        except pg_errors.UniqueViolation:
+            cur.execute(f"ROLLBACK TO SAVEPOINT {_RESCHEDULE_SAVEPOINT}")
+            outcome.skipped.append({**record, "reason": "unique_violation", "holder": None})
+        cur.execute(f"RELEASE SAVEPOINT {_RESCHEDULE_SAVEPOINT}")
+
+    for skip in outcome.skipped:
+        logger.warning(
+            "reschedule skipped %s.%s FY%s Q%s: %s → %s (row %s, %s, held by %s)",
+            skip["symbol"], skip["market"], skip["fiscal_year"], skip["fiscal_quarter"],
+            skip["from"], skip["to"], skip["id"], skip["reason"], skip["holder"],
         )
-        if cur.rowcount:
-            moves.append({
-                "id": winner["id"],
-                "symbol": key[0],
-                "market": key[1],
-                "fiscal_year": key[2],
-                "fiscal_quarter": key[3],
-                "from": winner["report_date"].isoformat(),
-                "to": new_date.isoformat(),
-            })
-    return moves
+    return outcome

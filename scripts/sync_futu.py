@@ -437,7 +437,8 @@ def flush_date_batch(batch: list[tuple]) -> int:
     if not batch:
         return 0
     with db_cursor() as cur:
-        for move in fiscal.reschedule_confirmed_rows(cur, batch):
+        outcome = fiscal.reschedule_confirmed_rows(cur, batch)
+        for move in outcome.moves:
             logger.info(
                 "rescheduled %s.%s FY%s Q%s: %s → %s (row %s, Issue #50)",
                 move["symbol"], move["market"], move["fiscal_year"], move["fiscal_quarter"],
@@ -450,8 +451,8 @@ def flush_date_batch(batch: list[tuple]) -> int:
             VALUES %s
             ON CONFLICT (symbol, market, report_date, report_type)
             DO UPDATE SET
-                fiscal_year = EXCLUDED.fiscal_year,
-                fiscal_quarter = EXCLUDED.fiscal_quarter,
+                fiscal_year = CASE WHEN earnings.fiscal_year IS NULL THEN EXCLUDED.fiscal_year ELSE earnings.fiscal_year END,
+                fiscal_quarter = CASE WHEN earnings.fiscal_quarter IS NULL THEN EXCLUDED.fiscal_quarter ELSE earnings.fiscal_quarter END,
                 before_after = COALESCE(EXCLUDED.before_after, earnings.before_after),
                 is_predicted = FALSE,
                 company_name = CASE WHEN earnings.company_name = '' THEN EXCLUDED.company_name ELSE earnings.company_name END,
@@ -461,6 +462,13 @@ def flush_date_batch(batch: list[tuple]) -> int:
             """,
             batch,
             page_size=200,
+        )
+    if outcome.skipped:
+        # A provider date that another fiscal period already owns: the incoming
+        # row is merged by ON CONFLICT, no row is re-dated (Issue #52).
+        logger.warning(
+            "futu: %d reschedule(s) skipped (target date owned by another row)",
+            len(outcome.skipped),
         )
     logger.info(f"Flushed {len(batch)} earnings dates")
     return len(batch)

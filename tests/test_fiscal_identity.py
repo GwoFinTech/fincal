@@ -17,6 +17,15 @@ Covered here:
   prediction upserts);
 * the reconciliation plan (``scripts/reconcile_fiscal_rows.py``) and the guarded
   fiscal-identity unique index in ``app/db.py``.
+
+Issue #52 coverage (same module): the write-path guard itself crashed in
+production.  ``reschedule_confirmed_rows`` pre-checked only the fiscal period,
+while the table is unique on ``(symbol, market, report_date, report_type)``, so
+re-dating a quarter onto a date another quarter already owns raised
+``UniqueViolation`` and aborted the whole Longbridge run after ~10.8k of ~17.8k
+rows.  The tests below pin the natural-key pre-check, the savepoint fallback,
+the batch-level isolation, the truthful run counters and the rule that a
+provider candidate may never rewrite an existing row's fiscal identity.
 """
 import importlib.util
 import sys
@@ -273,7 +282,7 @@ class WritePathTests(TestCase):
             {"id": 21, "symbol": "MARA", "market": "US", "fiscal_year": 2025, "fiscal_quarter": 4,
              "report_date": date(2026, 3, 5), "report_type": "Q", "is_predicted": False,
              "eps_actual": None, "revenue_actual": None, "updated_at": _ts(2)},
-        ]])
+        ], {"id": 21, "fiscal_year": 2025, "fiscal_quarter": 4, "is_predicted": False}])
         recorder = _RecordingExecuteValues()
         with mock.patch("psycopg2.extras.execute_values", recorder), \
              mock.patch.object(sync_earnings, "db_cursor", return_value=_fake_db_cursor(cursor)):
@@ -337,6 +346,218 @@ class WritePathTests(TestCase):
             source,
         )
         self.assertNotIn("is_predicted = TRUE,\n                    date_source = 'algorithm'", source)
+
+
+# ── Issue #52: a reschedule may not collide with the display key ────────────
+
+def _reschedule(cursor, rows):
+    """Run the reschedule guard against a fake cursor (``execute_values`` stubbed)."""
+    recorder = _RecordingExecuteValues()
+    with mock.patch("psycopg2.extras.execute_values", recorder):
+        return fiscal.reschedule_confirmed_rows(cursor, rows)
+
+
+def _date_updates(cursor):
+    return [call for call in cursor.executed if "UPDATE earnings SET report_date" in call[0]]
+
+
+#: The production collision: Longbridge reports QBIEY FY2026 Q1 on 2026-08-13,
+#: a date already held by that symbol's FY2026 Q2 row (sync_runs id=66).
+_QBIEY_CANDIDATE = ("QBIEY", "US", "QBIEY", "2026-08-13", "Q", 2026, 1,
+                    None, None, None, None, "after")
+
+
+def _qbiey_q1_row():
+    return {"id": 26494, "symbol": "QBIEY", "market": "US", "fiscal_year": 2026,
+            "fiscal_quarter": 1, "report_date": date(2026, 5, 7), "report_type": "Q",
+            "is_predicted": False, "eps_actual": None, "revenue_actual": None,
+            "updated_at": _ts(1)}
+
+
+class RescheduleConflictTests(TestCase):
+    """The pre-check must cover the key the table is actually unique on."""
+
+    def test_another_fiscal_quarter_holding_the_date_skips_the_move(self):
+        """Issue #52: the fiscal group says "free", the unique index says no."""
+        cursor = _FakeCursor(results=[
+            [_qbiey_q1_row()],
+            {"id": 32173, "fiscal_year": 2026, "fiscal_quarter": 2, "is_predicted": False},
+        ])
+        outcome = _reschedule(cursor, [_QBIEY_CANDIDATE])
+        self.assertEqual(_date_updates(cursor), [])          # no UPDATE, no UniqueViolation
+        self.assertEqual(outcome.moves, [])
+        self.assertEqual(len(outcome.skipped), 1)
+        skip = outcome.skipped[0]
+        self.assertEqual(skip["reason"], "target_occupied")
+        self.assertEqual((skip["symbol"], skip["from"], skip["to"]),
+                         ("QBIEY", "2026-05-07", "2026-08-13"))
+        self.assertEqual(skip["holder"]["id"], 32173)
+        self.assertEqual(skip["holder"]["fiscal_quarter"], 2)
+
+    def test_predicted_row_holding_the_date_skips_the_move(self):
+        """A prediction owns the same unique key, so it blocks a move too."""
+        cursor = _FakeCursor(results=[
+            [dict(_qbiey_q1_row(), id=100447, fiscal_year=2027, fiscal_quarter=4,
+                  report_date=date(2027, 2, 18))],
+            {"id": 370, "fiscal_year": 2027, "fiscal_quarter": 1, "is_predicted": True},
+        ])
+        outcome = _reschedule(cursor, [
+            ("QBIEY", "US", "QBIEY", "2026-08-13", "Q", 2027, 4, None, None, None, None, "after"),
+        ])
+        self.assertEqual(_date_updates(cursor), [])
+        self.assertEqual(outcome.moves, [])
+        self.assertTrue(outcome.skipped[0]["holder"]["is_predicted"])
+
+    def test_a_conflict_slipping_past_the_check_is_contained_by_the_savepoint(self):
+        """The savepoint turns a UniqueViolation into one skipped period."""
+        from psycopg2 import errors
+        cursor = _FakeCursor(
+            results=[[_qbiey_q1_row()]],
+            raise_on={"UPDATE earnings SET report_date": errors.UniqueViolation("duplicate key")},
+        )
+        outcome = _reschedule(cursor, [_QBIEY_CANDIDATE])   # must not raise
+        self.assertEqual(outcome.moves, [])
+        self.assertEqual([skip["reason"] for skip in outcome.skipped], ["unique_violation"])
+        statements = cursor.sql_calls()
+        self.assertIn(f"SAVEPOINT {fiscal._RESCHEDULE_SAVEPOINT}", statements)
+        self.assertIn(f"ROLLBACK TO SAVEPOINT {fiscal._RESCHEDULE_SAVEPOINT}", statements)
+        self.assertIn(f"RELEASE SAVEPOINT {fiscal._RESCHEDULE_SAVEPOINT}", statements)
+
+    def test_a_free_date_is_still_moved_inside_a_savepoint(self):
+        cursor = _FakeCursor(results=[[_qbiey_q1_row()], None])
+        outcome = _reschedule(cursor, [_QBIEY_CANDIDATE])
+        self.assertEqual(len(_date_updates(cursor)), 1)
+        self.assertEqual([move["id"] for move in outcome.moves], [26494])
+        self.assertEqual(outcome.skipped, [])
+        self.assertIn(f"RELEASE SAVEPOINT {fiscal._RESCHEDULE_SAVEPOINT}", cursor.sql_calls())
+
+    def test_flush_batch_reports_what_it_wrote_and_what_it_skipped(self):
+        """The batch keeps writing the rest of its rows after a conflict."""
+        cursor = _FakeCursor(results=[
+            [_qbiey_q1_row()],
+            {"id": 32173, "fiscal_year": 2026, "fiscal_quarter": 2, "is_predicted": False},
+        ])
+        recorder = _RecordingExecuteValues()
+        with mock.patch("psycopg2.extras.execute_values", recorder), \
+             mock.patch.object(sync_earnings, "db_cursor", return_value=_fake_db_cursor(cursor)):
+            stats = sync_earnings.flush_batch(cursor, [
+                _QBIEY_CANDIDATE,
+                ("AAPL", "US", "Apple", "2026-10-29", "Q", 2026, 4, None, None, None, None, "after"),
+            ])
+        self.assertEqual((stats.rows, stats.moves, stats.skipped), (2, 0, 1))
+        insert = [call for call in recorder.calls if "INSERT INTO earnings " in call["sql"]][0]
+        self.assertEqual([row[0] for row in insert["rows"]], ["QBIEY", "AAPL"])
+
+    def test_longbridge_upsert_never_rewrites_an_existing_fiscal_identity(self):
+        """Issue #52: the collision must not relabel the row that holds the date."""
+        cursor = _FakeCursor(results=[[], None])
+        recorder = _RecordingExecuteValues()
+        with mock.patch("psycopg2.extras.execute_values", recorder), \
+             mock.patch.object(sync_earnings, "db_cursor", return_value=_fake_db_cursor(cursor)):
+            sync_earnings.flush_batch(cursor, [_QBIEY_CANDIDATE])
+        sql = [call["sql"] for call in recorder.calls if "INSERT INTO earnings " in call["sql"]][0]
+        self.assertIn(
+            "fiscal_year = CASE WHEN earnings.fiscal_year IS NULL"
+            " THEN EXCLUDED.fiscal_year ELSE earnings.fiscal_year END",
+            sql,
+        )
+        self.assertIn(
+            "fiscal_quarter = CASE WHEN earnings.fiscal_quarter IS NULL"
+            " THEN EXCLUDED.fiscal_quarter ELSE earnings.fiscal_quarter END",
+            sql,
+        )
+        self.assertNotIn("fiscal_year = EXCLUDED.fiscal_year,", sql)
+
+    def test_futu_upsert_applies_the_same_identity_freeze(self):
+        cursor = _FakeCursor(results=[[], None])
+        recorder = _RecordingExecuteValues()
+        with mock.patch("psycopg2.extras.execute_values", recorder), \
+             mock.patch.object(sync_futu, "db_cursor", return_value=_fake_db_cursor(cursor)):
+            sync_futu.flush_date_batch([
+                ("QBIEY", "US", "", "2026-08-13", "Q", 2026, 1, "after", "futu", "scheduled"),
+            ])
+        sql = [call["sql"] for call in recorder.calls if "INSERT INTO earnings " in call["sql"]][0]
+        self.assertIn("fiscal_year = CASE WHEN earnings.fiscal_year IS NULL", sql)
+
+
+class RunAccountingTests(TestCase):
+    """Issue #52: one bad batch costs 200 records, not the whole run."""
+
+    def _fetch(self, pages):
+        """Serve the fixture for the US market only (``sync_earnings`` loops both)."""
+        return mock.patch.object(
+            sync_earnings, "fetch_calendar",
+            side_effect=lambda market, start, end: pages if market == "US" else [],
+        )
+
+    def _pages(self, count: int):
+        infos = [
+            {
+                "counter_id": f"ST/US/AAA{i}",
+                "date": "2026-08-13",
+                "counter_name": f"AAA{i}",
+                "date_type": "after",
+                "data_kv": [],
+                "ext": {"financial_report": {"period": "2", "fiscal_year": "2026"}},
+            }
+            for i in range(count)
+        ]
+        return [{"infos": infos}]
+
+    def test_a_failed_batch_is_isolated_and_the_counts_stay_truthful(self):
+        pages = self._pages(sync_earnings.BATCH_SIZE * 2)
+        calls = []
+
+        def fake_flush(cur, batch):
+            calls.append(len(batch))
+            if len(calls) == 1:
+                raise RuntimeError("unique_violation")
+            return sync_earnings.FlushStats(rows=len(batch), moves=1)
+
+        with self._fetch(pages), \
+             mock.patch.object(sync_earnings, "check_cancelled"), \
+             mock.patch.object(sync_earnings, "flush_batch", side_effect=fake_flush), \
+             mock.patch.object(sync_earnings, "db_cursor", return_value=_fake_db_cursor(_FakeCursor())):
+            stats = sync_earnings.sync_earnings(42)
+
+        self.assertEqual(calls, [sync_earnings.BATCH_SIZE] * 2)   # the run kept going
+        self.assertEqual(stats.fetched, sync_earnings.BATCH_SIZE * 2)
+        self.assertEqual(stats.written, sync_earnings.BATCH_SIZE)  # only the good batch
+        self.assertEqual(stats.failed_batches, 1)
+        self.assertEqual(stats.rescheduled, 1)
+        # A partial run is reported as partial, never as a clean success.
+        self.assertEqual(stats.quality().to_dict()["status"], "partial")
+
+    def test_a_clean_run_reports_written_equal_to_fetched(self):
+        pages = self._pages(sync_earnings.BATCH_SIZE)
+
+        def fake_flush(cur, batch):
+            return sync_earnings.FlushStats(rows=len(batch))
+
+        with self._fetch(pages), \
+             mock.patch.object(sync_earnings, "check_cancelled"), \
+             mock.patch.object(sync_earnings, "flush_batch", side_effect=fake_flush), \
+             mock.patch.object(sync_earnings, "db_cursor", return_value=_fake_db_cursor(_FakeCursor())):
+            stats = sync_earnings.sync_earnings(42)
+
+        self.assertEqual((stats.fetched, stats.written, stats.failed_batches),
+                         (sync_earnings.BATCH_SIZE,) * 2 + (0,))
+        self.assertEqual(stats.quality().to_dict()["status"], "success")
+
+    def test_a_run_that_wrote_nothing_is_not_recorded_as_success(self):
+        """Isolation must not turn a fully failed run into a green one."""
+        self.assertEqual(
+            sync_earnings.run_terminal_state(sync_earnings.SyncStats(written=0, failed_batches=3)),
+            ("failed", "longbridge_batch_failed"),
+        )
+        self.assertEqual(
+            sync_earnings.run_terminal_state(sync_earnings.SyncStats(written=400, failed_batches=1)),
+            ("success", None),
+        )
+        self.assertEqual(
+            sync_earnings.run_terminal_state(sync_earnings.SyncStats()),
+            ("success", None),
+        )
 
 
 # ── reconciliation plan ─────────────────────────────────────────────────────

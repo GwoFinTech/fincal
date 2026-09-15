@@ -146,9 +146,11 @@ def test_sync_earnings_polls_cancellation_during_run():
         with patch.object(sync_earnings, "fetch_calendar", return_value=[{"infos": []}]):
             with patch.object(sync_earnings, "db_cursor") as db_cursor_mock:
                 db_cursor_mock.return_value.__enter__.return_value = MagicMock()
-                total = sync_earnings.sync_earnings(42)
+                stats = sync_earnings.sync_earnings(42)
 
-    assert total == 0
+    # Issue #52: the run reports its counters instead of a bare record total;
+    # with no provider rows it fetched and wrote nothing.
+    assert (stats.fetched, stats.written) == (0, 0)
     # At least one poll per market (US, HK) plus one per page (4 total here).
     assert len(calls) >= 3, f"expected checkpoint polls, got {len(calls)}"
     assert all(run_id == 42 for run_id in calls), f"unexpected run_id in polls: {calls}"
