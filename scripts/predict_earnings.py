@@ -12,6 +12,7 @@ import logging
 import sys
 import os
 import calendar
+from dataclasses import dataclass
 from datetime import date, timedelta
 from collections import defaultdict
 import statistics
@@ -19,7 +20,7 @@ import statistics
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.db import db_cursor
-from app.symbol import normalize
+from app.symbol import is_dirty_hk_5digit, normalize
 from app.watchlist import get_source
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -207,70 +208,199 @@ def cleanup_stale_predictions():
         logger.info(f"Cleaned up {n} stale predictions")
 
 
-def merge_duplicate_symbols():
-    """Merge XXX.US → XXX and 5-digit HK codes (8XXXX) into 4-digit canonical.
+@dataclass
+class MergeStats:
+    """Audit counters for :func:`merge_duplicate_symbols` (Issue #54).
 
-    Prevents stale duplicate rows if a sync run introduces non-canonical symbols.
+    Before this existed the step logged a single ``Merged N 5-digit HK symbols``
+    line, so a run that deleted data was indistinguishable from one that merged
+    it — and the "merged" count was in fact the *candidate* count.
     """
+
+    moved: int = 0               # rows copied onto their canonical symbol
+    skipped: int = 0             # symbols whose canonical form is themselves
+    deleted: int = 0             # rows removed after their data was moved
+    blocked: int = 0             # rows kept because a snapshot move would collide
+    snapshots_moved: int = 0     # estimate snapshots re-pointed onto the survivor
+
+    @property
+    def changed(self) -> bool:
+        return bool(self.moved or self.deleted or self.snapshots_moved)
+
+    def summary(self) -> str:
+        return (f"moved={self.moved}, skipped={self.skipped}, deleted={self.deleted}, "
+                f"blocked={self.blocked}, snapshots_moved={self.snapshots_moved}")
+
+
+#: Columns copied when a non-canonical symbol is renamed onto its canonical code.
+#: Provenance travels with the row: a rename must not strip ``date_source`` /
+#: ``actual_source`` / ``estimate_as_of`` and friends (Issue #54).
+_MERGE_COLUMNS = (
+    "company_name, report_date, report_type, fiscal_year, fiscal_quarter, "
+    "eps_estimate, eps_actual, revenue_estimate, revenue_actual, before_after, is_predicted, "
+    "date_source, date_status, estimate_source, estimate_as_of, estimate_currency, "
+    "estimate_basis, actual_source, actual_as_of"
+)
+
+#: Copy every row of the dirty symbol onto the canonical one, returning the id of
+#: the row that survived each copy so its snapshots can follow it.
+_MERGE_UPSERT = f"""
+    INSERT INTO earnings (symbol, market, {_MERGE_COLUMNS})
+    SELECT %s, market, {_MERGE_COLUMNS}
+    FROM earnings WHERE symbol = %s AND market = %s
+    ON CONFLICT (symbol, market, report_date, report_type) DO UPDATE SET
+        company_name = CASE WHEN earnings.company_name = '' THEN EXCLUDED.company_name ELSE earnings.company_name END,
+        eps_estimate = COALESCE(EXCLUDED.eps_estimate, earnings.eps_estimate),
+        eps_actual = COALESCE(EXCLUDED.eps_actual, earnings.eps_actual),
+        revenue_estimate = COALESCE(EXCLUDED.revenue_estimate, earnings.revenue_estimate),
+        revenue_actual = COALESCE(EXCLUDED.revenue_actual, earnings.revenue_actual),
+        before_after = COALESCE(EXCLUDED.before_after, earnings.before_after),
+        fiscal_year = CASE WHEN earnings.fiscal_year IS NULL THEN EXCLUDED.fiscal_year ELSE earnings.fiscal_year END,
+        fiscal_quarter = CASE WHEN earnings.fiscal_quarter IS NULL THEN EXCLUDED.fiscal_quarter ELSE earnings.fiscal_quarter END,
+        is_predicted = earnings.is_predicted AND EXCLUDED.is_predicted,
+        date_source = CASE WHEN earnings.date_source IN ('unknown', 'algorithm')
+            AND EXCLUDED.date_source NOT IN ('unknown', 'algorithm')
+            THEN EXCLUDED.date_source ELSE earnings.date_source END,
+        date_status = CASE WHEN earnings.date_status IN ('scheduled', 'predicted')
+            AND EXCLUDED.date_status NOT IN ('scheduled', 'predicted')
+            THEN EXCLUDED.date_status ELSE earnings.date_status END,
+        estimate_source = COALESCE(earnings.estimate_source, EXCLUDED.estimate_source),
+        estimate_as_of = COALESCE(earnings.estimate_as_of, EXCLUDED.estimate_as_of),
+        estimate_currency = COALESCE(earnings.estimate_currency, EXCLUDED.estimate_currency),
+        estimate_basis = COALESCE(earnings.estimate_basis, EXCLUDED.estimate_basis),
+        actual_source = COALESCE(earnings.actual_source, EXCLUDED.actual_source),
+        actual_as_of = COALESCE(earnings.actual_as_of, EXCLUDED.actual_as_of),
+        updated_at = NOW()
+    RETURNING id, report_date, report_type
+"""
+
+#: Move one row's estimate snapshots onto the row that replaced it, skipping the
+#: ones the survivor already holds under ``UNIQUE(earning_id, source, captured_at)``.
+_SNAPSHOT_REPOINT = """
+    UPDATE earnings_estimate_snapshots s SET earning_id = %s
+    WHERE s.earning_id = %s
+      AND NOT EXISTS (
+          SELECT 1 FROM earnings_estimate_snapshots t
+          WHERE t.earning_id = %s AND t.source = s.source AND t.captured_at = s.captured_at
+      )
+"""
+
+_SNAPSHOT_COUNT = "SELECT count(*) AS n FROM earnings_estimate_snapshots WHERE earning_id = %s"
+
+#: Only rows whose data was copied *and* whose symbol is not the canonical one may
+#: go — a "merge" whose target equals its source can never delete (Issue #54).
+_DELETE_ROWS = ("DELETE FROM earnings WHERE id = ANY(%s) AND symbol = %s AND market = %s "
+                "AND symbol <> %s")
+
+
+def merge_duplicate_symbols(dry_run: bool = False) -> "MergeStats":
+    """Rename non-canonical duplicate symbols onto their canonical code.
+
+    Two legacy spellings written by older releases are repaired:
+
+    * ``AAPL.US`` → ``AAPL`` (US tickers are stored bare);
+    * zero-padded five-digit HK codes ``00700.HK`` → ``0700.HK``.
+
+    Five-digit HK codes are *not* dirty per se: the ``8xxxx`` RMB counters
+    (``82333.HK`` is the RMB counter of ``2333.HK``, ``80000.HK`` an HSI futures
+    proxy) are legitimate symbols that ``normalize()`` maps onto themselves.
+    Issue #54: this step used to treat *every* five-digit code as a duplicate and
+    unconditionally ``DELETE`` the rows it had "merged" — for a symbol that
+    canonicalises to itself that is a pure delete, which silently removed 25
+    production symbols (51 rows, 31 estimate snapshots) on every prediction run.
+    Such rows are now skipped and counted instead.
+
+    Rows are only removed after their values *and* their estimate snapshots have
+    moved onto the surviving row; a snapshot whose ``(source, captured_at)``
+    already exists on the survivor keeps its row instead of cascading history
+    away.  ``dry_run`` reports what would change without writing anything.
+    """
+    stats = MergeStats()
     with db_cursor() as cur:
         # 1) Merge XXX.US → XXX for US market
-        cur.execute("SELECT DISTINCT symbol FROM earnings WHERE symbol LIKE '%.US' AND market = 'US'")
-        us_dups = [r["symbol"] for r in cur.fetchall()]
-        merged = 0
-        for us_sym in us_dups:
-            bare = us_sym.replace(".US", "")
-            cur.execute(
-                """INSERT INTO earnings (symbol, market, company_name, report_date, report_type,
-                   fiscal_year, fiscal_quarter, eps_estimate, eps_actual, revenue_estimate, revenue_actual, before_after, is_predicted)
-                SELECT %s, market, company_name, report_date, report_type,
-                   fiscal_year, fiscal_quarter, eps_estimate, eps_actual, revenue_estimate, revenue_actual, before_after, is_predicted
-                FROM earnings WHERE symbol = %s AND market = 'US'
-                ON CONFLICT (symbol, market, report_date, report_type) DO UPDATE SET
-                    company_name = CASE WHEN earnings.company_name = '' THEN EXCLUDED.company_name ELSE earnings.company_name END,
-                    eps_estimate = COALESCE(EXCLUDED.eps_estimate, earnings.eps_estimate),
-                    eps_actual = COALESCE(EXCLUDED.eps_actual, earnings.eps_actual),
-                    revenue_estimate = COALESCE(EXCLUDED.revenue_estimate, earnings.revenue_estimate),
-                    revenue_actual = COALESCE(EXCLUDED.revenue_actual, earnings.revenue_actual),
-                    before_after = COALESCE(EXCLUDED.before_after, earnings.before_after),
-                    fiscal_year = EXCLUDED.fiscal_year,
-                    fiscal_quarter = EXCLUDED.fiscal_quarter,
-                    is_predicted = EXCLUDED.is_predicted,
-                    updated_at = NOW()""",
-                (bare, us_sym),
-            )
-            cur.execute("DELETE FROM earnings WHERE symbol = %s AND market = 'US'", (us_sym,))
-            merged += 1
-        if merged:
-            logger.info(f"Merged {merged} .US duplicate symbols")
+        cur.execute("SELECT DISTINCT symbol FROM earnings WHERE symbol LIKE '%.US' AND market = 'US' ORDER BY symbol")
+        for row in cur.fetchall():
+            sym = row["symbol"]
+            merge_symbol_onto_canonical(cur, sym, "US", normalize(sym, "US"), stats, dry_run=dry_run)
 
         # 2) Merge 5-digit HK codes (e.g. 00700.HK) → 4-digit canonical (0700.HK)
         #    Uses app.symbol.normalize — the single source of truth for HK codes.
-        cur.execute(r"SELECT DISTINCT symbol FROM earnings WHERE symbol ~ '^\d{5}\.HK$'")
-        hk5 = [r["symbol"] for r in cur.fetchall()]
-        for sym in hk5:
-            bare = normalize(sym.split(".")[0], "HK")
-            cur.execute(
-                """INSERT INTO earnings (symbol, market, company_name, report_date, report_type,
-                   fiscal_year, fiscal_quarter, eps_estimate, eps_actual, revenue_estimate, revenue_actual, before_after, is_predicted)
-                SELECT %s, market, company_name, report_date, report_type,
-                   fiscal_year, fiscal_quarter, eps_estimate, eps_actual, revenue_estimate, revenue_actual, before_after, is_predicted
-                FROM earnings WHERE symbol = %s AND market = 'HK'
-                ON CONFLICT (symbol, market, report_date, report_type) DO UPDATE SET
-                    company_name = CASE WHEN earnings.company_name = '' THEN EXCLUDED.company_name ELSE earnings.company_name END,
-                    eps_estimate = COALESCE(EXCLUDED.eps_estimate, earnings.eps_estimate),
-                    eps_actual = COALESCE(EXCLUDED.eps_actual, earnings.eps_actual),
-                    revenue_estimate = COALESCE(EXCLUDED.revenue_estimate, earnings.revenue_estimate),
-                    revenue_actual = COALESCE(EXCLUDED.revenue_actual, earnings.revenue_actual),
-                    before_after = COALESCE(EXCLUDED.before_after, earnings.before_after),
-                    fiscal_year = EXCLUDED.fiscal_year,
-                    fiscal_quarter = EXCLUDED.fiscal_quarter,
-                    is_predicted = EXCLUDED.is_predicted,
-                    updated_at = NOW()""",
-                (bare, sym),
+        cur.execute(r"SELECT DISTINCT symbol FROM earnings WHERE symbol ~ '^\d{5}\.HK$' ORDER BY symbol")
+        for row in cur.fetchall():
+            sym = row["symbol"]
+            if not is_dirty_hk_5digit(sym):
+                # Legitimate five-digit code: canonical form is the symbol itself.
+                stats.skipped += 1
+                logger.info(f"Skipped {sym}: already canonical (Issue #54 guard)")
+                continue
+            merge_symbol_onto_canonical(cur, sym, "HK", normalize(sym.split(".")[0], "HK"), stats, dry_run=dry_run)
+
+        if stats.changed:
+            logger.info(f"Merged duplicate symbols: {stats.summary()}")
+    return stats
+
+
+def merge_symbol_onto_canonical(cur, dirty_sym: str, market: str, canonical_sym: str,
+                                stats: "MergeStats", dry_run: bool = False) -> None:
+    """Move every row of ``dirty_sym`` onto ``canonical_sym`` (Issue #54).
+
+    The first line of defence is the identity check: when the canonical form is
+    the symbol itself there is nothing to merge, and a ``DELETE`` would be pure
+    data loss.  The ``DELETE`` also carries the same proof as a SQL predicate, so
+    a "merge" whose target equals its source cannot delete anything.
+    """
+    if not canonical_sym or canonical_sym == dirty_sym:
+        stats.skipped += 1
+        return
+
+    cur.execute(
+        "SELECT id, report_date, report_type FROM earnings WHERE symbol = %s AND market = %s",
+        (dirty_sym, market),
+    )
+    source_rows = cur.fetchall()
+    if not source_rows:
+        return
+
+    if dry_run:
+        logger.info(f"[dry-run] would merge {len(source_rows)} row(s) {dirty_sym} → {canonical_sym}")
+        stats.moved += len(source_rows)
+        return
+
+    # Copy the rows onto the canonical symbol, then pair each source row with the
+    # row that survived it (its own id when the canonical row already existed).
+    cur.execute(_MERGE_UPSERT, (canonical_sym, dirty_sym, market))
+    kept = {(row["report_date"], row["report_type"]): row["id"] for row in cur.fetchall()}
+
+    movable: list[int] = []
+    blocked = 0
+    for row in source_rows:
+        kept_id = kept.get((row["report_date"], row["report_type"]))
+        if kept_id is None or kept_id == row["id"]:
+            blocked += 1
+            continue
+        # Re-point before deleting: earnings_estimate_snapshots cascades on delete.
+        cur.execute(_SNAPSHOT_REPOINT, (kept_id, row["id"], kept_id))
+        stats.snapshots_moved += cur.rowcount
+        cur.execute(_SNAPSHOT_COUNT, (row["id"],))
+        leftover = (cur.fetchone() or {}).get("n", 0)
+        if leftover:
+            # A snapshot with the same (source, captured_at) already lives on the
+            # survivor; deleting this row would cascade the duplicate away. Keep
+            # the row and report it rather than silently losing history.
+            blocked += 1
+            logger.warning(
+                f"Kept {dirty_sym} row id={row['id']}: {leftover} snapshot(s) collide "
+                f"with {canonical_sym} id={kept_id}"
             )
-            cur.execute("DELETE FROM earnings WHERE symbol = %s AND market = 'HK'", (sym,))
-        if hk5:
-            logger.info(f"Merged {len(hk5)} 5-digit HK symbols")
+            continue
+        movable.append(row["id"])
+
+    if movable:
+        cur.execute(_DELETE_ROWS, (movable, dirty_sym, market, canonical_sym))
+        stats.deleted += cur.rowcount
+    stats.moved += len(movable)
+    stats.blocked += blocked
+    logger.info(f"Merged {dirty_sym} → {canonical_sym}: rows={len(movable)} blocked={blocked}")
 
 
 if __name__ == "__main__":

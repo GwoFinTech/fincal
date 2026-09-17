@@ -101,6 +101,22 @@ def from_lb_counter_id(counter_id: str) -> tuple[str, str]:
     return (symbol, market)
 
 
+# ── Dirty (non-canonical) HK codes ─────────────────────────────────
+
+def is_dirty_hk_5digit(code: str) -> bool:
+    """True for a five-digit HK code that ``normalize()`` would rename.
+
+    ``00700`` is a provider's zero-padded spelling of ``0700.HK`` and therefore
+    dirty; a legitimate five-digit HKEX code such as ``82333`` (the RMB counter
+    of ``2333.HK``, the ``8xxxx`` series) is mapped to itself and must never be
+    treated as a duplicate (Issue #54).
+    """
+    c = code.strip().upper()
+    if c.endswith(".HK"):
+        c = c[: -len(".HK")]
+    return c.isdigit() and len(c) == 5 and normalize(c, "HK") != f"{c}.HK"
+
+
 # ── Sortable key for HK tickers ────────────────────────────────────
 
 def sort_key(symbol: str) -> str:
