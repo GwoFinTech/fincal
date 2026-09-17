@@ -152,24 +152,40 @@ def list_audit_log(limit: int = 50, _: dict = Depends(admin_user)):
 
 @router.get("/diagnostics", response_model=DiagnosticsResponse)
 def diagnostics(_: dict = Depends(admin_user)):
-    """Provider metrics and cache diagnostics (Issue #15)."""
+    """Provider metrics and cache diagnostics (Issue #15, sync freshness #53)."""
     from ..metrics import metrics
+    from ..freshness import check_freshness
     result = metrics.snapshot()
-    # Add sync run summary
+    window_hours = max(1, int(getattr(config, "SYNC_RUNS_WINDOW_HOURS", 336)))
     with db.db_cursor() as cur:
         cur.execute("""SELECT status, COUNT(*) as cnt FROM sync_runs
                        WHERE started_at > NOW() - INTERVAL '24 hours'
                        GROUP BY status ORDER BY cnt DESC""")
         result["sync_runs_24h"] = [dict(r) for r in cur.fetchall()]
+        # A weekly pipeline has an empty 24h window ~6 days out of 7, so the
+        # configurable window is what an operator can actually read (Issue #53).
+        cur.execute("""SELECT status, COUNT(*) as cnt FROM sync_runs
+                       WHERE started_at > NOW() - make_interval(hours => %s)
+                       GROUP BY status ORDER BY cnt DESC""", (window_hours,))
+        result["sync_runs_window"] = [dict(r) for r in cur.fetchall()]
         cur.execute("""SELECT stage, status, started_at, finished_at
-                       FROM sync_runs ORDER BY started_at DESC LIMIT 5""")
+                       FROM sync_runs
+                       WHERE started_at > NOW() - make_interval(hours => %s)
+                       ORDER BY started_at DESC LIMIT 20""", (window_hours,))
         result["recent_syncs"] = [dict(r) for r in cur.fetchall()]
+    result["sync_runs_window_hours"] = window_hours
+    result["freshness"] = check_freshness()
     return result
 
 
 @router.get("/health", response_model=HealthResponse)
 def health_check():
-    """Full dependency health status (Issue #11, #14, #20). No auth required."""
+    """Full dependency health status (Issue #11, #14, #20).
+
+    Also reports sync-stage / derived-data freshness (Issue #53) so a stage that
+    silently stopped running surfaces here instead of hiding behind the
+    reachability probes. No auth required, so that entry stays aggregate-only.
+    """
     from ..version import get_version
     checks = {}
 
@@ -208,6 +224,19 @@ def health_check():
         checks["longbridge"] = {"status": "healthy" if p.returncode == 0 else "degraded"}
     except Exception:
         checks["longbridge"] = {"status": "degraded"}
+
+    # Sync stage / derived data freshness (Issue #53). Aggregate only: this
+    # endpoint has no application-level auth, so it must not leak per-stage
+    # timestamps, SQL or credentials.
+    try:
+        from ..freshness import check_freshness, health_snapshot
+        checks["sync_freshness"] = health_snapshot(check_freshness())
+    except Exception as exc:
+        checks["sync_freshness"] = {
+            "status": "unknown",
+            "error_code": "sync_freshness_unavailable",
+            "error": type(exc).__name__,
+        }
 
     statuses = [c["status"] for c in checks.values()]
     if all(s == "healthy" for s in statuses):

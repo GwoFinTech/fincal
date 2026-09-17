@@ -322,7 +322,7 @@ export interface paths {
         };
         /**
          * Diagnostics
-         * @description Provider metrics and cache diagnostics (Issue #15).
+         * @description Provider metrics and cache diagnostics (Issue #15, sync freshness #53).
          */
         get: operations["diagnostics_api_admin_diagnostics_get"];
         put?: never;
@@ -342,7 +342,11 @@ export interface paths {
         };
         /**
          * Health Check
-         * @description Full dependency health status (Issue #11, #14, #20). No auth required.
+         * @description Full dependency health status (Issue #11, #14, #20).
+         *
+         *     Also reports sync-stage / derived-data freshness (Issue #53) so a stage that
+         *     silently stopped running surfaces here instead of hiding behind the
+         *     reachability probes. No auth required, so that entry stays aggregate-only.
          */
         get: operations["health_check_api_admin_health_get"];
         put?: never;
@@ -532,12 +536,25 @@ export interface components {
                 [key: string]: unknown;
             })[];
             /**
+             * Sync Runs Window
+             * @default []
+             */
+            sync_runs_window: (components["schemas"]["SyncRunSummary"] | {
+                [key: string]: unknown;
+            })[];
+            /**
+             * Sync Runs Window Hours
+             * @default 24
+             */
+            sync_runs_window_hours: number;
+            /**
              * Recent Syncs
              * @default []
              */
             recent_syncs: (components["schemas"]["RecentSync"] | {
                 [key: string]: unknown;
             })[];
+            freshness?: components["schemas"]["FreshnessResponse"] | null;
         };
         /** EarningItem */
         EarningItem: {
@@ -608,6 +625,58 @@ export interface components {
             /** Updated At */
             updated_at?: string | null;
         };
+        /**
+         * FreshnessEntry
+         * @description Per-stage / per-derived-table freshness (admin diagnostics only).
+         */
+        FreshnessEntry: {
+            /** Stage */
+            stage: string;
+            /**
+             * Kind
+             * @default stage
+             */
+            kind: string;
+            /** Last Success At */
+            last_success_at?: string | null;
+            /** Age Hours */
+            age_hours?: number | null;
+            /** Status */
+            status: string;
+            /** Error Code */
+            error_code?: string | null;
+        };
+        /** FreshnessResponse */
+        FreshnessResponse: {
+            /** Status */
+            status: string;
+            /** Error Code */
+            error_code?: string | null;
+            /** Threshold Hours */
+            threshold_hours?: number | null;
+            /** Checked At */
+            checked_at?: string | null;
+            /**
+             * Stale Stages
+             * @default []
+             */
+            stale_stages: string[];
+            /**
+             * Never Run Stages
+             * @default []
+             */
+            never_run_stages: string[];
+            /**
+             * Stale Data
+             * @default []
+             */
+            stale_data: string[];
+            /**
+             * Entries
+             * @default []
+             */
+            entries: components["schemas"]["FreshnessEntry"][];
+        };
         /** GuidanceStatus */
         GuidanceStatus: {
             /** Status */
@@ -641,7 +710,7 @@ export interface components {
              * @default {}
              */
             checks: {
-                [key: string]: components["schemas"]["SourceCheck"] | {
+                [key: string]: components["schemas"]["SourceCheck"] | components["schemas"]["SyncFreshnessCheck"] | {
                     [key: string]: unknown;
                 };
             };
@@ -879,6 +948,38 @@ export interface components {
             status: string;
             /** Error */
             error?: string | null;
+        };
+        /**
+         * SyncFreshnessCheck
+         * @description Aggregate-only sync freshness (Issue #53).
+         *
+         *     Returned on the unauthenticated ``/api/admin/health``: stage names and
+         *     statuses only — never SQL, timestamps per stage or credentials.
+         */
+        SyncFreshnessCheck: {
+            /** Status */
+            status: string;
+            /** Error Code */
+            error_code?: string | null;
+            /** Threshold Hours */
+            threshold_hours?: number | null;
+            /**
+             * Stale Stages
+             * @default []
+             */
+            stale_stages: string[];
+            /**
+             * Never Run Stages
+             * @default []
+             */
+            never_run_stages: string[];
+            /**
+             * Stale Data
+             * @default []
+             */
+            stale_data: string[];
+            /** Checked At */
+            checked_at?: string | null;
         };
         /** SyncRun */
         SyncRun: {

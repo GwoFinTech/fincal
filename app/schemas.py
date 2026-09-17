@@ -186,10 +186,43 @@ class SourceCheck(BaseModel):
     status: str
     error: str | None = None
 
+class SyncFreshnessCheck(BaseModel):
+    """Aggregate-only sync freshness (Issue #53).
+
+    Returned on the unauthenticated ``/api/admin/health``: stage names and
+    statuses only — never SQL, timestamps per stage or credentials.
+    """
+    status: str
+    error_code: str | None = None
+    threshold_hours: float | None = None
+    stale_stages: list[str] = []
+    never_run_stages: list[str] = []
+    stale_data: list[str] = []
+    checked_at: str | None = None
+
+class FreshnessEntry(BaseModel):
+    """Per-stage / per-derived-table freshness (admin diagnostics only)."""
+    stage: str
+    kind: str = "stage"
+    last_success_at: str | None = None
+    age_hours: float | None = None
+    status: str
+    error_code: str | None = None
+
+class FreshnessResponse(BaseModel):
+    status: str
+    error_code: str | None = None
+    threshold_hours: float | None = None
+    checked_at: str | None = None
+    stale_stages: list[str] = []
+    never_run_stages: list[str] = []
+    stale_data: list[str] = []
+    entries: list[FreshnessEntry] = []
+
 class HealthResponse(BaseModel):
     status: str
     version: str = "dev"
-    checks: dict[str, SourceCheck | dict] = {}
+    checks: dict[str, SourceCheck | SyncFreshnessCheck | dict] = {}
 
 class ReadyResponse(BaseModel):
     status: str
@@ -235,7 +268,13 @@ class DiagnosticsResponse(BaseModel):
     providers: dict[str, ProviderStats | dict] = {}
     cache: CacheStats = CacheStats()
     sync_runs_24h: list[SyncRunSummary | dict] = []
+    # Issue #53: the pipeline is weekly, so the 24h window above is empty most
+    # days. `sync_runs_window` covers the configurable window instead (kept
+    # alongside the legacy field for backward compatibility).
+    sync_runs_window: list[SyncRunSummary | dict] = []
+    sync_runs_window_hours: int = 24
     recent_syncs: list[RecentSync | dict] = []
+    freshness: FreshnessResponse | None = None
 
 class OverviewSource(BaseModel):
     configured: str = ""

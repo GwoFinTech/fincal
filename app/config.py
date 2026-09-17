@@ -69,3 +69,13 @@ ICAL_BASE_URL = os.getenv("ICAL_BASE_URL", "")
 # Kurumi (tsummt) API — preferred company-name source for FinCal symbols.
 KURUMI_API_URL = os.getenv("KURUMI_API_URL", "http://localhost:8000")
 KURUMI_API_TIMEOUT = float(os.getenv("KURUMI_API_TIMEOUT", "5"))
+
+# Sync freshness monitoring (Issue #53). The pipeline declared by
+# scripts/sync_all.sh runs weekly, so a stage (or the derived table it owns)
+# older than this is reported as stale by app/freshness.py, /api/admin/health
+# and scripts/check_sync_freshness.py. Default 192h = weekly + 1 day of grace.
+SYNC_STAGE_STALE_AFTER_HOURS = float(os.getenv("SYNC_STAGE_STALE_AFTER_HOURS", "192"))
+# Window used by /api/admin/diagnostics for the sync-run summary. A fixed 24h
+# window is empty ~6 of 7 days for a weekly pipeline; 14 days covers at least
+# one full cycle. The legacy `sync_runs_24h` field is kept for compatibility.
+SYNC_RUNS_WINDOW_HOURS = int(os.getenv("SYNC_RUNS_WINDOW_HOURS", "336"))

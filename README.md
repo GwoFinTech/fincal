@@ -70,7 +70,30 @@ python scripts/predict_earnings.py
 
 # Or run all at once
 bash scripts/sync_all.sh
+
+# Verify every stage actually ran recently (read-only; exit 1 when a stage is
+# stale, 2 when the check itself cannot reach the database)
+python scripts/check_sync_freshness.py
 ```
+
+### Sync scheduling contract
+
+`scripts/cron_sync.sh` → `scripts/sync_all.sh` is the **only** scheduling
+entrypoint; the stage order inside `sync_all.sh` is the pipeline contract:
+
+| Stage (`sync_runs.stage`) | Script |
+|---|---|
+| `longbridge` | `scripts/sync_earnings.py` |
+| `futu` | `scripts/sync_futu.py` |
+| `stock_names` | `scripts/sync_stock_names.py` |
+| `consensus` | `scripts/sync_consensus.py` |
+| `prediction` | `scripts/predict_earnings.py` |
+
+Adding a stage means adding the script to `sync_all.sh` **and** registering it in
+`app/freshness.py::STAGE_SCRIPTS` — `tests/test_sync_freshness.py` fails if the
+two drift apart, so a new stage can never run unmonitored (a wrapper script
+outside the repo once kept calling an older stage list, which is how the
+`consensus` and `stock_names` stages went idle for six weeks unnoticed).
 
 ## Architecture
 
@@ -118,6 +141,8 @@ All configuration is via environment variables. See [`.env.example`](.env.exampl
 | `FUTU_PORT` | `11112` | Futu OpenD port |
 | `FUTU_DATES_TIMEOUT_SECONDS` | `15` | Per-symbol earnings-date call watchdog |
 | `FUTU_ACTUALS_TIMEOUT_SECONDS` | `20` | Per-symbol EPS/revenue call watchdog |
+| `SYNC_STAGE_STALE_AFTER_HOURS` | `192` | Sync stage / derived-data staleness threshold (8 days) |
+| `SYNC_RUNS_WINDOW_HOURS` | `336` | `/api/admin/diagnostics` sync-run window (14 days) |
 
 ## Watchlist Source
 
@@ -169,6 +194,56 @@ as a failed symbol and the rest of the batch continues — it no longer kills th
 whole process and strands a `running` audit row that would block every later
 sync. The audited run is also wrapped in a `finally` that forces a terminal
 state on any exit path.
+
+### Sync freshness monitoring (Issue #53)
+
+Dependency probes alone cannot tell "the dependencies are up" from "the pipeline
+has been silently skipping a stage", and a fixed 24-hour run window is empty
+~6 days out of 7 for a weekly pipeline. `app/freshness.py` therefore answers a
+third question with **SELECT-only** queries and no external calls: *when did each
+declared stage last succeed, and how old is the data it derives?*
+
+- Staleness is decided from the **most recent success** per stage
+  (`sync_runs.status='success'`), never from a fixed window; a stage with no
+  successful run at all is reported as `never`.
+- Derived tables rendered to users are checked too (`earnings_consensus`,
+  `earnings_forecast_eps`, `earnings_institution_ratings`, `stock_names` on
+  `MAX(fetched_at)`, `earnings` on `MAX(updated_at)`), so a fresh stage with
+  stale output still shows up.
+- Threshold: `SYNC_STAGE_STALE_AFTER_HOURS` (default `192` = weekly + 1 day of
+  grace). A stage or table older than that is `stale`.
+- `/api/admin/health` gains a `checks.sync_freshness` entry (aggregate status,
+  stage names and a language-neutral `error_code` such as `sync_stage_stale` —
+  no per-stage timestamps, since the endpoint has no application-level auth) and
+  `status` becomes non-`healthy` when anything is stale. `/api/admin/ready`
+  stays dependency-only: staleness degrades reporting, it never fails readiness
+  and never blocks a sync.
+- `/api/admin/diagnostics` keeps `sync_runs_24h` and additionally reports
+  `sync_runs_window` over `SYNC_RUNS_WINDOW_HOURS` (default `336` = 14 days),
+  plus the full `freshness` summary with per-stage `last_success_at` / `age_hours`.
+- `scripts/check_sync_freshness.py` prints the per-stage table and exits `1`
+  when a stage or derived table is stale (`2` when the check itself cannot reach
+  the database), so wiring it into the cron wrapper turns a silent gap into a
+  next-run failure.
+
+```bash
+DB_HOST=localhost uv run python scripts/check_sync_freshness.py
+# sync freshness (threshold 192h, checked 2026-09-17T18:34:31+00:00)
+# name                             kind     status   age_hours  last_success_at
+# longbridge                       stage    fresh        47.82  2026-09-15T18:45:27+00:00
+# futu                             stage    fresh        47.69  2026-09-15T18:53:22+00:00
+# stock_names                      stage    stale      1088.71  2026-08-03T09:51:57+00:00
+# consensus                        stage    stale      1113.11  2026-08-02T09:27:43+00:00
+# prediction                       stage    fresh        90.44  2026-09-14T00:08:00+00:00
+# earnings_consensus               derived  stale      1113.11  2026-08-02T09:27:41+00:00
+# earnings                         derived  fresh        47.69  2026-09-15T18:53:22+00:00
+# …
+# STALE: stage 'consensus' last succeeded at 2026-08-02T09:27:43+00:00 (1113.11h ago)
+# exit=1
+```
+
+Timestamps are compared and printed in UTC regardless of the database session
+timezone, so the ages are stable.
 
 ## Tech Stack
 
