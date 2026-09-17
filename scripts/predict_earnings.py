@@ -335,8 +335,10 @@ def merge_duplicate_symbols(dry_run: bool = False) -> "MergeStats":
                 continue
             merge_symbol_onto_canonical(cur, sym, "HK", normalize(sym.split(".")[0], "HK"), stats, dry_run=dry_run)
 
-        if stats.changed:
-            logger.info(f"Merged duplicate symbols: {stats.summary()}")
+        if stats.changed or stats.skipped:
+            # Always report the counters: a run that only skipped must still be
+            # distinguishable from one that merged or deleted (Issue #54).
+            logger.info(f"Duplicate symbol cleanup: {stats.summary()}")
     return stats
 
 

@@ -458,6 +458,19 @@ class DirtySymbolMergeTests(TestCase):
         self.assertIn("snapshots_moved=1", stats.summary())
         self.assertTrue(stats.changed)
 
+    def test_a_run_that_only_skips_still_logs_its_counters(self):
+        """Issue #54 criterion 4: the production log must show the whole picture."""
+        earnings = [_row(1, "82333.HK", "HK", date(2026, 8, 26))]
+        with mock.patch.object(predict_earnings.logger, "info") as info:
+            stats, _ = _run_merge(earnings, [])
+        messages = [call.args[0] for call in info.call_args_list]
+        self.assertFalse(stats.changed)
+        self.assertTrue(
+            any("moved=0" in message and "skipped=1" in message and "deleted=0" in message
+                for message in messages),
+            messages,
+        )
+
 
 class MergeSqlContractTests(TestCase):
     """The SQL that keeps the invariant must actually carry it."""
