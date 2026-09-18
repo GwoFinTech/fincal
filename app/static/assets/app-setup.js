@@ -12,6 +12,26 @@
     return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
   }
 
+  // The single local "today" (same zone/format as every request window, #46).
+  // Both the calendar window and the watchlist "next report" cut-off read it,
+  // so the two pages can never disagree about what counts as future.
+  function localTodayYmd() { return localYmd(new Date()); }
+
+  function localDaysFromTodayYmd(days) {
+    const d = new Date();
+    d.setDate(d.getDate() + days);
+    return localYmd(d);
+  }
+
+  // ── Watchlist "next earnings" lookahead (Issue #56) ────────────────
+  // The watchlist table asks for its own forward-only window instead of
+  // reusing the calendar's "displayed month ±1" dataset, and the window must
+  // reach as far as the predictor can place a date, otherwise a symbol whose
+  // only future row sits further out would render as "—". Mirrors
+  // scripts/predict_earnings.py (MAX_PREDICT_AHEAD = 4 quarters,
+  // MAX_FUTURE_DAYS = 420); tests/test_frontend_structure.py pins the match.
+  const WATCHLIST_NEXT_WINDOW_DAYS = 420;
+
   // ══════════════════════════════════════════════════════════════════
   // Composables (Issue #13 — domain logic extracted from setup)
   // ══════════════════════════════════════════════════════════════════
@@ -159,12 +179,21 @@
     };
   }
 
-  // ── useWatchlist: search + CRUD ─────────────────────────────────
+  // ── useWatchlist: search + CRUD + own "next earnings" source ────
   function useWatchlist(apiFetch, showToast, loadEarnings) {
     const watchlist = ref([]);
     const searchQuery = ref('');
     const searchResults = ref([]);
     const searchLoading = ref(false);
+
+    // Issue #56: the watchlist table ("下次财报 / EPS 预期 / 营收预期") owns its
+    // data. It used to reuse the calendar's `earnings` ref, whose window is the
+    // *displayed* month ±1, and then fell back to the earliest row of that
+    // window — so 9/18 rows rendered an already-reported period in the default
+    // month, 18/18 after paging the calendar back, and the values depended on
+    // where the user last left the calendar. This ref is forward-only and
+    // independent of cal.currentDate.
+    const nextEarnings = ref([]);
 
     const usWatchlist = computed(() => watchlist.value.filter(item => item.market === 'US'));
     const hkWatchlist = computed(() => watchlist.value.filter(item => item.market === 'HK'));
@@ -173,6 +202,30 @@
       const data = await apiFetch('/api/watchlist');
       if (data) watchlist.value = data;
     }
+
+    async function loadNextEarnings() {
+      // Forward-only window: a period that has already been reported is never
+      // a candidate for "下次财报", so there is no reason to request one.
+      const start = localTodayYmd();
+      const end = localDaysFromTodayYmd(WATCHLIST_NEXT_WINDOW_DAYS);
+      const params = new URLSearchParams({ start, end, watchlistOnly: true });
+      const data = await apiFetch(`/api/earnings?${params}`);
+      nextEarnings.value = data || [];
+    }
+
+    // One row per symbol: the earliest report still ahead of local today.
+    // Computed once per data change (the table looks each row up repeatedly)
+    // and a Map so the lookup cannot accidentally pick a later period.
+    const nextBySymbol = computed(() => {
+      const today = localTodayYmd();
+      const map = new Map();
+      for (const e of nextEarnings.value) {
+        if (!e.report_date || e.report_date < today) continue;
+        const key = e.market + ':' + e.symbol;
+        if (!map.has(key)) map.set(key, e); // /api/earnings is report_date-ordered
+      }
+      return map;
+    });
 
     let searchTimer;
     async function doSearch() {
@@ -190,6 +243,7 @@
       await apiFetch(`/api/watchlist?symbol=${encodeURIComponent(symbol)}&market=${encodeURIComponent(market)}`, { method: 'POST' });
       await loadWatchlist();
       await loadEarnings();
+      await loadNextEarnings();
       showToast('已添加 ' + symbol);
       searchQuery.value = '';
       searchResults.value = [];
@@ -199,6 +253,7 @@
       await apiFetch(`/api/watchlist?symbol=${encodeURIComponent(symbol)}&market=${encodeURIComponent(market)}`, { method: 'DELETE' });
       await loadWatchlist();
       await loadEarnings();
+      await loadNextEarnings();
       showToast('已移除 ' + symbol);
     }
 
@@ -212,16 +267,17 @@
       else await addToWatchlist(symbol, market);
     }
 
-    function watchlistInsight(item, earningsData) {
-      const today = localYmd(new Date());
-      const matches = earningsData.filter(e => e.symbol === item.symbol && e.market === item.market);
-      return matches.find(e => e.report_date >= today) || matches[0] || {};
+    // No fallback to the earliest row of the window: when nothing is ahead of
+    // today the row must render "—" rather than silently present an already
+    // reported period as the next one.
+    function watchlistInsight(item) {
+      return nextBySymbol.value.get(item.market + ':' + item.symbol) || {};
     }
 
     return {
       watchlist, searchQuery, searchResults, searchLoading,
-      usWatchlist, hkWatchlist,
-      loadWatchlist, doSearch, addToWatchlist, removeFromWatchlist,
+      usWatchlist, hkWatchlist, nextEarnings, nextBySymbol,
+      loadWatchlist, loadNextEarnings, doSearch, addToWatchlist, removeFromWatchlist,
       isMine, toggleWatchlist, watchlistInsight,
     };
   }
@@ -358,11 +414,18 @@
       if (!fy || !fq) return '';
       return String(fy).slice(-2) + 'Q' + fq;
     }
+    // Sub-label of a watchlist "下次财报" cell: the fiscal period when the row
+    // knows it, empty when there is no upcoming report at all (Issue #56).
+    // Previously an empty insight still rendered "待确认" next to "—".
+    function periodLabel(e) {
+      if (!e || !e.report_date) return '';
+      return fqLabel(e.fiscal_year, e.fiscal_quarter) || '待确认';
+    }
 
     return {
       epsSurplus, epsSurplusClass, revSurplus, revSurplusClass,
       metricDelta, fmtNum, fmtPct, signedPct, fmtBigNum,
-      estimateSourceLabel, hasLongbridgeConsensus, fqLabel,
+      estimateSourceLabel, hasLongbridgeConsensus, fqLabel, periodLabel,
     };
   }
 
@@ -423,6 +486,13 @@
       // ── Lifecycle ────────────────────────────────────────────
       watch(cal.currentDate, loadEarnings);
 
+      // The watchlist data must not follow the calendar month; it is refreshed
+      // when the page is (re)entered so a long calendar session cannot show a
+      // stale "下次财报" (Issue #56).
+      watch(appTab, (tab) => {
+        if (tab === 'watchlist' && user.value) wl.loadNextEarnings();
+      });
+
       onMounted(async () => {
         try {
           const resp = await fetch('/api/config');
@@ -432,7 +502,10 @@
         if (userData) {
           ical.updateIcalUrl();
         }
-        if (user.value) await wl.loadWatchlist();
+        if (user.value) {
+          await wl.loadWatchlist();
+          await wl.loadNextEarnings();
+        }
         await loadEarnings();
       });
 
@@ -452,7 +525,7 @@
         searchLoading: wl.searchLoading, usWatchlist: wl.usWatchlist, hkWatchlist: wl.hkWatchlist,
         doSearch: wl.doSearch, addToWatchlist: wl.addToWatchlist, removeFromWatchlist: wl.removeFromWatchlist,
         toggleWatchlist: wl.toggleWatchlist, isMine: wl.isMine,
-        watchlistInsight: (item) => wl.watchlistInsight(item, earnings.value),
+        watchlistInsight: wl.watchlistInsight,
         // iCal
         showIcalModal: ical.showIcalModal, icalUrl: ical.icalUrl, icalOptions: ical.icalOptions,
         copied: ical.copied, popularSuggestions: ical.popularSuggestions, copyIcal: ical.copyIcal,
