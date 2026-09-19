@@ -68,7 +68,7 @@ python scripts/sync_futu.py
 # Predict future dates from historical patterns
 python scripts/predict_earnings.py
 
-# Or run all at once
+# Or run the pipeline (per-stage timeouts, failure isolation, stage summary)
 bash scripts/sync_all.sh
 
 # Verify every stage actually ran recently (read-only; exit 1 when a stage is
@@ -78,22 +78,48 @@ python scripts/check_sync_freshness.py
 
 ### Sync scheduling contract
 
-`scripts/cron_sync.sh` → `scripts/sync_all.sh` is the **only** scheduling
-entrypoint; the stage order inside `sync_all.sh` is the pipeline contract:
+`scripts/cron_sync.sh` is the **only** scheduling entrypoint. A scheduler must
+call exactly that file and must not keep its own stage list:
 
-| Stage (`sync_runs.stage`) | Script |
-|---|---|
-| `longbridge` | `scripts/sync_earnings.py` |
-| `futu` | `scripts/sync_futu.py` |
-| `stock_names` | `scripts/sync_stock_names.py` |
-| `consensus` | `scripts/sync_consensus.py` |
-| `prediction` | `scripts/predict_earnings.py` |
+```bash
+# weekly, e.g. `0 8 * * 1` — the whole scheduled job, nothing else
+bash /opt/fincal/scripts/cron_sync.sh
+```
 
-Adding a stage means adding the script to `sync_all.sh` **and** registering it in
-`app/freshness.py::STAGE_SCRIPTS` — `tests/test_sync_freshness.py` fails if the
-two drift apart, so a new stage can never run unmonitored (a wrapper script
-outside the repo once kept calling an older stage list, which is how the
-`consensus` and `stock_names` stages went idle for six weeks unnoticed).
+The entrypoint runs the pipeline and then the freshness gate:
+
+1. `scripts/sync_all.sh` — the pipeline. The stage order inside it is the
+   contract, and it is the **only** place the stage list is written down:
+
+   | Stage (`sync_runs.stage`) | Script | Default budget |
+   |---|---|---|
+   | `longbridge` | `scripts/sync_earnings.py` | 900s |
+   | `futu` | `scripts/sync_futu.py` | 1500s |
+   | `stock_names` | `scripts/sync_stock_names.py` | 900s |
+   | `consensus` | `scripts/sync_consensus.py` | 2400s |
+   | `prediction` | `scripts/predict_earnings.py` | 600s |
+
+   Every stage runs under `timeout` (override with
+   `FINCAL_STAGE_TIMEOUT_<STAGE>`, e.g. `FINCAL_STAGE_TIMEOUT_CONSENSUS=3600`),
+   a failing or timed-out stage never stops the remaining stages, a failed
+   stage keeps its per-stage log under `/tmp/fincal-sync.*/`, and the run ends
+   with a `stage summary` table.
+
+2. `scripts/check_sync_freshness.py` — the hard gate, run **after** the stages
+   so a first catch-up run is judged on the data it just wrote. Its non-zero
+   exit (a stage that stopped running, or a derived table that is stale) plus
+   the stage failure above are merged into the job's exit code, so a silent gap
+   becomes a failed run that names the stale stages.
+
+Adding a stage means adding it to `sync_all.sh` **and** registering it in
+`app/freshness.py::STAGE_SCRIPTS` — `tests/test_sync_freshness.py` and
+`tests/test_sync_scripts.py` fail if the two drift apart, and the latter also
+fails if the entrypoint stops covering a stage or stops calling the gate. The
+tests cannot see the scheduler host though, so `scripts/deploy.sh` prints the
+deployed entrypoint, its stage list and the hash of both sync scripts, and warns
+when a scheduler-side wrapper still carries its own stage list — that is how
+`consensus` and `stock_names` once went 47 days without a run while every health
+endpoint stayed green (Issue #57).
 
 ## Architecture
 
