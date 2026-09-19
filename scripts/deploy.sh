@@ -58,7 +58,7 @@ for name in cron_sync.sh sync_all.sh; do
     fi
 done
 
-ENTRYPOINT="$DST/scripts/cron_sync.sh"
+ENTRYPOINT="${DST%/}/scripts/cron_sync.sh"
 STAGE_LIST=$(grep -oE 'python scripts/[a-z_]+\.py' "$DST/scripts/sync_all.sh" \
     | awk '{print $2}' | tr '\n' ' ')
 echo "entrypoint : $ENTRYPOINT"

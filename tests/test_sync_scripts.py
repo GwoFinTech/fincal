@@ -91,6 +91,9 @@ def _run(tmp_path, scripts, bin_dir, env=None, entrypoint="cron_sync.sh"):
         **os.environ,
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
         "CALL_LOG": str(log),
+        # Keep the per-stage logs of a failing/timeouting stage inside the test
+        # directory instead of littering the system temp dir.
+        "TMPDIR": str(tmp_path),
         **(env or {}),
     }
     result = subprocess.run(["bash", str(scripts / entrypoint)], env=environment,
