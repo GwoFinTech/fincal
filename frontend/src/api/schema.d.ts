@@ -141,7 +141,11 @@ export interface paths {
         };
         /**
          * Api Popular
-         * @description Get the list of popular stocks shown by default. Cached (Issue #7).
+         * @description Get the list of popular stocks shown by default (Issue #7).
+         *
+         *     Served straight from the live universe accessor (Issue #58): its TTL is the
+         *     one that governs how fresh this answer is, so an upstream add/remove cannot
+         *     hide behind a second, longer-lived cache.
          */
         get: operations["api_popular_api_popular_get"];
         put?: never;
@@ -555,6 +559,7 @@ export interface components {
                 [key: string]: unknown;
             })[];
             freshness?: components["schemas"]["FreshnessResponse"] | null;
+            universe?: components["schemas"]["UniverseStatus"] | null;
         };
         /** EarningItem */
         EarningItem: {
@@ -1059,6 +1064,48 @@ export interface components {
             status: string;
             /** Cnt */
             cnt: number;
+        };
+        /**
+         * UniverseStatus
+         * @description State of the live default calendar/export universe (Issue #58).
+         */
+        UniverseStatus: {
+            /**
+             * Symbol Count
+             * @default 0
+             */
+            symbol_count: number;
+            /**
+             * Us Count
+             * @default 0
+             */
+            us_count: number;
+            /**
+             * Hk Count
+             * @default 0
+             */
+            hk_count: number;
+            /**
+             * Source
+             * @default
+             */
+            source: string;
+            /**
+             * Stale
+             * @default false
+             */
+            stale: boolean;
+            /** Error Code */
+            error_code?: string | null;
+            /** Last Success At */
+            last_success_at?: string | null;
+            /** Fetched At */
+            fetched_at?: string | null;
+            /**
+             * Ttl Seconds
+             * @default 0
+             */
+            ttl_seconds: number;
         };
         /** UserResponse */
         UserResponse: {

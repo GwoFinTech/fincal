@@ -33,6 +33,17 @@ WATCHLIST_SOURCE = os.getenv("WATCHLIST_SOURCE", "hybrid")
 WATCHLIST_HTTP_URL = os.getenv("WATCHLIST_HTTP_URL", "")
 WATCHLIST_HTTP_FIELD = os.getenv("WATCHLIST_HTTP_FIELD", "code")
 
+# Default calendar/export universe freshness (Issue #58). The universe is the
+# configured watchlist source, read through a short TTL cache instead of once at
+# import time: the cross-DB read stays off the request path, while an upstream
+# add/remove still lands without a container restart.
+UNIVERSE_CACHE_TTL_SECONDS = float(os.getenv("UNIVERSE_CACHE_TTL_SECONDS", "120"))
+# A failed read must not be parked for the whole TTL: the previous (or fallback)
+# universe is kept, the error is exposed in /api/admin/diagnostics, and the
+# source is retried after this bounded backoff — so recovery needs no restart,
+# and an outage does not become one source query per request.
+UNIVERSE_ERROR_RETRY_SECONDS = float(os.getenv("UNIVERSE_ERROR_RETRY_SECONDS", "15"))
+
 # Futu OpenD connection (optional - used for earnings date sync)
 FUTU_HOST = os.getenv("FUTU_HOST", "127.0.0.1")
 # The host's OpenD relay listens on 11112.  Production containers override

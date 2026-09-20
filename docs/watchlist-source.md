@@ -150,7 +150,7 @@ derived methods — subclasses only need `fetch_symbols()`.
 
 | Component | Method used | Purpose |
 |-----------|-------------|---------|
-| `app/earnings.py` | `get_symbols_by_market()` | Default symbol list for calendar queries |
+| `app/universe.py` | `get_symbols_by_market_with_status()` | Live default calendar/export/`/api/popular` universe, cached for `UNIVERSE_CACHE_TTL_SECONDS` (Issue #58) |
 | `scripts/sync_futu.py` | `get_futu_symbols()` | Futu earnings date sync universe |
 | `scripts/predict_earnings.py` | `get_symbols_by_market()` | Prediction universe |
 | `scripts/sync_earnings.py` | *(market-based, no watchlist filter)* | Longbridge full-market sync |
@@ -158,3 +158,11 @@ derived methods — subclasses only need `fetch_symbols()`.
 The sync scripts don't filter by watchlist — they fetch the full market calendar
 from Longbridge/Futu and upsert everything.  The watchlist controls **what the
 UI shows by default** and **what Futu syncs** (Futu requires explicit symbol lists).
+
+The read path (`app/universe.py`) used to be bound once at import time, which
+meant an upstream add/remove — or a source that was unreachable during startup —
+stayed frozen in the default calendar and the export until the next container
+restart.  It now reads through a short TTL cache and is invalidated explicitly
+after `POST/PUT/DELETE /api/admin/watchlist`, so a change is visible on the next
+request; a degraded read keeps the last good (or hardcoded fallback) universe and
+is reported in `/api/admin/diagnostics` under `universe.error_code`.

@@ -142,7 +142,8 @@ def ical_feed(
         cur.execute("SELECT symbol, market FROM watchlist WHERE user_id = %s", (user["id"],))
         watchlist = cur.fetchall()
 
-    from ..earnings import fetch_earnings_from_db, POPULAR_STOCKS_US, POPULAR_STOCKS_HK
+    from ..earnings import fetch_earnings_from_db
+
     selected_markets = [markets] if markets != "all" else ["US", "HK"]
 
     def _generate():

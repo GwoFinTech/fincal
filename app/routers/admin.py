@@ -5,6 +5,7 @@ from .. import config, db
 from ..admin_watchlist import normalize_managed_symbol
 from ..auth import get_current_user, require_admin
 from ..watchlist import get_source
+from ..universe import invalidate_symbol_universe, universe_status
 from ..errors import AppError, NotFoundError, ConflictError, ForbiddenError
 from ..schemas import (
     ManagedWatchlistItem, ManagedWatchlistInput as ManagedInput, SyncRun, SyncRunCancelResult,
@@ -74,7 +75,12 @@ def add_managed_watchlist(payload: ManagedInput, _: dict = Depends(admin_user)):
                RETURNING id, symbol, market, created_at, updated_at""",
             (symbol, market),
         )
-        return dict(cur.fetchone())
+        row = dict(cur.fetchone())
+    # A managed symbol joins the default calendar/export universe, which is
+    # cached; drop those caches so the change is visible immediately instead of
+    # after the TTL (Issue #58).
+    invalidate_symbol_universe()
+    return row
 
 
 @router.put("/watchlist/{watchlist_id}", response_model=ManagedWatchlistItem)
@@ -95,7 +101,9 @@ def update_managed_watchlist(watchlist_id: int, payload: ManagedInput, _: dict =
                WHERE id=%s RETURNING id, symbol, market, created_at, updated_at""",
             (symbol, market, watchlist_id),
         )
-        return dict(cur.fetchone())
+        row = dict(cur.fetchone())
+    invalidate_symbol_universe()  # symbol identity changed → universe is stale (Issue #58)
+    return row
 
 
 @router.delete("/watchlist/{watchlist_id}")
@@ -104,6 +112,7 @@ def delete_managed_watchlist(watchlist_id: int, _: dict = Depends(admin_user)):
         cur.execute("DELETE FROM managed_watchlist WHERE id=%s", (watchlist_id,))
         if cur.rowcount != 1:
             raise NotFoundError("managed_watchlist")
+    invalidate_symbol_universe()  # removed symbol must leave the calendar too (Issue #58)
     return {"status": "removed"}
 
 
@@ -175,6 +184,10 @@ def diagnostics(_: dict = Depends(admin_user)):
         result["recent_syncs"] = [dict(r) for r in cur.fetchall()]
     result["sync_runs_window_hours"] = window_hours
     result["freshness"] = check_freshness()
+    # Issue #58: surface the state of the live default universe, so a fallback
+    # universe that silently replaced the real one is visible instead of hiding
+    # behind four healthy dependency probes.
+    result["universe"] = universe_status()
     return result
 
 

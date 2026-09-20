@@ -19,9 +19,20 @@ from ..schemas import (
 
 router = APIRouter(prefix="/api", tags=["api"])
 
-# Per-endpoint caches
+# Per-endpoint caches. The default symbol universe lives in app.universe (Issue
+# #58) with its own TTL, so /api/popular no longer wraps it in a second,
+# hour-long cache that could outlive an upstream change.
 _earnings_cache = LayerCache(default_ttl=120.0, stale_ttl=1800.0)
-_popular_cache = LayerCache(default_ttl=3600.0, stale_ttl=86400.0)
+
+
+def invalidate_universe_caches() -> None:
+    """Drop the response caches that embed the symbol universe (Issue #58).
+
+    Called by :func:`app.universe.invalidate_symbol_universe` after an admin
+    watchlist mutation: the universe change alone would still be masked by this
+    response cache until its TTL expired.
+    """
+    _earnings_cache.invalidate()
 
 
 @router.get("/config", response_model=AppConfig)
@@ -104,7 +115,8 @@ def api_earnings(
     user=Depends(get_current_user),
 ):
     """Get earnings calendar data with layer cache (Issue #7)."""
-    from ..earnings import fetch_earnings_from_db, POPULAR_STOCKS_US, POPULAR_STOCKS_HK
+    from ..earnings import fetch_earnings_from_db
+    from ..universe import popular_stocks
 
     fincal_user = ensure_user(user["id"], user["email"], user["name"])
 
@@ -129,7 +141,8 @@ def api_earnings(
         return fetch_earnings_from_db(symbols=symbols, markets=markets, start=start, end=end)
     else:
         def _fetch():
-            all_symbols = list(set(POPULAR_STOCKS_US + POPULAR_STOCKS_HK))
+            universe_us, universe_hk = popular_stocks()
+            all_symbols = list(set(universe_us + universe_hk))
             all_markets = ["US", "HK"]
             with db.db_cursor() as cur:
                 cur.execute(
@@ -179,14 +192,15 @@ def api_earning_decision(earning_id: int, user=Depends(get_current_user)):
 
 @router.get("/popular", response_model=PopularStocks)
 def api_popular(user=Depends(get_current_user)):
-    """Get the list of popular stocks shown by default. Cached (Issue #7)."""
-    from ..earnings import POPULAR_STOCKS_US, POPULAR_STOCKS_HK
+    """Get the list of popular stocks shown by default (Issue #7).
 
-    def _fetch():
-        return {"US": POPULAR_STOCKS_US, "HK": POPULAR_STOCKS_HK}
+    Served straight from the live universe accessor (Issue #58): its TTL is the
+    one that governs how fresh this answer is, so an upstream add/remove cannot
+    hide behind a second, longer-lived cache.
+    """
+    from ..universe import popular_stocks_by_market
 
-    data, _ = _popular_cache.get_or_refresh("popular", _fetch, ttl=3600.0)
-    return data
+    return popular_stocks_by_market()
 
 
 @router.get("/search", response_model=list[SearchItem])
@@ -223,12 +237,14 @@ def api_search_stocks(q: str, user=Depends(get_current_user)):
 @router.get("/export")
 def api_export(start: date, end: date, format: str = "csv", user=Depends(get_current_user)):
     """Export earnings data as CSV or JSON."""
-    from ..earnings import fetch_earnings_from_db, POPULAR_STOCKS_US, POPULAR_STOCKS_HK
+    from ..earnings import fetch_earnings_from_db
+    from ..universe import popular_stocks
     from fastapi.responses import StreamingResponse
     import csv, io, json as json_mod
 
     ensure_user(user["id"], user["email"], user["name"])
-    symbols = POPULAR_STOCKS_US + POPULAR_STOCKS_HK
+    universe_us, universe_hk = popular_stocks()
+    symbols = universe_us + universe_hk
     markets = ["US", "HK"]
     data = fetch_earnings_from_db(symbols=symbols, markets=markets, start=start, end=end)
 

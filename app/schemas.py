@@ -264,6 +264,18 @@ class SourceDistribution(BaseModel):
     estimate_source: str | None = None
     count: int
 
+class UniverseStatus(BaseModel):
+    """State of the live default calendar/export universe (Issue #58)."""
+    symbol_count: int = 0
+    us_count: int = 0
+    hk_count: int = 0
+    source: str = ""
+    stale: bool = False
+    error_code: str | None = None
+    last_success_at: str | None = None
+    fetched_at: str | None = None
+    ttl_seconds: float = 0.0
+
 class DiagnosticsResponse(BaseModel):
     providers: dict[str, ProviderStats | dict] = {}
     cache: CacheStats = CacheStats()
@@ -275,6 +287,7 @@ class DiagnosticsResponse(BaseModel):
     sync_runs_window_hours: int = 24
     recent_syncs: list[RecentSync | dict] = []
     freshness: FreshnessResponse | None = None
+    universe: UniverseStatus | None = None
 
 class OverviewSource(BaseModel):
     configured: str = ""

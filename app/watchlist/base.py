@@ -37,6 +37,25 @@ class FetchResult:
         return not self.symbols and self.error_code is not None
 
 
+def group_symbols_by_market(codes: list[str]) -> dict[str, list[str]]:
+    """Bucket canonical ``TICKER.MARKET`` codes into ``{'US': [...], 'HK': [...]}``.
+
+    HK codes are normalized to the canonical 4-digit zero-padded form so they
+    match the earnings table keys (``700.HK`` -> ``0700.HK``); codes without a
+    known suffix are treated as US tickers.
+    """
+    result: dict[str, list[str]] = {"US": [], "HK": []}
+    for code in codes:
+        code = str(code).strip().upper()
+        if code.endswith(".HK"):
+            result["HK"].append(normalize(code[:-3], "HK"))
+        elif code.endswith(".US"):
+            result["US"].append(code[:-3])  # strip .US suffix
+        else:
+            result["US"].append(code)
+    return result
+
+
 class WatchlistSource(ABC):
     """Base watchlist source.  Only ``fetch_symbols`` needs implementation."""
 
@@ -114,17 +133,17 @@ class WatchlistSource(ABC):
         """``{'US': ['AAPL', …], 'HK': ['0700.HK', …]}`` — HK codes are
         normalized to the canonical 4-digit zero-padded form so they match
         the earnings table keys (700.HK -> 0700.HK)."""
-        codes = self.get_symbols(force_refresh=force_refresh)
-        result: dict[str, list[str]] = {"US": [], "HK": []}
-        for code in codes:
-            code = code.strip().upper()
-            if code.endswith(".HK"):
-                result["HK"].append(normalize(code[:-3], "HK"))
-            elif code.endswith(".US"):
-                result["US"].append(code[:-3])  # strip .US suffix
-            else:
-                result["US"].append(code)
-        return result
+        by_market, _status = self.get_symbols_by_market_with_status(force_refresh=force_refresh)
+        return by_market
+
+    def get_symbols_by_market_with_status(
+        self, *, force_refresh: bool = False
+    ) -> tuple[dict[str, list[str]], FetchResult]:
+        """``(by_market, status)`` — :meth:`get_symbols_by_market` plus the
+        staleness/error metadata callers need to keep a cached copy of the
+        universe honest (Issue #58)."""
+        status = self.get_symbols_with_status(force_refresh=force_refresh)
+        return group_symbols_by_market(status.symbols), status
 
     def get_futu_symbols(self, *, force_refresh: bool = False) -> list[str]:
         """Symbols in fincal canonical format (``AAPL.US``, ``0700.HK``).

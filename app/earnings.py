@@ -5,23 +5,25 @@ from . import config
 
 logger = logging.getLogger(__name__)
 
+# The default universe (POPULAR_STOCKS_*) used to be read here, at import time,
+# which froze an upstream add/remove — or a source outage during startup — for
+# the whole process lifetime (Issue #58).  It now lives in ``app.universe`` as a
+# live, TTL-cached accessor; ``POPULAR_STOCKS_US`` / ``POPULAR_STOCKS_HK`` are
+# kept as deprecated shims (below) for any out-of-tree importer.
 
-def _get_popular_stocks():
-    """Read popular stocks from configured watchlist source, fallback to hardcoded."""
-    try:
-        from .watchlist import get_source
-        syms = get_source().get_symbols_by_market()
-        if syms["US"] or syms["HK"]:
-            return syms["US"], syms["HK"]
-    except Exception as e:
-        logger.warning(f"Failed to load watchlist: {e}")
-    # Fallback
-    return (
-        ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA"],
-        ["0700.HK", "9988.HK", "1810.HK"],
-    )
 
-POPULAR_STOCKS_US, POPULAR_STOCKS_HK = _get_popular_stocks()
+def __getattr__(name: str):
+    """Deprecated compatibility shim for the removed module-level constants.
+
+    Prefer :func:`app.universe.popular_stocks`, which reads the universe live
+    instead of returning the value captured at import time (Issue #58).
+    """
+    if name in ("POPULAR_STOCKS_US", "POPULAR_STOCKS_HK"):
+        from .universe import popular_stocks
+
+        us, hk = popular_stocks()
+        return us if name == "POPULAR_STOCKS_US" else hk
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def fetch_earnings_from_db(
