@@ -77,6 +77,23 @@ LONGBRIDGE_ACCESS_TOKEN=os.getenv("LONGBRIDGE_ACCESS_TOKEN", "")
 # iCal subscription base URL (must be publicly accessible)
 ICAL_BASE_URL = os.getenv("ICAL_BASE_URL", "")
 
+# Forward horizon (days) of the calendar read outlets (Issue #59).  This is the
+# single source of truth for "how far ahead does the app look": the iCal feed
+# (app/routers/ical.py) and the default window of /api/earnings
+# (app/routers/api.py, app/earnings.py) all read it, so no outlet can silently
+# stop short of another.
+#
+# The invariant that matters: the predictor places dates up to
+# scripts/predict_earnings.py::MAX_FUTURE_DAYS ahead (4 quarters, ~1 year), so
+# any outlet that is meant to show the calendar must reach at least that far.
+# The feed used to stop at a hardcoded 120 days while the app UI (and the
+# predictor) used 420: 80% of the already-computed predictions were visible in
+# the app and permanently missing from the subscription, with no error anywhere.
+# The default is pinned to MAX_FUTURE_DAYS by tests/test_ical_subscription.py;
+# narrowing it through the environment variable re-introduces that gap, because
+# a prediction outside the window has no other channel to reach the subscriber.
+CALENDAR_FORWARD_DAYS = int(os.getenv("CALENDAR_FORWARD_DAYS", "420"))
+
 # Kurumi (tsummt) API — preferred company-name source for FinCal symbols.
 KURUMI_API_URL = os.getenv("KURUMI_API_URL", "http://localhost:8000")
 KURUMI_API_TIMEOUT = float(os.getenv("KURUMI_API_TIMEOUT", "5"))

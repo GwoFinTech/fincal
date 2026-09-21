@@ -123,7 +123,10 @@ def api_earnings(
     if start is None:
         start = date.today() - timedelta(days=7)
     if end is None:
-        end = date.today() + timedelta(days=90)
+        # Keep the default window on the shared calendar horizon instead of a
+        # local literal: a caller that omits `end` used to get 90 days while the
+        # watchlist view and the iCal feed reached 420 (Issue #59).
+        end = date.today() + timedelta(days=config.CALENDAR_FORWARD_DAYS)
 
     cache_key = f"earnings:{start}:{end}:{watchlistOnly}:{fincal_user['id']}"
 

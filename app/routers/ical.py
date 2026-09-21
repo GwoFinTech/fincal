@@ -158,9 +158,15 @@ def ical_feed(
             syms = [normalize(r["symbol"], r["market"]) for r in watchlist if r["market"] in selected_markets]
             if not syms:
                 return generate_ical([], user.get("email", ""), title_lang=lang), []
+        # The window is the shared calendar horizon (config.CALENDAR_FORWARD_DAYS,
+        # default = predictor MAX_FUTURE_DAYS), not a local literal: the feed is a
+        # subscription, so an event outside the window has no other path to the
+        # user — it used to stop at a hardcoded 120 days and silently dropped
+        # every prediction the app itself could show (Issue #59).
         earn = fetch_earnings_from_db(
             symbols=syms, markets=selected_markets,
-            start=date.today() - timedelta(days=7), end=date.today() + timedelta(days=120),
+            start=date.today() - timedelta(days=7),
+            end=date.today() + timedelta(days=config.CALENDAR_FORWARD_DAYS),
         )
         if not predicted:
             earn = [e for e in earn if not e.get("is_predicted")]

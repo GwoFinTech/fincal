@@ -121,6 +121,26 @@ when a scheduler-side wrapper still carries its own stage list — that is how
 `consensus` and `stock_names` once went 47 days without a run while every health
 endpoint stayed green (Issue #57).
 
+## Calendar window (one horizon, every outlet)
+
+`CALENDAR_FORWARD_DAYS` (default `420`) is the forward horizon of the calendar
+read outlets, and the predictor's `MAX_FUTURE_DAYS` is the horizon it can place a
+date in. They must be equal or the feed is shorter than the data behind it:
+
+| Outlet | Window |
+|--------|--------|
+| iCal feed `/ical/{token}` | `today - 7d` … `today + CALENDAR_FORWARD_DAYS` |
+| `/api/earnings` default (no `start`/`end` given) | `today - 7d` … `today + CALENDAR_FORWARD_DAYS` |
+| App calendar / watchlist "next earnings" (it always sends `start`/`end`) | same horizon, `WATCHLIST_NEXT_WINDOW_DAYS` |
+| Predictor (`scripts/predict_earnings.py`) | `today` … `today + MAX_FUTURE_DAYS` |
+
+The feed used to stop at a hardcoded 120 days while the app and the predictor
+used 420: the predictions were computed, stored and visible in the app, but 80%
+of them were permanently missing from every subscription, with no error on either
+side (Issue #59). `tests/test_calendar_window.py` and
+`tests/test_frontend_structure.py` pin the outlets to that horizon, and
+`app/routers/ical.py` no longer carries a window literal of its own.
+
 ## Architecture
 
 ```
@@ -163,6 +183,7 @@ All configuration is via environment variables. See [`.env.example`](.env.exampl
 | `DB_PASSWORD` | *(empty)* | Database password |
 | `WATCHLIST_SOURCE` | `tsummt` | `tsummt` or `http` ([docs](docs/watchlist-source.md)) |
 | `ICAL_BASE_URL` | — | Public URL for iCal feeds |
+| `CALENDAR_FORWARD_DAYS` | `420` | Forward horizon (days) of the iCal feed and the default `/api/earnings` window |
 | `FUTU_HOST` | `127.0.0.1` | Futu OpenD host |
 | `FUTU_PORT` | `11112` | Futu OpenD port |
 | `FUTU_DATES_TIMEOUT_SECONDS` | `15` | Per-symbol earnings-date call watchdog |

@@ -39,7 +39,10 @@ def fetch_earnings_from_db(
     if start is None:
         start = date.today() - timedelta(days=7)
     if end is None:
-        end = date.today() + timedelta(days=90)
+        # Same horizon as the iCal feed and the watchlist view (Issue #59): a
+        # shorter fallback here truncated the very predictions the rest of the
+        # app shows for callers that omit the window.
+        end = date.today() + timedelta(days=config.CALENDAR_FORWARD_DAYS)
 
     with db.db_cursor() as cur:
         conditions = ["e.report_date BETWEEN %s AND %s"]
