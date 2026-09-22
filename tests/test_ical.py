@@ -83,15 +83,30 @@ def test_event_metadata_is_stable_and_has_sequence():
     assert "SEQUENCE:" in first
 
 
-def test_changed_event_content_changes_sequence():
+def test_changed_event_content_advances_sequence_monotonically():
+    """A real revision advances SEQUENCE; unchanged content keeps it stable.
+
+    SEQUENCE follows the row's write timestamp (Issue #37), so an edit that
+    carries a newer ``updated_at`` must hand out a bigger number, while the same
+    write timestamp must hand out the *same* number — a content hash could do
+    neither (it once dropped below the sequence of the prediction it replaced).
+    """
     base = {
         "symbol": "AAPL", "market": "US", "report_date": date(2026, 8, 3),
         "before_after": "before",
+        "updated_at": datetime(2026, 8, 1, 8, 0, tzinfo=timezone.utc),
     }
-    changed = {**base, "before_after": "after"}
-    first = generate_ical([base])
-    second = generate_ical([changed])
-    assert first.split("SEQUENCE:", 1)[1].split("\r\n", 1)[0] != second.split("SEQUENCE:", 1)[1].split("\r\n", 1)[0]
+    revised = {**base, "before_after": "after",
+               "updated_at": datetime(2026, 8, 2, 9, 30, tzinfo=timezone.utc)}
+
+    def _seq(ics: str) -> int:
+        return int(ics.split("SEQUENCE:", 1)[1].split("\r\n", 1)[0])
+
+    first = _seq(generate_ical([base]))
+    second = _seq(generate_ical([revised]))
+    assert second > first
+    # Content differs but the row was not rewritten: stable, never lower.
+    assert _seq(generate_ical([{**base, "before_after": "after"}])) == first
 
 
 def test_feed_validator_headers_support_conditional_requests():

@@ -6,11 +6,11 @@ covers the sample scenarios called out in the issue:
   - US summer/winter time (DST boundary) explicit UTC conversion
   - HK timezone (no DST) explicit UTC conversion
   - Chinese long-description folding at UTF-8 byte boundaries
-  - Predicted → confirmed event content changes SEQUENCE
+  - Predicted → confirmed revision increases SEQUENCE monotonically (Issue #37)
   - Add / modify / delete semantics via UID stability
   - Subscription endpoint returns valid text/calendar without cookies
 """
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import icalendar
 import pytest
@@ -173,7 +173,13 @@ def test_confirmed_event_confirmed_status():
     assert str(ev["STATUS"]) == "CONFIRMED"
 
 
-# ── Scenario 7: Predicted → confirmed changes SEQUENCE ────────────────────
+# ── Scenario 7: Predicted → confirmed increases SEQUENCE (Issue #37) ──────
+
+def _sequence_of(ics: str, index: int = 0) -> int:
+    """Return the SEQUENCE of the ``index``-th VEVENT, read from the raw text."""
+    block = ics.split("BEGIN:VEVENT")[index + 1]
+    return int(block.split("SEQUENCE:", 1)[1].split("\r\n", 1)[0])
+
 
 def test_predicted_to_confirmed_changes_sequence():
     """Same event becoming confirmed must change SEQUENCE."""
@@ -190,6 +196,94 @@ def test_predicted_to_confirmed_changes_sequence():
     seq_p = int(_events(cal_p)[0]["SEQUENCE"])
     seq_c = int(_events(cal_c)[0]["SEQUENCE"])
     assert seq_p != seq_c
+
+
+def test_predicted_to_confirmed_sequence_strictly_increases():
+    """The confirmed revision must outrank the prediction it replaces.
+
+    This is the delivery path Issue #37 is about: Outlook & co. ignore an update
+    whose SEQUENCE is not newer than the copy they already hold, so the
+    confirmed date never reached subscribers under the content-hash rule.
+    """
+    row = {
+        "symbol": "AAPL", "market": "US", "company_name": "Apple",
+        "report_date": date(2026, 8, 3), "fiscal_year": 2026, "fiscal_quarter": 3,
+        "before_after": "before", "is_predicted": True,
+        "updated_at": datetime(2026, 7, 20, 8, 0, tzinfo=timezone.utc),
+    }
+    confirmed = {**row, "is_predicted": False, "date_status": "reported",
+                 "eps_actual": 1.42,
+                 "updated_at": datetime(2026, 8, 1, 12, 30, tzinfo=timezone.utc)}
+    seq_p = _sequence_of(generate_ical([row]))
+    seq_c = _sequence_of(generate_ical([confirmed]))
+    assert seq_c > seq_p
+    # Same UID: the client updates the event in place instead of duplicating it.
+    uid_p = str(_events(_parse(generate_ical([row])))[0]["UID"])
+    uid_c = str(_events(_parse(generate_ical([confirmed])))[0]["UID"])
+    assert uid_p == uid_c
+
+
+def test_sequence_increases_within_one_second_on_confirmation():
+    """Tentative → confirmed must increase even inside the same second.
+
+    A single sync run can write the confirmation in the same second the
+    prediction was last touched; the revision rank (not the clock) has to make
+    that update strictly newer.
+    """
+    stamp = datetime(2026, 8, 1, 8, 0, 0, tzinfo=timezone.utc)
+    row = {
+        "symbol": "AAPL", "market": "US", "report_date": date(2026, 8, 3),
+        "fiscal_year": 2026, "fiscal_quarter": 3, "before_after": "before",
+        "is_predicted": True, "updated_at": stamp,
+    }
+    confirmed = {**row, "is_predicted": False, "date_status": "scheduled"}
+    assert _sequence_of(generate_ical([confirmed])) > _sequence_of(generate_ical([row]))
+
+
+def test_sequence_never_decreases_across_estimate_revisions():
+    """N consecutive eps_estimate revisions must be monotone non-decreasing."""
+    def _revision(n: int, eps_estimate: float) -> dict:
+        return {
+            "symbol": "MSFT", "market": "US", "company_name": "Microsoft",
+            "report_date": date(2026, 10, 22), "fiscal_year": 2027,
+            "fiscal_quarter": 1, "before_after": "after",
+            "is_predicted": False, "date_status": "scheduled",
+            "eps_estimate": eps_estimate,
+            "updated_at": datetime(2026, 8, 1, 8, 0, 0, tzinfo=timezone.utc)
+            + timedelta(seconds=n),
+        }
+
+    sequences = [_sequence_of(generate_ical([_revision(n, 2.0 + n / 100.0)]))
+                 for n in range(20)]
+    assert sequences == sorted(sequences), f"SEQUENCE decreased: {sequences}"
+    assert len(set(sequences)) == len(sequences)  # distinct seconds → distinct
+
+
+def test_sequence_stable_when_content_unchanged():
+    """Regenerating an unchanged feed keeps SEQUENCE (no phantom revisions)."""
+    row = {
+        "symbol": "AAPL", "market": "US", "company_name": "Apple",
+        "report_date": date(2026, 8, 3), "fiscal_year": 2026, "fiscal_quarter": 3,
+        "before_after": "before", "is_predicted": True,
+        "updated_at": datetime(2026, 7, 20, 8, 0, tzinfo=timezone.utc),
+    }
+    first = generate_ical([row])
+    assert generate_ical([row]) == first
+    # An identical-string timestamp (as psycopg2 returns for TIMESTAMPTZ casts)
+    # must not shift the sequence either.
+    as_text = {**row, "updated_at": "2026-07-20T08:00:00+00:00"}
+    assert _sequence_of(generate_ical([as_text])) == _sequence_of(first)
+
+
+def test_sequence_fallback_is_deterministic_and_int32_safe():
+    """Rows without a write timestamp fall back to the report date, in range."""
+    row = {"symbol": "AAPL", "market": "US", "report_date": date(2026, 8, 3),
+           "before_after": ""}
+    assert _sequence_of(generate_ical([row])) == _sequence_of(generate_ical([row]))
+    for event in ([{**row, "is_predicted": True}, {**row, "is_predicted": False},
+                   {**row, "updated_at": datetime(2054, 1, 1, tzinfo=timezone.utc)}]):
+        seq = _sequence_of(generate_ical([event]))
+        assert 0 <= seq <= 2 ** 31 - 1, f"SEQUENCE out of RFC 5545 integer range: {seq}"
 
 
 # ── Scenario 8: UID stability across regenerations ────────────────────────

@@ -55,34 +55,89 @@ def _fold_ical_lines(lines: list[str]) -> list[str]:
     return folded
 
 
+def _event_moment(event: dict) -> datetime | None:
+    """Parse the row's write timestamp (``updated_at`` / ``created_at``).
+
+    Returns ``None`` when the event carries no usable timestamp, so callers can
+    pick their own deterministic fallback.  Naive timestamps are read as UTC.
+    """
+    value = event.get("updated_at") or event.get("created_at")
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed.astimezone(timezone.utc) if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return None
+
+
 def _stable_event_stamp(event: dict, report_date: date) -> str:
     """Return a stable UTC modification stamp for an event.
 
     Prefer the database update timestamp. The report date is a deterministic
     fallback; request time must never be used for LAST-MODIFIED.
     """
-    value = event.get("updated_at") or event.get("created_at")
-    if isinstance(value, datetime):
-        return value.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    if isinstance(value, str):
-        try:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
-            return parsed.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        except ValueError:
-            pass
-    return datetime.combine(report_date, time.min, tzinfo=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    moment = _event_moment(event) or datetime.combine(report_date, time.min, tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
-def _event_sequence(event: dict, summary: str, desc: str, report_date: date) -> int:
-    """Derive a stable positive SEQUENCE from the event content."""
-    payload = "|".join((str(event.get(key, "")) for key in (
-        "symbol", "market", "report_date", "report_type", "fiscal_year",
-        "fiscal_quarter", "before_after", "is_predicted", "company_name",
-        "eps_estimate", "eps_actual", "revenue_estimate", "revenue_actual",
-    ))) + f"|{summary}|{desc}|{report_date.isoformat()}"
-    return int.from_bytes(__import__("hashlib").sha256(payload.encode()).digest()[:4], "big") & 0x7FFFFFFF
+#: Base instant for emitted ``SEQUENCE`` values.  Subtracting a fixed epoch keeps
+#: the number small — RFC 5545 §3.3.8 defines ``integer`` as a signed 32-bit
+#: value — while staying strictly monotone in the row's ``updated_at``.  With
+#: ``_SEQUENCE_STRIDE`` = 2 the 32-bit ceiling falls around 2054.
+_SEQUENCE_EPOCH = datetime(2020, 1, 1, tzinfo=timezone.utc)
+
+#: One revision step per second, leaving the low bit to the revision rank.
+_SEQUENCE_STRIDE = 2
+
+#: Revision rank: a tentative (predicted) date is always revised *into* a
+#: confirmed one, never the other way round, so the confirmed row must outrank
+#: the prediction even when both were written inside the same second.
+_SEQUENCE_RANK_PREDICTED = 0
+_SEQUENCE_RANK_CONFIRMED = 1
+
+
+def _is_tentative(event: dict) -> bool:
+    """True while the row is still an unconfirmed prediction for this period.
+
+    Mirrors the "still a prediction" signals the generator already keys off
+    (``is_predicted`` and the derived ``date_status``).  It only feeds the
+    revision rank; the emitted ``STATUS`` / summary markers are unchanged.
+    """
+    return bool(event.get("is_predicted")) or event.get("date_status") == "predicted"
+
+
+def _event_sequence(event: dict, report_date: date) -> int:
+    """Return the VEVENT revision number (RFC 5545 §3.8.7.4).
+
+    ``SEQUENCE`` must *increase* whenever a component is revised: clients
+    (Outlook in particular) discard an update whose sequence is not newer than
+    the copy they already hold.  The previous implementation hashed the event
+    content, which has nothing to do with revision order — a confirmed date
+    could be emitted with a *smaller* sequence than the prediction it replaced,
+    and consecutive estimate corrections went up and down at random, so
+    subscribers silently kept a stale date (Issue #37).
+
+    Revision order now comes from the row's write timestamp, which every
+    earnings write path sets (``updated_at = NOW()`` in the sync, prediction,
+    seed and reconcile upserts), making the value monotone non-decreasing by
+    construction:
+
+    * seconds since :data:`_SEQUENCE_EPOCH` order the revisions themselves;
+    * the low-order rank makes tentative → confirmed strictly greater even when
+      both rows were written within the same second;
+    * unchanged content (same timestamp) yields the same number, so a feed that
+      did not change never makes clients treat it as a new revision.
+
+    Rows without a timestamp (in-memory callers, legacy rows) fall back to their
+    report date so the value stays deterministic between requests.
+    """
+    moment = _event_moment(event) or datetime.combine(report_date, time.min, tzinfo=timezone.utc)
+    seconds = int((moment - _SEQUENCE_EPOCH).total_seconds())
+    rank = _SEQUENCE_RANK_PREDICTED if _is_tentative(event) else _SEQUENCE_RANK_CONFIRMED
+    return max(0, seconds * _SEQUENCE_STRIDE + rank)
 
 
 def _event_uid(event: dict, report_date: date) -> str:
@@ -222,7 +277,7 @@ def generate_ical(earnings: list[dict], user_email: str = "", title_lang: str = 
         # predicted -> confirmed (or rescheduled) revision keeps the same UID
         # and clients update the event in place (Issue #40).
         stamp = _stable_event_stamp(e, report_date)
-        sequence = _event_sequence(e, summary, desc, report_date)
+        sequence = _event_sequence(e, report_date)
 
         lines.append("BEGIN:VEVENT")
         lines.append(f"SEQUENCE:{sequence}")
