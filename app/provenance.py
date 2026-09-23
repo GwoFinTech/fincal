@@ -5,6 +5,7 @@ Defines precedence rules and logs conflicts when sources disagree.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from . import db
 
@@ -18,6 +19,56 @@ SOURCE_PRIORITY = {
     "futu": 3,
     "kurumi": 4,
 }
+
+# ── Numeric attribution labels (Issue #61) ─────────────────────────────────
+#
+# ``date_source``/``estimate_source``/``actual_source`` say *who* wrote a value;
+# they never said *in what unit*.  The EPS/revenue pair of one row can therefore
+# mix a quote-currency consensus estimate with a reporting-currency statement
+# actual (TSM USD vs TWD, BABA USD vs CNY) or with a different per-share base
+# (KTOS -0.00512 vs 5.540795), and every consumer subtracted them anyway.  These
+# normalizers keep the provider's own words, and record ``unknown`` when the
+# provider said nothing — never the listing's default currency.
+
+#: Label stored when a provider does not declare the currency/basis.
+UNKNOWN_ATTRIBUTION = "unknown"
+
+_ISO_CURRENCY = re.compile(r"^[A-Z]{3}$")
+
+#: Provider accounting-standard labels mapped to the basis stored on the row.
+_BASIS_ALIASES = {
+    "US_GAAP": "gaap",
+    "USGAAP": "gaap",
+    "GAAP": "gaap",
+    "IFRS": "ifrs",
+    "国际会计准则": "ifrs",
+    "国际财务报告准则": "ifrs",
+}
+
+
+def normalize_currency(value) -> str:
+    """Return a provider-declared ISO-4217 code, or ``unknown``.
+
+    Never guesses: a missing value, or one that is not a three-letter code, is
+    recorded as ``unknown`` so the read path refuses to compare the row's figures
+    instead of assuming the listing's currency (Issue #61).
+    """
+    text = str(value or "").strip().upper()
+    return text if _ISO_CURRENCY.match(text) else UNKNOWN_ATTRIBUTION
+
+
+def normalize_basis(value) -> str:
+    """Map a provider's accounting-standard label to ``gaap``/``ifrs``/``unknown``.
+
+    Providers state the standard only sometimes (OpenD returns ``US_GAAP`` on the
+    income statement and an empty string on the EPS statement), so an unstated
+    basis stays ``unknown`` — the read path treats two unstated bases as
+    unverified unless one provider produced both numbers.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return UNKNOWN_ATTRIBUTION
+    return _BASIS_ALIASES.get(text.upper(), _BASIS_ALIASES.get(text, UNKNOWN_ATTRIBUTION))
 
 
 @dataclass

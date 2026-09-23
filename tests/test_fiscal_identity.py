@@ -268,7 +268,7 @@ class WritePathTests(TestCase):
         with mock.patch("psycopg2.extras.execute_values", recorder), \
              mock.patch.object(sync_earnings, "db_cursor", return_value=_fake_db_cursor(cursor)):
             sync_earnings.flush_batch(cursor, [
-                ("MARA", "US", "", "2026-03-05", "Q", 2025, 4, None, None, None, None, "after"),
+                lb_batch_row("MARA", "US", "", "2026-03-05", 2025, 4, before_after="after"),
             ])
         updates = [call for call in cursor.executed if "UPDATE earnings SET report_date" in call[0]]
         self.assertEqual(len(updates), 1)
@@ -287,7 +287,7 @@ class WritePathTests(TestCase):
         with mock.patch("psycopg2.extras.execute_values", recorder), \
              mock.patch.object(sync_earnings, "db_cursor", return_value=_fake_db_cursor(cursor)):
             sync_earnings.flush_batch(cursor, [
-                ("MARA", "US", "", "2026-03-05", "Q", 2025, 4, None, None, None, None, "after"),
+                lb_batch_row("MARA", "US", "", "2026-03-05", 2025, 4, before_after="after"),
             ])
         self.assertEqual([call for call in cursor.executed if "UPDATE earnings SET report_date" in call[0]], [])
 
@@ -298,7 +298,7 @@ class WritePathTests(TestCase):
         with mock.patch("psycopg2.extras.execute_values", recorder), \
              mock.patch.object(sync_earnings, "db_cursor", return_value=_fake_db_cursor(cursor)):
             sync_earnings.flush_batch(cursor, [
-                ("AMD", "US", "", "2026-10-30", "Q", 2026, 3, None, None, None, None, "after"),
+                lb_batch_row("AMD", "US", "", "2026-10-30", 2026, 3, before_after="after"),
             ])
         self.assertEqual([call for call in cursor.executed if "UPDATE earnings SET report_date" in call[0]], [])
         insert = [call for call in recorder.calls if "INSERT INTO earnings " in call["sql"]]
@@ -310,8 +310,8 @@ class WritePathTests(TestCase):
         with mock.patch("psycopg2.extras.execute_values", recorder), \
              mock.patch.object(sync_earnings, "db_cursor", return_value=_fake_db_cursor(cursor)):
             sync_earnings.flush_batch(cursor, [
-                ("2880.HK", "HK", "", "2026-08-27", "Q", 2026, 4, None, None, None, None, None),
-                ("2880.HK", "HK", "", "2026-08-31", "Q", 2026, 4, None, None, None, None, None),
+                lb_batch_row("2880.HK", "HK", "", "2026-08-27", 2026, 4),
+                lb_batch_row("2880.HK", "HK", "", "2026-08-31", 2026, 4),
             ])
         insert = [call for call in recorder.calls if "INSERT INTO earnings " in call["sql"]][0]
         self.assertEqual([row[3] for row in insert["rows"]], ["2026-08-31"])
@@ -361,10 +361,26 @@ def _date_updates(cursor):
     return [call for call in cursor.executed if "UPDATE earnings SET report_date" in call[0]]
 
 
+def lb_batch_row(symbol, market, company_name, report_date, fiscal_year, fiscal_quarter,
+                 eps_estimate=None, eps_actual=None, revenue_estimate=None,
+                 revenue_actual=None, before_after=None, estimate_currency=None,
+                 actual_currency=None):
+    """One Longbridge batch tuple in the layout ``flush_batch`` expects.
+
+    Issue #61 added the four attribution fields to the batch (the calendar's
+    declared currency plus the explicit ``unknown`` basis), so the tuple width has
+    to match the INSERT column list exactly — see
+    ``BatchColumnContractTests`` for the assertion that keeps the two in step.
+    """
+    return (symbol, market, company_name, report_date, "Q", fiscal_year, fiscal_quarter,
+            eps_estimate, eps_actual, revenue_estimate, revenue_actual, before_after,
+            estimate_currency, actual_currency, "unknown", "unknown")
+
+
 #: The production collision: Longbridge reports QBIEY FY2026 Q1 on 2026-08-13,
 #: a date already held by that symbol's FY2026 Q2 row (sync_runs id=66).
-_QBIEY_CANDIDATE = ("QBIEY", "US", "QBIEY", "2026-08-13", "Q", 2026, 1,
-                    None, None, None, None, "after")
+_QBIEY_CANDIDATE = lb_batch_row("QBIEY", "US", "QBIEY", "2026-08-13", 2026, 1,
+                                before_after="after")
 
 
 def _qbiey_q1_row():
@@ -402,7 +418,7 @@ class RescheduleConflictTests(TestCase):
             {"id": 370, "fiscal_year": 2027, "fiscal_quarter": 1, "is_predicted": True},
         ])
         outcome = _reschedule(cursor, [
-            ("QBIEY", "US", "QBIEY", "2026-08-13", "Q", 2027, 4, None, None, None, None, "after"),
+            lb_batch_row("QBIEY", "US", "QBIEY", "2026-08-13", 2027, 4, before_after="after"),
         ])
         self.assertEqual(_date_updates(cursor), [])
         self.assertEqual(outcome.moves, [])
@@ -442,7 +458,7 @@ class RescheduleConflictTests(TestCase):
              mock.patch.object(sync_earnings, "db_cursor", return_value=_fake_db_cursor(cursor)):
             stats = sync_earnings.flush_batch(cursor, [
                 _QBIEY_CANDIDATE,
-                ("AAPL", "US", "Apple", "2026-10-29", "Q", 2026, 4, None, None, None, None, "after"),
+                lb_batch_row("AAPL", "US", "Apple", "2026-10-29", 2026, 4, before_after="after"),
             ])
         self.assertEqual((stats.rows, stats.moves, stats.skipped), (2, 0, 1))
         insert = [call for call in recorder.calls if "INSERT INTO earnings " in call["sql"]][0]

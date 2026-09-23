@@ -191,6 +191,101 @@ def _is_newer(left, right) -> bool:
     return str(left) > str(right)
 
 
+# ── Estimate/actual comparability (Issue #61) ──────────────────────────────
+#
+# Every display of a "surprise" (``(actual - estimate) / |estimate|``) used to be
+# unconditional, yet the two figures come from different providers with different
+# attribution: the estimate is Longbridge's calendar figure in the listing's quote
+# currency, while the actual is often Futu's financial statement in the *reporting*
+# currency (TSM: USD estimate vs TWD actual, ×32; BABA/PDD/NIO/XPEV: USD vs CNY,
+# ×6.8).  For US small caps the same row carried two numbers 5×–1800× apart with
+# same currency code (KTOS -0.00512 vs 5.540795), i.e. a base/unit difference the
+# API could not describe at all.  A row now claims its attribution and this module
+# decides whether the two numbers may be subtracted; the reason codes are
+# language-independent, so no user-visible prose lives in the API.
+
+#: Label meaning "the provider did not state this".
+UNKNOWN_ATTRIBUTION = "unknown"
+
+#: Row-level reason codes for :func:`comparison_unavailable_reason`.
+COMPARISON_CURRENCY_UNKNOWN = "currency_unknown"
+COMPARISON_CURRENCY_MISMATCH = "currency_mismatch"
+COMPARISON_BASIS_MISMATCH = "basis_mismatch"
+COMPARISON_BASIS_UNVERIFIED = "basis_unverified"
+
+
+def declared_attribution(row, field: str) -> str | None:
+    """Return a row's currency/basis label, or ``None`` when it is not declared.
+
+    ``None`` (missing, empty or the explicit ``unknown`` marker) means the
+    provider never said which currency/base the number is in — callers must treat
+    it as "unattributed" rather than assume the listing's default.
+    """
+    value = row.get(field)
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() == UNKNOWN_ATTRIBUTION:
+        return None
+    return text.upper()
+
+
+def has_comparable_values(row) -> bool:
+    """True when the row carries at least one complete estimate/actual pair."""
+    return (
+        row.get("eps_estimate") is not None and row.get("eps_actual") is not None
+    ) or (
+        row.get("revenue_estimate") is not None and row.get("revenue_actual") is not None
+    )
+
+
+def _same_declared_source(row) -> bool:
+    estimate_source = row.get("estimate_source")
+    actual_source = row.get("actual_source")
+    if not estimate_source or not actual_source:
+        return False
+    return str(estimate_source).strip().lower() == str(actual_source).strip().lower()
+
+
+def comparison_unavailable_reason(row) -> str | None:
+    """Why the row's estimate/actual pair must not be subtracted (Issue #61).
+
+    ``None`` means the pair is attributed consistently — same known currency, and
+    either the same stated basis on both sides or one provider computing both
+    numbers — so a surplus percentage describes a real difference.  Anything else
+    returns a language-independent reason code:
+
+    * ``currency_unknown`` — the estimate or the actual carries no currency, so
+      the two numbers cannot be proven to be the same unit of money;
+    * ``currency_mismatch`` — both sides are attributed and differ (quote currency
+      against reporting currency);
+    * ``basis_mismatch`` — both sides state a basis and the bases differ
+      (GAAP against adjusted);
+    * ``basis_unverified`` — different providers (or an unattributed source) and
+      at least one side does not state its basis, so a GAAP-vs-adjusted or
+      per-share-unit difference cannot be ruled out.
+
+    Rows without a complete estimate/actual pair return ``None``: there is nothing
+    to compare, and the read paths already render a missing value as "—".
+    """
+    if not has_comparable_values(row):
+        return None
+    estimate_currency = declared_attribution(row, "estimate_currency")
+    actual_currency = declared_attribution(row, "actual_currency")
+    if estimate_currency is None or actual_currency is None:
+        return COMPARISON_CURRENCY_UNKNOWN
+    if estimate_currency != actual_currency:
+        return COMPARISON_CURRENCY_MISMATCH
+    estimate_basis = declared_attribution(row, "estimate_basis")
+    actual_basis = declared_attribution(row, "actual_basis")
+    if estimate_basis and actual_basis:
+        return None if estimate_basis == actual_basis else COMPARISON_BASIS_MISMATCH
+    # At least one side left its basis unstated. Within one provider that is
+    # harmless (that provider produced both numbers the same way); across
+    # providers it means the two figures are not proven to share a basis.
+    return None if _same_declared_source(row) else COMPARISON_BASIS_UNVERIFIED
+
+
 def _identity_query() -> str:
     return (
         "SELECT e.id, e.symbol, e.market, e.fiscal_year, e.fiscal_quarter,"

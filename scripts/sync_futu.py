@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.db import db_cursor
 from app import config
 from app import fiscal
+from app.provenance import normalize_basis, normalize_currency
 from app.symbol import normalize, to_futu_code
 from app.sync_audit import check_cancelled
 from app.watchlist import get_source
@@ -587,16 +588,26 @@ def sync_actuals(ctx, run_id: int, symbols: list[str]) -> FutuStageStats:
                                 pass
                             break
                     if eps_val is not None:
+                        # Issue #61: a written actual must say which currency and
+                        # which accounting base it is in — OpenD reports the
+                        # *reporting* currency (TSM: TWD, BABA/PDD/NIO: CNY) for a
+                        # listing whose consensus estimate is in its quote
+                        # currency, and this is the evidence the read path needs to
+                        # refuse the subtraction. Never guessed: an undeclared
+                        # value is stored as ``unknown``.
                         with db_cursor() as cur:
                             cur.execute(
                                 """UPDATE earnings SET eps_actual = %s, date_status = 'reported',
-                                   actual_source = 'futu', actual_as_of = NOW(), updated_at = NOW()
+                                   actual_source = 'futu', actual_as_of = NOW(),
+                                   actual_currency = %s, actual_basis = %s, updated_at = NOW()
                                 WHERE symbol = %s AND market = %s AND fiscal_year = %s
                                 AND fiscal_quarter = %s
                                 AND COALESCE(actual_source, 'unknown') IN
                                     ('unknown', 'algorithm', 'longbridge', 'futu')
                                 """,
-                                (eps_val, symbol, market, fy, fq),
+                                (eps_val, normalize_currency(report.get("currency_code")),
+                                 normalize_basis(report.get("accounting_standards")),
+                                 symbol, market, fy, fq),
                             )
 
             # Income Statement for revenue (fid=8002)
@@ -628,13 +639,16 @@ def sync_actuals(ctx, run_id: int, symbols: list[str]) -> FutuStageStats:
                         with db_cursor() as cur:
                             cur.execute(
                                 """UPDATE earnings SET revenue_actual = %s, date_status = 'reported',
-                                   actual_source = 'futu', actual_as_of = NOW(), updated_at = NOW()
+                                   actual_source = 'futu', actual_as_of = NOW(),
+                                   actual_currency = %s, actual_basis = %s, updated_at = NOW()
                                 WHERE symbol = %s AND market = %s AND fiscal_year = %s
                                 AND fiscal_quarter = %s
                                 AND COALESCE(actual_source, 'unknown') IN
                                     ('unknown', 'algorithm', 'longbridge', 'futu')
                                 """,
-                                (rev_val, symbol, market, fy, fq),
+                                (rev_val, normalize_currency(report.get("currency_code")),
+                                 normalize_basis(report.get("accounting_standards")),
+                                 symbol, market, fy, fq),
                             )
         except Exception as e:
             outcome = merge_outcome(outcome, OUTCOME_FAILED)

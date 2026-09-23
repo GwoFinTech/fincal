@@ -115,6 +115,8 @@ def init_db():
                 estimate_basis TEXT,
                 actual_source TEXT,
                 actual_as_of TIMESTAMPTZ,
+                actual_currency TEXT,
+                actual_basis TEXT,
                 UNIQUE(symbol, market, report_date, report_type)
             );
         """)
@@ -122,10 +124,16 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_earnings_report_date ON earnings(report_date);
         """)
         # CREATE TABLE does not add fields to installations created by older releases.
+        # Issue #61: ``estimate_currency``/``estimate_basis`` existed but were never
+        # written by any code path, and the actual side had no columns at all — so a
+        # row could not say whether its estimate and its actual were even the same
+        # unit of money. ``actual_currency``/``actual_basis`` mirror the estimate
+        # pair; historical rows keep NULL, which the read path reads as unknown.
         for column, definition in (
             ("date_source", "TEXT NOT NULL DEFAULT 'unknown'"), ("date_status", "TEXT NOT NULL DEFAULT 'scheduled'"),
             ("estimate_source", "TEXT"), ("estimate_as_of", "TIMESTAMPTZ"), ("estimate_currency", "TEXT"),
             ("estimate_basis", "TEXT"), ("actual_source", "TEXT"), ("actual_as_of", "TIMESTAMPTZ"),
+            ("actual_currency", "TEXT"), ("actual_basis", "TEXT"),
         ):
             cur.execute(f"ALTER TABLE earnings ADD COLUMN IF NOT EXISTS {column} {definition}")
         cur.execute("""

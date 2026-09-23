@@ -75,7 +75,14 @@ def fetch_earnings_from_db(
     # of the API, the CSV/JSON export and the iCal feed) keeps the three outlets
     # in agreement instead of letting each of them pick its own row (Issue #50).
     from . import fiscal
-    return fiscal.collapse_fiscal_duplicates(rows)
+    rows = fiscal.collapse_fiscal_duplicates(rows)
+    # Issue #61: the same single entry point decides whether each row's estimate
+    # and actual may be subtracted, so the calendar, the exports and the iCal feed
+    # cannot disagree about comparability either. The reason is a code, never
+    # prose — the UI owns the wording.
+    for row in rows:
+        row["comparison_unavailable_reason"] = fiscal.comparison_unavailable_reason(row)
+    return rows
 
 
 def seed_earnings_if_empty():

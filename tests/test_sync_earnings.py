@@ -31,6 +31,10 @@ class LongbridgePaginationTests(TestCase):
 
 class LongbridgeBatchTests(TestCase):
     def test_duplicate_natural_keys_keep_the_row_with_more_consensus_values(self):
-        sparse = ("AMD", "US", "", "2026-08-04", "Q", 2026, 2, None, None, None, None, None)
-        rich = ("AMD", "US", "AMD", "2026-08-04", "Q", 2026, 2, 1.05, None, 11.3, None, "after")
+        # Batch layout after Issue #61: the last four fields are the attribution
+        # (estimate/actual currency + explicit basis) added by the fix.
+        sparse = ("AMD", "US", "", "2026-08-04", "Q", 2026, 2, None, None, None, None, None,
+                  None, None, "unknown", "unknown")
+        rich = ("AMD", "US", "AMD", "2026-08-04", "Q", 2026, 2, 1.05, None, 11.3, None, "after",
+                "USD", None, "unknown", "unknown")
         self.assertEqual(sync_earnings.dedupe_batch([sparse, rich]), [rich])

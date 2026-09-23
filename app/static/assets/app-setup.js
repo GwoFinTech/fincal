@@ -364,7 +364,27 @@
 
   // ── useFormatters: number/percentage/date helpers ───────────────
   function useFormatters() {
+    // Issue #61: the API marks a row whose estimate and actual are not the same
+    // quantity (different/unknown currency, unverified basis) with a
+    // language-independent reason code. Such a row must never render a surplus
+    // percentage, a beat/miss colour or an up/down arrow — the two numbers are
+    // not comparable, so any difference between them is an artefact.
+    function comparisonUnavailable(e) {
+      return !!(e && e.comparison_unavailable_reason);
+    }
+    function comparisonNote(e) {
+      const reason = e && e.comparison_unavailable_reason;
+      if (!reason) return '';
+      const labels = {
+        currency_mismatch: '预期与实际币种不同，无法比较',
+        currency_unknown: '币种未标明，无法比较',
+        basis_mismatch: '预期与实际口径不同，无法比较',
+        basis_unverified: '口径未经同一来源确认，无法比较',
+      };
+      return labels[reason] || '口径不可比';
+    }
     function epsSurplus(e) {
+      if (comparisonUnavailable(e)) return null;
       if (e.eps_estimate == null || e.eps_actual == null) return null;
       const diff = e.eps_actual - e.eps_estimate;
       if (Math.abs(e.eps_estimate) < 0.0001) return diff > 0 ? 1 : diff < 0 ? -1 : 0;
@@ -375,6 +395,7 @@
       return s > 0.001 ? 'beat' : s < -0.001 ? 'miss' : '';
     }
     function revSurplus(e) {
+      if (comparisonUnavailable(e)) return null;
       if (e.revenue_estimate == null || e.revenue_actual == null) return null;
       const diff = e.revenue_actual - e.revenue_estimate;
       if (Math.abs(e.revenue_estimate) < 0.0001) return diff > 0 ? 1 : diff < 0 ? -1 : 0;
@@ -383,6 +404,14 @@
     function revSurplusClass(e) {
       const s = revSurplus(e);
       return s > 0.001 ? 'beat' : s < -0.001 ? 'miss' : '';
+    }
+    // A row keeps its "较预期" cell only when both values exist *and* the API did
+    // not flag the pair as non-comparable; otherwise the cell shows "—".
+    function hasComparison(e, metric) {
+      if (!e || comparisonUnavailable(e)) return false;
+      return metric === 'eps'
+        ? e.eps_estimate != null && e.eps_actual != null
+        : e.revenue_estimate != null && e.revenue_actual != null;
     }
     function metricDelta(actual, estimate) {
       return actual == null || estimate == null ? null : Number(actual) - Number(estimate);
@@ -424,6 +453,7 @@
 
     return {
       epsSurplus, epsSurplusClass, revSurplus, revSurplusClass,
+      hasComparison, comparisonNote, comparisonUnavailable,
       metricDelta, fmtNum, fmtPct, signedPct, fmtBigNum,
       estimateSourceLabel, hasLongbridgeConsensus, fqLabel, periodLabel,
     };

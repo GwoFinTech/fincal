@@ -55,6 +55,37 @@ def _fold_ical_lines(lines: list[str]) -> list[str]:
     return folded
 
 
+def _comparability_note(reason: str, title_lang: str = "en") -> str:
+    """One description line explaining why no surprise is shown (Issue #61).
+
+    The event carries both figures, so a subscriber may reasonably expect a
+    comparison; the line states the reason in words (the language the summary
+    already follows) and keeps the machine-readable code for support.
+    """
+    labels = {
+        "currency_mismatch": {"en": "different currencies", "zh": "币种不同"},
+        "currency_unknown": {"en": "currency undeclared", "zh": "币种未标明"},
+        "basis_mismatch": {"en": "different accounting bases", "zh": "口径不同"},
+        "basis_unverified": {"en": "accounting base unverified", "zh": "口径未经同一来源确认"},
+    }
+    wording = labels.get(reason, {}).get(title_lang) or labels.get(reason, {}).get("en") or reason
+    return f"Comparability: unavailable ({wording}; {reason})"
+
+
+def _attributed_amount(label: str, value, currency: str | None) -> str:
+    """Render ``EPS Est: 3.34 (USD)`` — a figure always carries its currency.
+
+    Issue #61: this description used to print the estimate and the actual side by
+    side with no unit at all, so a TWD actual next to a USD estimate read like an
+    enormous beat in every subscribed calendar. When the provider never declared
+    the currency the line says so explicitly instead of falling back to the
+    listing's currency.
+    """
+    if value in (None, ""):
+        return ""
+    return f"{label}: {value} ({currency or 'currency unknown'})"
+
+
 def _event_moment(event: dict) -> datetime | None:
     """Parse the row's write timestamp (``updated_at`` / ``created_at``).
 
@@ -263,13 +294,17 @@ def generate_ical(earnings: list[dict], user_email: str = "", title_lang: str = 
         # Company names use the cached canonical name; title_lang controls the
         # event wording because the current earnings schema has one name field.
         # Keep the human-readable summary free of duplicate market labels.
+        comparison_reason = e.get("comparison_unavailable_reason") or fiscal.comparison_unavailable_reason(e)
         desc_parts = [f"Company: {company}" if company else "",
                       f"Fiscal: FY{fy} {fq_str}" if fy else "",
                       f"Timing: {time_label}" if time_label else "",
                       f"⚠ Predicted date (not confirmed)" if is_pred else "",
                       f"Date source: {date_source}" if date_source and date_source != "unknown" else "",
-                      f"EPS Est: {e.get('eps_estimate')}" if e.get('eps_estimate') else "",
-                      f"EPS Actual: {e.get('eps_actual')}" if e.get('eps_actual') else ""]
+                      _attributed_amount("EPS Est", e.get("eps_estimate"),
+                                         fiscal.declared_attribution(e, "estimate_currency")),
+                      _attributed_amount("EPS Actual", e.get("eps_actual"),
+                                         fiscal.declared_attribution(e, "actual_currency")),
+                      _comparability_note(comparison_reason, title_lang) if comparison_reason else ""]
         desc = "\n".join(p for p in desc_parts if p)
 
         dt_str = report_date.strftime("%Y%m%d")

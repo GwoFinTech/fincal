@@ -17,6 +17,7 @@ from app.symbol import from_lb_counter_id, normalize
 from app.sync_audit import check_cancelled, SyncCancelledError
 from app.sync_quality import SyncQuality
 from app import fiscal
+from app.provenance import UNKNOWN_ATTRIBUTION, normalize_currency
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -213,6 +214,11 @@ def flush_batch(cur, rows: list[tuple]) -> FlushStats:
     the fiscal period is the row's persistent identity, so letting a provider
     candidate of a *different* period overwrite it would re-create exactly the
     duplicate-period disease #50 removed.
+
+    Issue #61: the batch also carries the event's declared currency so each
+    written value can say which unit of money it is in.  The actual side is
+    labelled only when this event supplied the actual value; a Futu-written
+    actual on the same row keeps Futu's own attribution.
     """
     rows = dedupe_batch(rows)
     rows = fiscal.collapse_rows_by_period(
@@ -234,7 +240,8 @@ def flush_batch(cur, rows: list[tuple]) -> FlushStats:
         cur,
         """INSERT INTO earnings (symbol, market, company_name, report_date, report_type,
            fiscal_year, fiscal_quarter,
-           eps_estimate, eps_actual, revenue_estimate, revenue_actual, before_after)
+           eps_estimate, eps_actual, revenue_estimate, revenue_actual, before_after,
+           estimate_currency, actual_currency, estimate_basis, actual_basis)
         VALUES %s
         ON CONFLICT (symbol, market, report_date, report_type)
         DO UPDATE SET
@@ -246,6 +253,12 @@ def flush_batch(cur, rows: list[tuple]) -> FlushStats:
             revenue_estimate = COALESCE(EXCLUDED.revenue_estimate, earnings.revenue_estimate),
             revenue_actual = COALESCE(EXCLUDED.revenue_actual, earnings.revenue_actual),
             before_after = COALESCE(EXCLUDED.before_after, earnings.before_after),
+            estimate_currency = COALESCE(EXCLUDED.estimate_currency, earnings.estimate_currency),
+            estimate_basis = COALESCE(earnings.estimate_basis, EXCLUDED.estimate_basis),
+            actual_currency = CASE WHEN EXCLUDED.eps_actual IS NOT NULL OR EXCLUDED.revenue_actual IS NOT NULL
+                                   THEN EXCLUDED.actual_currency ELSE earnings.actual_currency END,
+            actual_basis = CASE WHEN EXCLUDED.eps_actual IS NOT NULL OR EXCLUDED.revenue_actual IS NOT NULL
+                                THEN EXCLUDED.actual_basis ELSE earnings.actual_basis END,
             is_predicted = FALSE,
             updated_at = NOW()
         """,
@@ -352,6 +365,10 @@ def sync_earnings(run_id: int, stats: SyncStats | None = None) -> SyncStats:
                 company_name = info.get("counter_name", "")
                 date_type = parse_date_type(info.get("date_type", ""))
                 kv = extract_kv(info.get("data_kv", []))
+                # Issue #61: the calendar states the currency of the figures in
+                # this event; an unstated/unsupported value is recorded as the
+                # explicit ``unknown`` marker rather than assumed.
+                currency = normalize_currency(info.get("currency"))
 
                 ext = info.get("ext", {}).get("financial_report", {})
                 fiscal_quarter = None
@@ -391,6 +408,14 @@ def sync_earnings(run_id: int, stats: SyncStats | None = None) -> SyncStats:
                     kv.get("eps_estimate"), kv.get("eps_actual"),
                     kv.get("revenue_estimate"), kv.get("revenue_actual"),
                     date_type,
+                    # Issue #61: the calendar event states the currency its figures
+                    # are in, so the estimate is labelled whenever the event carries
+                    # one, and the actual only when this event actually supplied the
+                    # actual value (an actual written by Futu keeps its own label).
+                    currency if (kv.get("eps_estimate") is not None or kv.get("revenue_estimate") is not None) else None,
+                    currency if (kv.get("eps_actual") is not None or kv.get("revenue_actual") is not None) else None,
+                    UNKNOWN_ATTRIBUTION,
+                    UNKNOWN_ATTRIBUTION,
                 ))
                 run_stats.fetched += 1
 

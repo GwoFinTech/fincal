@@ -276,6 +276,7 @@ def api_export(start: date, end: date, format: str = "csv", user=Depends(get_cur
             "eps_actual", "revenue_estimate", "revenue_actual", "is_predicted",
             "date_source", "date_status", "estimate_source", "estimate_as_of",
             "estimate_currency", "estimate_basis", "actual_source", "actual_as_of",
+            "actual_currency", "actual_basis", "comparison_unavailable_reason",
             "updated_at", "consensus_currency", "consensus_eps_gaap",
             "consensus_eps_adjusted", "consensus_revenue", "consensus_ebit",
             "consensus_net_income", "consensus_normalized_net_income",

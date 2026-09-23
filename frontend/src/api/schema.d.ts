@@ -611,6 +611,16 @@ export interface components {
             estimate_source?: string | null;
             /** Actual Source */
             actual_source?: string | null;
+            /** Estimate Currency */
+            estimate_currency?: string | null;
+            /** Estimate Basis */
+            estimate_basis?: string | null;
+            /** Actual Currency */
+            actual_currency?: string | null;
+            /** Actual Basis */
+            actual_basis?: string | null;
+            /** Comparison Unavailable Reason */
+            comparison_unavailable_reason?: string | null;
             /** Consensus Eps Gaap */
             consensus_eps_gaap?: number | null;
             /** Consensus Eps Adjusted */

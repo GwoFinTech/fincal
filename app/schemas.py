@@ -76,6 +76,14 @@ class EarningItem(BaseModel):
     date_status: str | None = None
     estimate_source: str | None = None
     actual_source: str | None = None
+    # Attribution of the estimate/actual pair (Issue #61): which currency and
+    # which base each side is stated in, and — when they are not comparable — the
+    # language-independent reason the UI must render "—" instead of a surplus.
+    estimate_currency: str | None = None
+    estimate_basis: str | None = None
+    actual_currency: str | None = None
+    actual_basis: str | None = None
+    comparison_unavailable_reason: str | None = None
     consensus_eps_gaap: float | None = None
     consensus_eps_adjusted: float | None = None
     consensus_revenue: float | None = None
