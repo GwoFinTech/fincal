@@ -27,7 +27,10 @@ Re-reading the same field cannot repair those values, so the script:
 
 Only ``--apply`` writes.  ``--verify`` is a read-only production check that
 compares every Futu-sourced ``eps_actual`` with the provider's own
-基本每股收益 (acceptance 1) and exits non-zero on any mismatch.
+基本每股收益 (acceptance 1): exit ``0`` when every row matches, ``1`` on a real
+difference, ``2`` when the check could not cover every row (OpenD down, or the
+provider refused a symbol) — a quota rejection is reported as unverified, never
+as a data difference.
 
 Usage::
 
@@ -137,17 +140,25 @@ def statement_eps_map(payload: dict) -> dict[tuple[int, int], float]:
 
 
 def compare_rows(rows: list[dict],
-                 provider: dict[tuple[str, str], dict]) -> tuple[list[dict], list[dict]]:
-    """Split ``rows`` into (matched, mismatched) against the provider's EPS.
+                 provider: dict[tuple[str, str], dict],
+                 unreadable: tuple[tuple[str, str], ...] = ()) -> tuple[list[dict], list[dict], list[dict]]:
+    """Split ``rows`` into (matched, mismatched, unverified) against the provider.
 
     ``provider`` maps ``(symbol, market)`` to the fiscal-period map returned by
-    :func:`statement_eps_map`.  Rows the provider did not return for that period
-    are reported as mismatches (they cannot be verified).
+    :func:`statement_eps_map`.  A symbol listed in ``unreadable`` (OpenD refused
+    or errored) is *unverified*, never a mismatch — a quota rejection must not be
+    presented as a data difference.  A period the provider did report but without
+    an EPS figure is a mismatch: the stored value cannot be confirmed.
     """
     matched: list[dict] = []
     mismatched: list[dict] = []
+    unverified: list[dict] = []
     for row in rows:
-        periods = provider.get((row["symbol"], row["market"]), {})
+        key = (row["symbol"], row["market"])
+        if key in unreadable:
+            unverified.append({**row, "reason": "provider_unavailable_for_symbol"})
+            continue
+        periods = provider.get(key, {})
         try:
             period = (int(row["fiscal_year"]), int(row["fiscal_quarter"]))
         except (TypeError, ValueError):
@@ -160,44 +171,47 @@ def compare_rows(rows: list[dict],
             matched.append({**row, "provider_eps": expected})
         else:
             mismatched.append({**row, "provider_eps": expected, "reason": "value_differs"})
-    return matched, mismatched
+    return matched, mismatched, unverified
 
 
-def fetch_provider_eps(symbols: list[str]) -> dict[tuple[str, str], dict]:
+def fetch_provider_eps(symbols: list[str]) -> tuple[dict[tuple[str, str], dict], list[tuple[str, str]]]:
     """OpenD income statements for ``symbols`` → ``eps_actual`` reference values.
 
-    Read-only and paced through the shared OpenD limiter.  Returns an empty map
-    when OpenD is unavailable, so a caller can report "unverified" instead of
-    silently passing.
+    Returns ``(provider, unreadable)`` where ``unreadable`` lists the symbols
+    OpenD refused or errored for.  Read-only, and paced/retried through the same
+    :func:`sync_futu.futu_call` helper the sync uses, so a quota rejection is
+    reported as unverified instead of being read as a missing EPS figure.
     """
     if not symbols:
-        return {}
+        return {}, []
     ctx = sync_futu.create_futu_context()
     if ctx is None:
         print("  OpenD unavailable — the provider comparison cannot be made")
-        return {}
+        return {}, []
     limiter = sync_futu.get_rate_limiter()
+    stats = sync_futu.FutuStageStats()
     provider: dict[tuple[str, str], dict] = {}
+    unreadable: list[tuple[str, str]] = []
     try:
         for source_symbol in symbols:
             symbol, market = sync_futu.canonical_earnings_symbol(source_symbol)
             futu_code = sync_futu.to_futu_code(source_symbol)
-            limiter.acquire()
-            try:
-                ret, data = ctx.get_financials_statements(
+            outcome, data = sync_futu.futu_call(
+                futu_code, "VerifyEPS",
+                lambda: ctx.get_financials_statements(
                     futu_code, statement_type=sync_futu.FUTU_STATEMENT_INCOME,
                     financial_type=9, num=4,
-                )
-            except Exception as exc:  # a provider error must not abort the check
-                print(f"  {futu_code}: statement failed: {exc}")
-                continue
-            if ret != 0:
-                print(f"  {futu_code}: ret={ret} {sync_futu.futu_provider_message(data)}")
+                ),
+                limiter, stats,
+                timeout_seconds=sync_futu.config.FUTU_ACTUALS_TIMEOUT_SECONDS,
+            )
+            if outcome != sync_futu.OUTCOME_OK:
+                unreadable.append((symbol, market))
                 continue
             provider[(symbol, market)] = statement_eps_map(data)
     finally:
         ctx.close()
-    return provider
+    return provider, unreadable
 
 
 def refill(symbols: list[str]):
@@ -256,18 +270,30 @@ def state() -> dict:
 
 
 def verify(rows: list[dict]) -> int:
-    """Read-only comparison of the DB's Futu EPS against OpenD (acceptance 1)."""
-    provider = fetch_provider_eps(affected_symbols(rows))
-    if not provider:
+    """Read-only comparison of the DB's Futu EPS against OpenD (acceptance 1).
+
+    Exit codes: ``0`` every row equals the provider's 基本每股收益, ``1`` at least
+    one row differs, ``2`` the comparison could not cover every row (OpenD
+    unavailable or refused some symbols) — a partial read is never a pass.
+    """
+    provider, unreadable = fetch_provider_eps(affected_symbols(rows))
+    if not provider and not unreadable:
         print("VERIFY: no provider values — result unknown")
         return 2
-    matched, mismatched = compare_rows(rows, provider)
-    print(f"VERIFY: {len(matched)} row(s) match 基本每股收益, {len(mismatched)} mismatch(es)")
+    matched, mismatched, unverified = compare_rows(rows, provider, tuple(unreadable))
+    print(f"VERIFY: {len(matched)} row(s) match 基本每股收益, "
+          f"{len(mismatched)} mismatch(es), {len(unverified)} unverified")
     for row in mismatched[:10]:
         print("  MISMATCH", row["symbol"], row["market"], row["fiscal_year"],
               row["fiscal_quarter"], "db=", row["eps_actual"],
               "provider=", row.get("provider_eps"), row["reason"])
-    return 0 if not mismatched else 1
+    if len(mismatched) > 10:
+        print(f"  … {len(mismatched) - 10} more mismatch(es) not shown")
+    for symbol, market in unreadable:
+        print("  UNVERIFIED (provider refused):", symbol, market)
+    if mismatched:
+        return 1
+    return 0 if not unverified else 2
 
 
 def main() -> int:

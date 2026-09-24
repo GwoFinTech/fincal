@@ -107,24 +107,46 @@ class ProviderComparisonTests(TestCase):
             ("AAPL", "US"): {(2026, 3): 2.03},
             ("OKLO", "US"): {(2026, 1): -0.19},
         }
-        matched, mismatched = fix_fix.compare_rows(rows, provider)
+        matched, mismatched, unverified = fix_fix.compare_rows(rows, provider)
 
         assert [row["symbol"] for row in matched] == ["AAPL"]
         assert [row["symbol"] for row in mismatched] == ["OKLO"]
         assert mismatched[0]["reason"] == "value_differs"
         assert mismatched[0]["provider_eps"] == -0.19
+        assert unverified == []
 
     def test_a_period_the_provider_does_not_report_is_a_mismatch(self):
-        matched, mismatched = fix_fix.compare_rows(
+        matched, mismatched, _unverified = fix_fix.compare_rows(
             [_row(fy=2019, fq=1)], {("AAPL", "US"): {(2026, 3): 2.03}})
 
         assert matched == []
         assert mismatched[0]["reason"] == "provider_has_no_eps_for_period"
 
+    def test_a_refused_symbol_is_unverified_not_a_mismatch(self):
+        """A quota rejection must not be reported as a data difference."""
+        rows = [_row()]
+        matched, mismatched, unverified = fix_fix.compare_rows(
+            rows, provider={}, unreadable=(("AAPL", "US"),))
+
+        assert matched == [] and mismatched == []
+        assert unverified[0]["reason"] == "provider_unavailable_for_symbol"
+
+    def test_fetch_provider_eps_marks_a_refused_symbol_unreadable(self):
+        ctx = MagicMock()
+        ctx.get_financials_statements.return_value = (
+            -1, "获取财务报表频率太高，请求失败，每30秒最多30次。")
+        with patch.object(sync_futu, "create_futu_context", return_value=ctx), \
+             patch.object(sync_futu.config, "FUTU_RATE_LIMIT_MAX_RETRIES", 0):
+            provider, unreadable = fix_fix.fetch_provider_eps(["AAPL.US"])
+
+        assert provider == {}
+        assert unreadable == [("AAPL", "US")]
+        assert ctx.close.called, "the read-only probe must release its OpenD session"
+
     def test_verify_reports_mismatches_without_writing(self):
         rows = [_row()]
         with patch.object(fix_fix, "fetch_provider_eps",
-                          return_value={("AAPL", "US"): {(2026, 3): 2.03}}), \
+                          return_value=({("AAPL", "US"): {(2026, 3): 2.03}}, [])), \
              patch.object(fix_fix, "db_cursor") as db:
             code = fix_fix.verify(rows)
 
@@ -134,7 +156,7 @@ class ProviderComparisonTests(TestCase):
     def test_verify_passes_once_the_rows_match(self):
         rows = [_row(eps="2.03")]
         with patch.object(fix_fix, "fetch_provider_eps",
-                          return_value={("AAPL", "US"): {(2026, 3): 2.03}}), \
+                          return_value=({("AAPL", "US"): {(2026, 3): 2.03}}, [])), \
              patch.object(fix_fix, "db_cursor") as db:
             code = fix_fix.verify(rows)
 
@@ -142,9 +164,16 @@ class ProviderComparisonTests(TestCase):
         db.assert_not_called()
 
     def test_verify_cannot_pass_without_provider_values(self):
-        with patch.object(fix_fix, "fetch_provider_eps", return_value={}):
+        with patch.object(fix_fix, "fetch_provider_eps", return_value=({}, [])):
             assert fix_fix.verify([_row()]) == 2, (
                 "an unreachable provider must not be reported as a pass"
+            )
+
+    def test_verify_cannot_pass_on_a_partial_read(self):
+        with patch.object(fix_fix, "fetch_provider_eps",
+                          return_value=({}, [("AAPL", "US")])):
+            assert fix_fix.verify([_row()]) == 2, (
+                "a row the provider refused is unknown, not verified"
             )
 
 
@@ -241,7 +270,7 @@ class CliTests(TestCase):
         with patch.object(fix_fix, "init_db"), \
              patch.object(fix_fix, "load_affected", return_value=[_row()]), \
              patch.object(fix_fix, "fetch_provider_eps",
-                          return_value={("AAPL", "US"): {(2026, 3): 2.03}}), \
+                          return_value=({("AAPL", "US"): {(2026, 3): 2.03}}, [])), \
              patch.object(fix_fix, "db_cursor") as db, \
              process_args(["--verify"]):
             code = fix_fix.main()
