@@ -20,7 +20,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.db import db_cursor
 from app import config
 from app import fiscal
-from app.provenance import normalize_basis, normalize_currency
+from app.provenance import (
+    REPLACEABLE_ACTUAL_SOURCES,
+    normalize_basis,
+    normalize_currency,
+)
 from app.symbol import normalize, to_futu_code
 from app.sync_audit import check_cancelled
 from app.watchlist import get_source
@@ -30,6 +34,110 @@ logger = logging.getLogger(__name__)
 
 F10_TO_QUARTER = {1: 1, 2: 2, 3: 3, 4: 4}
 PUB_TYPE_MAP = {1: "before", 2: "after", 3: "during"}
+
+# ── OpenD statement fields (Issue #62) ──────────────────────────────
+#
+# A Futu statement field is addressed by a numeric id whose meaning belongs to a
+# *statement type*, never to the id alone.  The actuals stage used to read "EPS"
+# from a field id of the key-metrics statement (``statement_type=4``) whose label
+# is 流动比率 (current ratio), so every ``eps_actual`` it wrote was a liquidity
+# ratio — production had 312 rows over 76 symbols showing figures like OKLO 59.93
+# and TSLA 1.94 as "actual EPS".  EPS lives in the income statement
+# (``statement_type=1``, next to the revenue figure the stage already fetched), so
+# one call now carries both.  The ids are named constants and every value is
+# checked against the provider's own ``display_name`` before it is written: a
+# field whose label contradicts its id fails that symbol instead of silently
+# storing another metric.
+FUTU_STATEMENT_INCOME = 1
+FUTU_FID_INCOME_REVENUE = 8002        # 营业总收入
+FUTU_FID_INCOME_EPS_BASIC = 8047      # 基本每股收益
+FUTU_FID_INCOME_EPS_DILUTED = 8048    # 稀释每股收益
+
+#: Income-statement field ids read as EPS, in preference order.
+FUTU_EPS_FIELD_IDS = (FUTU_FID_INCOME_EPS_BASIC, FUTU_FID_INCOME_EPS_DILUTED)
+
+#: Labels accepted for each field id — case-folded substrings of OpenD's own
+#: ``display_name``, which is localised and may carry extra detail.  A label that
+#: matches none of them means the id no longer carries what the column expects.
+FUTU_FIELD_LABELS = {
+    FUTU_FID_INCOME_REVENUE: ("营业总收入", "营业收入", "revenue"),
+    FUTU_FID_INCOME_EPS_BASIC: ("基本每股收益", "每股收益", "basic eps", "eps"),
+    FUTU_FID_INCOME_EPS_DILUTED: ("稀释每股收益", "每股收益", "diluted eps", "eps"),
+}
+
+#: SQL list of the sources a new Futu actual may replace (Issue #45, extended by
+#: #62 with the retracted label so a wrong actual stays repairable).  Built from
+#: the shared constant rather than repeated in both UPDATEs; the values are
+#: module constants, never user input.
+_REPLACEABLE_SOURCES_SQL = "(" + ", ".join(
+    f"'{source}'" for source in REPLACEABLE_ACTUAL_SOURCES
+) + ")"
+
+
+@dataclass(frozen=True)
+class StatementField:
+    """One statement field read by id, plus the result of its label check.
+
+    ``drift`` is ``True`` when OpenD labelled the id as something other than what
+    the column expects; such a value must not be written at all.
+    """
+
+    value: float | None = None
+    field_id: int | None = None
+    label: str = ""
+    drift: bool = False
+
+    @property
+    def labelled(self) -> bool:
+        """True when the provider sent a label, so the id could be checked."""
+        return bool(self.label)
+
+
+def label_matches_field(field_id: int, label: str) -> bool:
+    """True when a provider label belongs to the given statement field id.
+
+    An empty label returns ``False`` here: it can neither confirm nor refute the
+    id's semantics, and :func:`read_statement_field` reports that case separately
+    instead of calling it drift.
+    """
+    text = " ".join(str(label or "").casefold().split())
+    if not text:
+        return False
+    return any(marker in text for marker in FUTU_FIELD_LABELS.get(field_id, ()))
+
+
+def read_statement_field(report: dict, field_ids) -> StatementField:
+    """Read the first present field of ``field_ids`` from one statement report.
+
+    ``field_ids`` is a preference order (basic EPS before diluted EPS).  A value
+    is only returned when the provider's label for that id does not contradict
+    the metric the column expects — a drifted id returns ``drift=True`` with a
+    ``None`` value, so the caller fails the symbol instead of writing a number
+    that measures something else (Issue #62).
+    """
+    items = report.get("item_list") or []
+    by_id: dict[Any, dict] = {}
+    for item in items:
+        field_id = item.get("field_id")
+        if field_id in field_ids and field_id not in by_id:
+            by_id[field_id] = item
+
+    for field_id in field_ids:
+        item = by_id.get(field_id)
+        if item is None:
+            continue
+        label = str(item.get("display_name") or "").strip()
+        if label and not label_matches_field(field_id, label):
+            return StatementField(field_id=field_id, label=label, drift=True)
+        if item.get("data") is None:
+            continue
+        try:
+            return StatementField(
+                value=float(item["data"]), field_id=field_id, label=label
+            )
+        except (TypeError, ValueError):
+            continue
+    return StatementField()
 
 
 # ── Futu call watchdog (Issue #48) ──────────────────────────────────
@@ -546,11 +654,14 @@ def sync_earnings_dates(ctx, run_id: int, symbols: list[str]) -> FutuStageStats:
 
 
 def sync_actuals(ctx, run_id: int, symbols: list[str]) -> FutuStageStats:
-    """Fetch actual EPS (fid=14020) and revenue (fid=8002) via shared context.
+    """Fetch actual EPS (fid=8047/8048) and revenue (fid=8002) from the income statement.
 
-    Each symbol issues two OpenD calls; the symbol is counted once, using the
-    most severe of the two outcomes, so ``failed_symbols`` keeps its historical
-    per-symbol meaning (Issue #49).
+    Both figures live in ``statement_type=1``, so one OpenD call per symbol now
+    carries them: the stage used to spend two calls per symbol, one of which read
+    a liquidity ratio and stored it as the actual EPS (Issue #62).  The symbol is
+    counted once, using the most severe outcome, so ``failed_symbols`` keeps its
+    historical per-symbol meaning (Issue #49) — including a statement field whose
+    label no longer matches the column it would be written to.
     """
     stats = FutuStageStats()
     limiter = get_rate_limiter()
@@ -562,93 +673,75 @@ def sync_actuals(ctx, run_id: int, symbols: list[str]) -> FutuStageStats:
         futu_code = to_futu_code(source_symbol)
         outcome = OUTCOME_OK
         try:
-            # MainIndex for EPS (fid=14020)
-            eps_outcome, main_data = futu_call(
-                futu_code, "EPS",
+            outcome, income_data = futu_call(
+                futu_code, "IncomeStatement",
                 lambda: ctx.get_financials_statements(
-                    futu_code, statement_type=4, financial_type=9, num=4
+                    futu_code, statement_type=FUTU_STATEMENT_INCOME,
+                    financial_type=9, num=4,
                 ),
                 limiter, stats,
                 timeout_seconds=config.FUTU_ACTUALS_TIMEOUT_SECONDS,
             )
-            outcome = merge_outcome(outcome, eps_outcome)
-            if eps_outcome == OUTCOME_OK and main_data.get("report_list"):
-                for report in main_data["report_list"]:
-                    fy = report.get("fiscal_year")
-                    ft = report.get("financial_type")
-                    fq = F10_TO_QUARTER.get(ft)
-                    if not fy or not fq:
-                        continue
-                    eps_val = None
-                    for item in report.get("item_list", []):
-                        if item["field_id"] == 14020 and item.get("data") is not None:
-                            try:
-                                eps_val = float(item["data"])
-                            except (ValueError, TypeError):
-                                pass
-                            break
-                    if eps_val is not None:
-                        # Issue #61: a written actual must say which currency and
-                        # which accounting base it is in — OpenD reports the
-                        # *reporting* currency (TSM: TWD, BABA/PDD/NIO: CNY) for a
-                        # listing whose consensus estimate is in its quote
-                        # currency, and this is the evidence the read path needs to
-                        # refuse the subtraction. Never guessed: an undeclared
-                        # value is stored as ``unknown``.
-                        with db_cursor() as cur:
-                            cur.execute(
-                                """UPDATE earnings SET eps_actual = %s, date_status = 'reported',
-                                   actual_source = 'futu', actual_as_of = NOW(),
-                                   actual_currency = %s, actual_basis = %s, updated_at = NOW()
-                                WHERE symbol = %s AND market = %s AND fiscal_year = %s
-                                AND fiscal_quarter = %s
-                                AND COALESCE(actual_source, 'unknown') IN
-                                    ('unknown', 'algorithm', 'longbridge', 'futu')
-                                """,
-                                (eps_val, normalize_currency(report.get("currency_code")),
-                                 normalize_basis(report.get("accounting_standards")),
-                                 symbol, market, fy, fq),
-                            )
-
-            # Income Statement for revenue (fid=8002)
-            rev_outcome, income_data = futu_call(
-                futu_code, "Revenue",
-                lambda: ctx.get_financials_statements(
-                    futu_code, statement_type=1, financial_type=9, num=4
-                ),
-                limiter, stats,
-                timeout_seconds=config.FUTU_ACTUALS_TIMEOUT_SECONDS,
-            )
-            outcome = merge_outcome(outcome, rev_outcome)
-            if rev_outcome == OUTCOME_OK and income_data.get("report_list"):
+            if outcome == OUTCOME_OK and income_data.get("report_list"):
                 for report in income_data["report_list"]:
                     fy = report.get("fiscal_year")
                     ft = report.get("financial_type")
                     fq = F10_TO_QUARTER.get(ft)
                     if not fy or not fq:
                         continue
-                    rev_val = None
-                    for item in report.get("item_list", []):
-                        if item["field_id"] == 8002 and item.get("data") is not None:
-                            try:
-                                rev_val = float(item["data"])
-                            except (ValueError, TypeError):
-                                pass
-                            break
-                    if rev_val is not None:
+                    eps = read_statement_field(report, FUTU_EPS_FIELD_IDS)
+                    revenue = read_statement_field(report, (FUTU_FID_INCOME_REVENUE,))
+                    for name, field in (("EPS", eps), ("Revenue", revenue)):
+                        if field.drift:
+                            # The id came back under a label that measures
+                            # something else: write nothing for this period and
+                            # let the symbol be audited as a failure, instead of
+                            # storing a number the column does not describe.
+                            outcome = merge_outcome(outcome, OUTCOME_FAILED)
+                            logger.warning(
+                                "%s: %s field id %s is labelled %r for FY%s Q%s — "
+                                "value not written (Issue #62)",
+                                futu_code, name, field.field_id, field.label, fy, fq,
+                            )
+                        elif field.value is not None and not field.labelled:
+                            logger.warning(
+                                "%s: %s field id %s came back without a label for "
+                                "FY%s Q%s; semantics unverified",
+                                futu_code, name, field.field_id, fy, fq,
+                            )
+                    # Issue #61: a written actual must say which currency and
+                    # which accounting base it is in — OpenD reports the
+                    # *reporting* currency (TSM: TWD, BABA/PDD/NIO: CNY) for a
+                    # listing whose consensus estimate is in its quote currency,
+                    # and this is the evidence the read path needs to refuse the
+                    # subtraction.  Never guessed: an undeclared value is stored
+                    # as ``unknown``.  Both figures now come from this one
+                    # statement, so they share its declared currency and basis.
+                    currency = normalize_currency(report.get("currency_code"))
+                    basis = normalize_basis(report.get("accounting_standards"))
+                    if eps.value is not None:
                         with db_cursor() as cur:
                             cur.execute(
-                                """UPDATE earnings SET revenue_actual = %s, date_status = 'reported',
+                                f"""UPDATE earnings SET eps_actual = %s, date_status = 'reported',
                                    actual_source = 'futu', actual_as_of = NOW(),
                                    actual_currency = %s, actual_basis = %s, updated_at = NOW()
                                 WHERE symbol = %s AND market = %s AND fiscal_year = %s
                                 AND fiscal_quarter = %s
-                                AND COALESCE(actual_source, 'unknown') IN
-                                    ('unknown', 'algorithm', 'longbridge', 'futu')
+                                AND COALESCE(actual_source, 'unknown') IN {_REPLACEABLE_SOURCES_SQL}
                                 """,
-                                (rev_val, normalize_currency(report.get("currency_code")),
-                                 normalize_basis(report.get("accounting_standards")),
-                                 symbol, market, fy, fq),
+                                (eps.value, currency, basis, symbol, market, fy, fq),
+                            )
+                    if revenue.value is not None:
+                        with db_cursor() as cur:
+                            cur.execute(
+                                f"""UPDATE earnings SET revenue_actual = %s, date_status = 'reported',
+                                   actual_source = 'futu', actual_as_of = NOW(),
+                                   actual_currency = %s, actual_basis = %s, updated_at = NOW()
+                                WHERE symbol = %s AND market = %s AND fiscal_year = %s
+                                AND fiscal_quarter = %s
+                                AND COALESCE(actual_source, 'unknown') IN {_REPLACEABLE_SOURCES_SQL}
+                                """,
+                                (revenue.value, currency, basis, symbol, market, fy, fq),
                             )
         except Exception as e:
             outcome = merge_outcome(outcome, OUTCOME_FAILED)

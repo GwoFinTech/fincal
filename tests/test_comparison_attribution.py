@@ -351,12 +351,17 @@ class _FakeFutuContext:
         self.eps = eps
         self.revenue = revenue
 
-    def get_financials_statements(self, code, statement_type=4, financial_type=9, num=4):
-        field_id, value = (14020, self.eps) if statement_type == 4 else (8002, self.revenue)
+    def get_financials_statements(self, code, statement_type=1, financial_type=9, num=4):
+        # Since Issue #62 both figures come from the income statement, each with
+        # the provider's own label: 基本每股收益 (fid=8047) and 营业总收入
+        # (fid=8002).
         return 0, {"report_list": [{
             "fiscal_year": 2026, "financial_type": 2,
             "currency_code": self.currency, "accounting_standards": self.standard,
-            "item_list": [{"field_id": field_id, "data": value}],
+            "item_list": [
+                {"field_id": 8047, "display_name": "基本每股收益", "data": self.eps},
+                {"field_id": 8002, "display_name": "营业总收入", "data": self.revenue},
+            ],
         }]}
 
     def close(self):

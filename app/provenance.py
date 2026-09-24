@@ -20,6 +20,25 @@ SOURCE_PRIORITY = {
     "kurumi": 4,
 }
 
+#: Source label for an actual that was written and later *retracted* because it
+#: turned out not to be the metric its column claims (Issue #62: every
+#: ``eps_actual`` the Futu stage wrote before the field fix was 流动比率, the
+#: current ratio).  The value itself is cleared; the label keeps a machine
+#: readable reason on the row instead of a silently deleted one.
+RETRACTED_ACTUAL_SOURCE = "futu_invalid_field"
+
+#: Actual sources a provider is allowed to replace with its own value
+#: (Issues #45, #62).  ``RETRACTED_ACTUAL_SOURCE`` is part of the set on purpose:
+#: retracting a wrong actual must not make the row unwritable, otherwise the
+#: corrected value could never repair it.
+REPLACEABLE_ACTUAL_SOURCES = (
+    "unknown",
+    "algorithm",
+    "longbridge",
+    "futu",
+    RETRACTED_ACTUAL_SOURCE,
+)
+
 # ── Numeric attribution labels (Issue #61) ─────────────────────────────────
 #
 # ``date_source``/``estimate_source``/``actual_source`` say *who* wrote a value;

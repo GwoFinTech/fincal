@@ -20,6 +20,11 @@ after waiting out the window, keep the provider's message, and classify a
 rejection apart from an unsupported instrument (ETF) and a real symbol failure
 — otherwise 91% of a run failed for one systemic reason under a single opaque
 ``ret=-1``.
+
+Issue #62 coverage (same module): the actual EPS must come from the income
+statement's 基本每股收益 field, not from a key-metrics id whose label is
+流动比率, and a field whose provider label contradicts its id must fail the
+symbol instead of being written under the EPS column.
 """
 import contextlib
 import importlib.util
@@ -159,18 +164,33 @@ class FutuDatesProvenanceTests(TestCase):
         assert "date_status = CASE" in self._sql
 
 
+def _income_response(*, fy=2026, ft=2, eps=1.23, revenue=123.0,
+                     eps_field_id=8047, eps_label="基本每股收益",
+                     revenue_label="营业总收入", currency="USD",
+                     standard="US_GAAP", extra_items=()):
+    """One OpenD income-statement response in the layout the stage reads.
+
+    Since Issue #62 the actuals stage takes both figures from
+    ``statement_type=1``: EPS from ``fid=8047`` (``fid=8048`` as fallback) and
+    revenue from ``fid=8002``, each carrying the provider's own ``display_name``.
+    """
+    items = list(extra_items)
+    if eps is not None:
+        items.append({"field_id": eps_field_id, "display_name": eps_label, "data": eps})
+    if revenue is not None:
+        items.append({"field_id": 8002, "display_name": revenue_label, "data": revenue})
+    return {"report_list": [{"fiscal_year": fy, "financial_type": ft,
+                             "currency_code": currency, "accounting_standards": standard,
+                             "item_list": items}]}
+
+
 class FutuActualsProvenanceTests(TestCase):
     """The actuals updates must flip status to reported and attribute Futu."""
 
     def setUp(self):
         self.ctx = MagicMock()
-        # First call (EPS, statement_type=4) then second (revenue, statement_type=1).
-        self.ctx.get_financials_statements.side_effect = [
-            (0, {"report_list": [{"fiscal_year": 2026, "financial_type": 2,
-                                 "item_list": [{"field_id": 14020, "data": 1.23}]}]}),
-            (0, {"report_list": [{"fiscal_year": 2026, "financial_type": 2,
-                                 "item_list": [{"field_id": 8002, "data": 123.0}]}]}),
-        ]
+        # One income statement now carries EPS and revenue (Issue #62).
+        self.ctx.get_financials_statements.return_value = (0, _income_response())
         self._cursor = _RecordingCursor()
 
     def test_actuals_updates_set_reported_and_futu_source(self):
@@ -204,6 +224,103 @@ class FutuActualsProvenanceTests(TestCase):
             assert "'longbridge'" in sql
             assert "IS NULL" not in sql
             assert "ABS(" not in sql
+
+
+class FutuEpsFieldTests(TestCase):
+    """Issue #62: the actual EPS must be the income statement's EPS field.
+
+    The stage used to read a key-metrics field id whose ``display_name`` is
+    流动比率 (current ratio), so every ``eps_actual`` Futu wrote measured
+    liquidity.  These tests pin the corrected field ids, the provider-label
+    check that makes a drifted id fail the symbol instead of writing another
+    metric, and the fact that one call now carries both figures.
+    """
+
+    def _run(self, response, symbols=("AAPL.US",)):
+        ctx = MagicMock()
+        ctx.get_financials_statements.return_value = (0, response)
+        cursor = _RecordingCursor()
+        with patch.object(sync_futu, "check_cancelled"), _db_mock(cursor):
+            stats = sync_futu.sync_actuals(ctx, 1, list(symbols))
+        updates = [params for sql, params in cursor.executed
+                   if sql.strip().startswith("UPDATE earnings")]
+        return ctx, stats, updates
+
+    def test_eps_is_read_from_the_income_statement_eps_field(self):
+        ctx, stats, updates = self._run(_income_response(eps=2.03, revenue=109417000000.0))
+
+        assert ctx.get_financials_statements.call_count == 1, (
+            "EPS and revenue live in the same statement — one call per symbol"
+        )
+        _args, kwargs = ctx.get_financials_statements.call_args
+        assert kwargs["statement_type"] == sync_futu.FUTU_STATEMENT_INCOME
+        assert [params[0] for params in updates] == [2.03, 109417000000.0], (
+            "the EPS update must carry 基本每股收益, not a key-metrics field"
+        )
+        assert stats.failed_symbols == 0
+
+    def test_the_current_ratio_field_is_never_read_as_eps(self):
+        """The wrong field may still arrive in the payload — it must be ignored."""
+        response = _income_response(
+            eps=2.03,
+            extra_items=[{"field_id": 14020, "display_name": "流动比率", "data": 1.003295}],
+        )
+        _ctx, _stats, updates = self._run(response)
+
+        assert [params[0] for params in updates] == [2.03, 123.0]
+        assert all(1.003295 not in params for params in updates), (
+            "a liquidity ratio must never reach eps_actual"
+        )
+
+    def test_diluted_eps_is_the_fallback_when_basic_is_absent(self):
+        response = _income_response(eps=2.02, eps_field_id=sync_futu.FUTU_FID_INCOME_EPS_DILUTED,
+                                    eps_label="稀释每股收益")
+        _ctx, stats, updates = self._run(response)
+
+        assert updates[0][0] == 2.02
+        assert stats.failed_symbols == 0
+
+    def test_a_drifted_eps_field_fails_the_symbol_instead_of_writing(self):
+        """A drifted label must not become a value in the EPS column."""
+        response = _income_response(eps=1.003295, eps_label="流动比率")
+        with self.assertLogs("sync_futu", level="WARNING") as logs:
+            _ctx, stats, updates = self._run(response)
+
+        assert stats.failed_symbols == 1, (
+            "a field whose label contradicts its id must be audited as a symbol failure"
+        )
+        assert [params[0] for params in updates] == [123.0], (
+            "only the verified revenue figure may be written"
+        )
+        assert "Issue #62" in "\n".join(logs.output)
+
+    def test_a_drifted_revenue_field_is_refused_too(self):
+        response = _income_response(revenue=1.003295, revenue_label="流动比率")
+        _ctx, stats, updates = self._run(response)
+
+        assert [params[0] for params in updates] == [1.23]
+        assert stats.failed_symbols == 1
+
+    def test_an_unlabelled_field_is_written_but_reported_as_unverified(self):
+        response = _income_response(eps_label="", revenue_label="")
+        with self.assertLogs("sync_futu", level="WARNING") as logs:
+            _ctx, stats, updates = self._run(response)
+
+        assert [params[0] for params in updates] == [1.23, 123.0]
+        assert stats.failed_symbols == 0, "a missing label is not drift"
+        assert "semantics unverified" in "\n".join(logs.output)
+
+    def test_retracted_actuals_stay_replaceable_by_the_corrected_sync(self):
+        """Issue #62 criterion 3: voiding a wrong actual must not freeze the row."""
+        ctx = MagicMock()
+        ctx.get_financials_statements.return_value = (0, _income_response())
+        cursor = _RecordingCursor()
+        with patch.object(sync_futu, "check_cancelled"), _db_mock(cursor):
+            sync_futu.sync_actuals(ctx, 1, ["AAPL.US"])
+
+        sql = "\n".join(sql for sql, _ in cursor.executed)
+        assert "'futu_invalid_field'" in sql
+        assert "futu_invalid_field" in sync_futu.REPLACEABLE_ACTUAL_SOURCES
 
 
 class FutuWatchdogTests(TestCase):
@@ -546,7 +663,7 @@ class FutuFailureClassificationTests(TestCase):
             stats = sync_futu.sync_actuals(ctx, 1, ["SPY.US"])
 
         assert stats.total == 1
-        assert stats.unsupported_symbols == 1, "two rejected calls must not double-count the symbol"
+        assert stats.unsupported_symbols == 1, "one rejected call must not double-count the symbol"
         assert sync_futu.futu_audit_outcome(stats) == ("success", None)
 
     def test_pacing_wait_is_not_counted_as_a_watchdog_timeout(self):
