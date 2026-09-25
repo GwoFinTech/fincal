@@ -372,16 +372,55 @@
     function comparisonUnavailable(e) {
       return !!(e && e.comparison_unavailable_reason);
     }
-    function comparisonNote(e) {
-      const reason = e && e.comparison_unavailable_reason;
+    // The reason codes are language-independent; the wording lives here, in one
+    // place, so the row-level (预期与实际) and cross-period (本期与上期) guards
+    // describe the same cause the same way.
+    const ATTRIBUTION_LABELS = {
+      currency_mismatch: '币种不同',
+      currency_unknown: '币种未标明',
+      basis_mismatch: '口径不同',
+      basis_unverified: '口径未经同一来源确认',
+    };
+    function attributionNote(reason, subject) {
       if (!reason) return '';
-      const labels = {
-        currency_mismatch: '预期与实际币种不同，无法比较',
-        currency_unknown: '币种未标明，无法比较',
-        basis_mismatch: '预期与实际口径不同，无法比较',
-        basis_unverified: '口径未经同一来源确认，无法比较',
-      };
-      return labels[reason] || '口径不可比';
+      const label = ATTRIBUTION_LABELS[reason] || '口径不可比';
+      return subject ? subject + label + '，无法比较' : label + '，无法比较';
+    }
+    function comparisonNote(e) {
+      return attributionNote(e && e.comparison_unavailable_reason, '预期与实际');
+    }
+    // Issue #63: 同比/环比 subtract two *different* periods' actuals, so the
+    // row-level guard above never covered them — production rendered "+5647.7%"
+    // for TSM while the same panel showed "—" for that row's 较预期. The API now
+    // returns a ratio only when both periods' actuals carry the same declared
+    // currency/basis, and reports why on `<metric>_reason` otherwise.
+    const GROWTH_LABELS = {
+      eps_yoy: 'EPS 同比', eps_qoq: 'EPS 环比',
+      revenue_yoy: '营收同比', revenue_qoq: '营收环比',
+    };
+    function growthValue(decision, key) {
+      const growth = decision && decision.actual_growth;
+      if (!growth || growth[key + '_reason']) return null;
+      return growth[key] == null ? null : growth[key];
+    }
+    function growthReason(decision, key) {
+      const growth = decision && decision.actual_growth;
+      return (growth && growth[key + '_reason']) || '';
+    }
+    function growthNote(decision, key) {
+      return attributionNote(growthReason(decision, key), '本期与上期');
+    }
+    // Second line of the panel's 实际值 column: the ratio, or "不可比" with the
+    // reason on the cell's title — never a percentage for an incomparable pair.
+    function growthCell(decision, key) {
+      return growthReason(decision, key) ? '不可比' : fmtPct(growthValue(decision, key));
+    }
+    function growthSuppressedNote(decision) {
+      const parts = Object.keys(GROWTH_LABELS)
+        .filter(key => growthReason(decision, key))
+        .map(key => GROWTH_LABELS[key] + '（' + attributionNote(growthReason(decision, key)) + '）');
+      if (!parts.length) return '';
+      return '「—」表示两个期间的实际值不可比，不是数据缺失：' + parts.join('；') + '。';
     }
     function epsSurplus(e) {
       if (comparisonUnavailable(e)) return null;
@@ -453,7 +492,8 @@
 
     return {
       epsSurplus, epsSurplusClass, revSurplus, revSurplusClass,
-      hasComparison, comparisonNote, comparisonUnavailable,
+      hasComparison, comparisonNote, comparisonUnavailable, attributionNote,
+      growthValue, growthReason, growthNote, growthCell, growthSuppressedNote,
       metricDelta, fmtNum, fmtPct, signedPct, fmtBigNum,
       estimateSourceLabel, hasLongbridgeConsensus, fqLabel, periodLabel,
     };

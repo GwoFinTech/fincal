@@ -31,9 +31,12 @@ import shutil
 import subprocess
 import sys
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
 from unittest import TestCase, skipUnless
 from unittest.mock import MagicMock, patch
+
+from fastapi.testclient import TestClient
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -449,9 +452,26 @@ class FeedAndUiTests(TestCase):
         self.assertEqual(result["eps"], 1.0)
         self.assertEqual(result["note"], "预期与实际币种不同，无法比较")
 
+    @skipUnless(shutil.which("node"), "node is required for the JS behaviour check")
+    def test_formatters_withhold_a_period_ratio_the_api_did_not_attest(self):
+        """Issue #63: the cross-period guard, in the real formatter code."""
+        result = _run_growth_probe()
+        self.assertIsNone(result["flagged_eps"], "a flagged pair must not yield a ratio")
+        self.assertEqual(result["flagged_eps_cell"], "不可比")
+        self.assertEqual(result["flagged_eps_note"], "本期与上期币种未标明，无法比较")
+        # The comparable 环比 of the same row still renders.
+        self.assertEqual(result["flagged_eps_qoq"], 0.25)
+        self.assertEqual(result["healthy_eps_cell"], "56.5%")
+        self.assertEqual(result["healthy_eps"], 0.56477)
+        # No value at all is a missing period, not a comparability problem.
+        self.assertEqual(result["missing"], "—")
+        self.assertIn("EPS 同比", result["note"])
+        self.assertIn("不是数据缺失", result["note"])
+        self.assertEqual(result["no_note"], "")
 
-def _run_formatters_probe() -> dict:
-    """Evaluate ``useFormatters`` extracted from app-setup.js and probe the guard."""
+
+def _formatters_function_source() -> str:
+    """Extract ``useFormatters`` from the served app-setup.js."""
     source = APP_JS.read_text(encoding="utf-8")
     start = source.index("function useFormatters()")
     depth = 0
@@ -465,7 +485,12 @@ def _run_formatters_probe() -> dict:
                 end = index + 1
                 break
     assert end, "could not locate the end of useFormatters()"
-    function_source = source[start:end]
+    return source[start:end]
+
+
+def _run_formatters_probe() -> dict:
+    """Evaluate ``useFormatters`` extracted from app-setup.js and probe the guard."""
+    function_source = _formatters_function_source()
     probe = f"""
 {function_source}
 const fmt = useFormatters();
@@ -481,6 +506,40 @@ const out = {{
   has_eps: fmt.hasComparison(healthy, 'eps'),
   eps: fmt.epsSurplus(healthy),
   note: fmt.comparisonNote(flagged),
+}};
+console.log(JSON.stringify(out));
+"""
+    completed = subprocess.run(["node", "-e", probe], capture_output=True, text=True, timeout=30)
+    assert completed.returncode == 0, completed.stderr
+    return json.loads(completed.stdout.strip().splitlines()[-1])
+
+
+def _run_growth_probe() -> dict:
+    """Probe the cross-period guard with a decision payload shaped like the API's."""
+    probe = f"""
+{_formatters_function_source()}
+const fmt = useFormatters();
+const flagged = {{ actual_growth: {{
+  eps_yoy: null, eps_yoy_reason: 'currency_unknown',
+  eps_qoq: 0.25, eps_qoq_reason: null,
+  revenue_yoy: 3.6, revenue_yoy_reason: null,
+  revenue_qoq: null, revenue_qoq_reason: null }} }};
+const healthy = {{ actual_growth: {{
+  eps_yoy: 0.56477, eps_yoy_reason: null,
+  eps_qoq: null, eps_qoq_reason: null,
+  revenue_yoy: 0.1, revenue_yoy_reason: null,
+  revenue_qoq: null, revenue_qoq_reason: null }} }};
+const out = {{
+  flagged_eps: fmt.growthValue(flagged, 'eps_yoy'),
+  flagged_eps_cell: fmt.growthCell(flagged, 'eps_yoy'),
+  flagged_eps_note: fmt.growthNote(flagged, 'eps_yoy'),
+  flagged_eps_qoq: fmt.growthValue(flagged, 'eps_qoq'),
+  flagged_rev_cell: fmt.growthCell(flagged, 'revenue_yoy'),
+  healthy_eps: fmt.growthValue(healthy, 'eps_yoy'),
+  healthy_eps_cell: fmt.growthCell(healthy, 'eps_yoy'),
+  missing: fmt.growthCell({{}}, 'eps_yoy'),
+  note: fmt.growthSuppressedNote(flagged),
+  no_note: fmt.growthSuppressedNote(healthy),
 }};
 console.log(JSON.stringify(out));
 """
@@ -550,3 +609,208 @@ class BackfillPlanTests(TestCase):
              patch.object(sys, "argv", ["backfill"]):
             backfill.main()
         self.assertEqual(executed, [], "the default run must not touch the database")
+
+
+# ── Issue #63: the same contract, across two fiscal periods ────────────────
+#
+# The derived 同比/环比 ratios subtract two *different* periods' actuals, so the
+# row-level rule above never reached them: production rendered "+5647.7%" for TSM
+# (row 29078) while the same panel marked the same row's 较预期 as unavailable.
+# The rule is now shared, and the ratio a client receives is either a real number
+# or nothing plus a reason.
+
+#: The production TSM pair: unattributed prior-year actual against a Futu TWD one.
+TSM_GROWTH_PAIR = (
+    {"id": 1, "symbol": "TSM", "market": "US", "fiscal_year": 2025, "fiscal_quarter": 2,
+     "report_date": date(2025, 7, 17), "eps_actual": 2.370496, "revenue_actual": None,
+     "actual_currency": None, "actual_basis": None, "actual_source": None},
+    {"id": 2, "symbol": "TSM", "market": "US", "fiscal_year": 2026, "fiscal_quarter": 2,
+     "report_date": date(2026, 7, 15), "eps_actual": 136.25, "revenue_actual": None,
+     "actual_currency": "TWD", "actual_basis": "gaap", "actual_source": "futu"},
+)
+
+#: Two quarters one provider wrote in one currency and one basis.
+COMPARABLE_GROWTH_PAIR = (
+    {"id": 3, "symbol": "AZO", "market": "US", "fiscal_year": 2025, "fiscal_quarter": 4,
+     "report_date": date(2025, 9, 23), "eps_actual": 40.0, "revenue_actual": None,
+     "actual_currency": "USD", "actual_basis": None, "actual_source": "longbridge"},
+    {"id": 4, "symbol": "AZO", "market": "US", "fiscal_year": 2026, "fiscal_quarter": 4,
+     "report_date": date(2026, 9, 22), "eps_actual": 50.0, "revenue_actual": None,
+     "actual_currency": "USD", "actual_basis": None, "actual_source": "longbridge"},
+)
+
+
+class CrossPeriodGrowthRuleTests(TestCase):
+    """Two periods' actuals may only be subtracted when both are attributed."""
+
+    def test_an_unattributed_period_is_not_assumed_to_match(self):
+        self.assertEqual(
+            fiscal.growth_unavailable_reason(*TSM_GROWTH_PAIR, metric="eps"),
+            fiscal.COMPARISON_CURRENCY_UNKNOWN,
+        )
+
+    def test_two_currencies_are_a_mismatch(self):
+        pair = (dict(TSM_GROWTH_PAIR[0], actual_currency="USD", actual_source="futu"),
+                TSM_GROWTH_PAIR[1])
+        self.assertEqual(
+            fiscal.growth_unavailable_reason(*pair, metric="eps"),
+            fiscal.COMPARISON_CURRENCY_MISMATCH,
+        )
+
+    def test_cross_provider_without_a_stated_basis_is_unverified(self):
+        pair = (dict(COMPARABLE_GROWTH_PAIR[0], actual_source="longbridge", actual_basis=None),
+                dict(COMPARABLE_GROWTH_PAIR[1], actual_source="futu", actual_basis=None))
+        self.assertEqual(
+            fiscal.growth_unavailable_reason(*pair, metric="eps"),
+            fiscal.COMPARISON_BASIS_UNVERIFIED,
+        )
+
+    def test_one_provider_needs_no_stated_basis(self):
+        self.assertIsNone(fiscal.growth_unavailable_reason(*COMPARABLE_GROWTH_PAIR, metric="eps"))
+
+    def test_two_different_stated_bases_are_blocked(self):
+        pair = (dict(COMPARABLE_GROWTH_PAIR[0], actual_basis="adjusted"),
+                dict(COMPARABLE_GROWTH_PAIR[1], actual_basis="gaap"))
+        self.assertEqual(
+            fiscal.growth_unavailable_reason(*pair, metric="eps"),
+            fiscal.COMPARISON_BASIS_MISMATCH,
+        )
+
+    def test_a_missing_side_is_not_a_comparability_problem(self):
+        self.assertIsNone(fiscal.growth_unavailable_reason(None, TSM_GROWTH_PAIR[1], metric="eps"))
+        self.assertIsNone(fiscal.growth_unavailable_reason(TSM_GROWTH_PAIR[1], None, metric="eps"))
+        missing = dict(TSM_GROWTH_PAIR[1], eps_actual=None)
+        self.assertIsNone(fiscal.growth_unavailable_reason(missing, TSM_GROWTH_PAIR[0], metric="eps"))
+
+    def test_each_metric_reads_its_own_column(self):
+        """Revenue is compared on ``revenue_actual``, never on the EPS column."""
+        pair = (dict(TSM_GROWTH_PAIR[0], eps_actual=None, revenue_actual=100.0),
+                dict(TSM_GROWTH_PAIR[1], revenue_actual=200.0))
+        self.assertIsNone(fiscal.growth_unavailable_reason(*pair, metric="eps"),
+                          "the unattributed revenue pair must not block the EPS comparison")
+        self.assertEqual(
+            fiscal.growth_unavailable_reason(*pair, metric="revenue"),
+            fiscal.COMPARISON_CURRENCY_UNKNOWN,
+        )
+
+    def test_an_unknown_metric_is_refused(self):
+        with self.assertRaises(ValueError):
+            fiscal.growth_unavailable_reason(*COMPARABLE_GROWTH_PAIR, metric="eps_growth")
+
+
+class DecisionGrowthContractTests(TestCase):
+    """``/decision`` never hands a client a ratio it must not render."""
+
+    def _history(self, pair):
+        return [dict(row, eps_estimate=None) for row in pair]
+
+    def test_ratio_and_reason_are_mutually_exclusive(self):
+        from app.phase3 import build_decision_metrics
+
+        for pair, expected_reason in ((TSM_GROWTH_PAIR, "currency_unknown"),
+                                      (COMPARABLE_GROWTH_PAIR, None)):
+            growth = build_decision_metrics(self._history(pair), earning_id=pair[1]["id"])["actual_growth"]
+            self.assertEqual(growth["eps_yoy_reason"], expected_reason)
+            if expected_reason:
+                self.assertIsNone(growth["eps_yoy"])
+            else:
+                self.assertEqual(growth["eps_yoy"], Decimal("0.25"))
+                self.assertIsNotNone(growth["eps_yoy"])
+
+    def test_every_metric_ships_a_reason_key(self):
+        from app.phase3 import build_decision_metrics, GROWTH_METRICS
+
+        growth = build_decision_metrics(self._history(TSM_GROWTH_PAIR), earning_id=2)["actual_growth"]
+        for key, _metric, _span in GROWTH_METRICS:
+            self.assertIn(key, growth)
+            self.assertIn(f"{key}_reason", growth)
+
+    def test_the_response_model_declares_the_growth_and_its_reason(self):
+        from app.schemas import ActualGrowth, DecisionResponse
+
+        self.assertIn("actual_growth", DecisionResponse.model_fields)
+        self.assertEqual(set(ActualGrowth.model_fields), {
+            "eps_yoy", "eps_yoy_reason", "eps_qoq", "eps_qoq_reason",
+            "revenue_yoy", "revenue_yoy_reason", "revenue_qoq", "revenue_qoq_reason",
+        })
+
+    def test_the_endpoint_reads_the_attribution_it_judges(self):
+        """The history query must carry the columns the rule reads."""
+        source = (ROOT / "app" / "routers" / "api.py").read_text(encoding="utf-8")
+        history_query = next(line for line in source.splitlines()
+                             if "FROM earnings WHERE symbol=%s AND market=%s" in line)
+        for field in ("actual_currency", "actual_basis", "actual_source"):
+            self.assertIn(field, history_query, f"the growth rule needs {field} in the history query")
+
+    def test_the_detailed_panel_never_renders_a_ratio_for_a_flagged_pair(self):
+        html = INDEX_HTML.read_text(encoding="utf-8")
+        self.assertNotIn("decision.actual_growth.eps_yoy", html)
+        self.assertNotIn("decision.actual_growth.revenue_yoy", html)
+        # The panel and the 业绩对比 table both go through the guard.
+        self.assertIn("growthValue(decision, 'eps_yoy')", html)
+        self.assertIn("growthValue(decision, 'eps_qoq')", html)
+        self.assertIn("growthCell(decision, 'eps_yoy')", html)
+        self.assertIn("growthCell(decision, 'revenue_yoy')", html)
+        self.assertIn("growthSuppressedNote(decision)", html)
+
+
+class DecisionEndpointTests(TestCase):
+    """The wire response of the production repro (TSM row 29078)."""
+
+    class _ScriptedCursor:
+        def __init__(self, pages):
+            self._pages = list(pages)
+            self._current = None
+            self.statements = []
+
+        def execute(self, sql, params=None):
+            self.statements.append(" ".join(str(sql).split()))
+            self._current = self._pages.pop(0) if self._pages else []
+
+        def fetchone(self):
+            return self._current[0] if isinstance(self._current, list) and self._current else None
+
+        def fetchall(self):
+            return self._current if isinstance(self._current, list) else []
+
+        def close(self):
+            pass
+
+    def _decision(self, earning, history):
+        from app.main import app as fastapi_app
+        from app.auth import get_current_user
+        from app.routers import api as api_router
+
+        cursor = self._ScriptedCursor([[earning], history, [], [], []])
+        ctx = MagicMock()
+        ctx.__enter__.return_value = cursor
+        ctx.__exit__.return_value = False
+        fastapi_app.dependency_overrides[get_current_user] = lambda: {
+            "id": 1, "email": "t@t.com", "name": "T", "role": "user"}
+        try:
+            with patch.object(db, "db_cursor", lambda: ctx), \
+                 patch.object(api_router, "ensure_user", return_value={}):
+                client = TestClient(fastapi_app, raise_server_exceptions=False)
+                response = client.get(f"/api/earnings/{earning['id']}/decision")
+        finally:
+            fastapi_app.dependency_overrides = {}
+        self.assertEqual(response.status_code, 200, response.text)
+        return response.json()
+
+    def test_a_cross_currency_pair_returns_no_ratio_and_a_reason(self):
+        earning = dict(TSM_GROWTH_PAIR[1], id=2, report_type="Q", is_predicted=False,
+                       eps_estimate=3.94329, estimate_currency="USD",
+                       revenue_actual=None, revenue_estimate=None)
+        body = self._decision(earning, [dict(r, eps_estimate=None) for r in TSM_GROWTH_PAIR])
+        growth = body["actual_growth"]
+        self.assertIsNone(growth["eps_yoy"])
+        self.assertEqual(growth["eps_yoy_reason"], "currency_unknown")
+
+    def test_an_attributed_pair_still_returns_the_ratio(self):
+        earning = dict(COMPARABLE_GROWTH_PAIR[1], id=4, report_type="Q", is_predicted=False,
+                       eps_estimate=45.0, estimate_currency="USD",
+                       revenue_actual=None, revenue_estimate=None)
+        body = self._decision(earning, [dict(r, eps_estimate=None) for r in COMPARABLE_GROWTH_PAIR])
+        growth = body["actual_growth"]
+        self.assertEqual(Decimal(str(growth["eps_yoy"])), Decimal("0.25"))
+        self.assertIsNone(growth["eps_yoy_reason"])

@@ -338,17 +338,17 @@
                   <tr><th class="text-left p-2 font-medium">指标</th><th class="text-right p-2 font-medium">预期值<br><span class="font-normal text-[10px]">绝对值 / 同比</span></th><th class="text-right p-2 font-medium">实际值<br><span class="font-normal text-[10px]">绝对值 / 同比</span></th><th class="text-right p-2 font-medium">较预期<br><span class="font-normal text-[10px]">绝对值 / 涨跌幅</span></th></tr>
                 </thead>
                 <tbody>
-                  <tr style="border-top:1px solid var(--border);"><th class="text-left p-2 font-medium">营收</th><td class="p-2 text-right">{{ fmtBigNum(selectedEarning.revenue_estimate) }}<br><span style="color:var(--text-muted);">—</span></td><td class="p-2 text-right">{{ fmtBigNum(selectedEarning.revenue_actual) }}<br><span style="color:var(--text-muted);">{{ decision ? fmtPct(decision.actual_growth.revenue_yoy) : '—' }}</span></td><td class="p-2 text-right" :class="revSurplusClass(selectedEarning)" :title="comparisonNote(selectedEarning)">
+                  <tr style="border-top:1px solid var(--border);"><th class="text-left p-2 font-medium">营收</th><td class="p-2 text-right">{{ fmtBigNum(selectedEarning.revenue_estimate) }}<br><span style="color:var(--text-muted);">—</span></td><td class="p-2 text-right">{{ fmtBigNum(selectedEarning.revenue_actual) }}<br><span style="color:var(--text-muted);" :title="growthNote(decision, 'revenue_yoy')">{{ growthCell(decision, 'revenue_yoy') }}</span></td><td class="p-2 text-right" :class="revSurplusClass(selectedEarning)" :title="comparisonNote(selectedEarning)">
                     <template v-if="hasComparison(selectedEarning, 'revenue')">{{ fmtBigNum(metricDelta(selectedEarning.revenue_actual, selectedEarning.revenue_estimate)) }}<br>{{ signedPct(revSurplus(selectedEarning)) }}</template>
                     <template v-else>—<br><span style="color:var(--text-muted);">{{ comparisonNote(selectedEarning) || '—' }}</span></template>
                   </td></tr>
-                  <tr style="border-top:1px solid var(--border);"><th class="text-left p-2 font-medium">EPS</th><td class="p-2 text-right">{{ fmtNum(selectedEarning.eps_estimate) }}<br><span style="color:var(--text-muted);">—</span></td><td class="p-2 text-right">{{ fmtNum(selectedEarning.eps_actual) }}<br><span style="color:var(--text-muted);">{{ decision ? fmtPct(decision.actual_growth.eps_yoy) : '—' }}</span></td><td class="p-2 text-right" :class="epsSurplusClass(selectedEarning)" :title="comparisonNote(selectedEarning)">
+                  <tr style="border-top:1px solid var(--border);"><th class="text-left p-2 font-medium">EPS</th><td class="p-2 text-right">{{ fmtNum(selectedEarning.eps_estimate) }}<br><span style="color:var(--text-muted);">—</span></td><td class="p-2 text-right">{{ fmtNum(selectedEarning.eps_actual) }}<br><span style="color:var(--text-muted);" :title="growthNote(decision, 'eps_yoy')">{{ growthCell(decision, 'eps_yoy') }}</span></td><td class="p-2 text-right" :class="epsSurplusClass(selectedEarning)" :title="comparisonNote(selectedEarning)">
                     <template v-if="hasComparison(selectedEarning, 'eps')">{{ fmtNum(metricDelta(selectedEarning.eps_actual, selectedEarning.eps_estimate)) }}<br>{{ signedPct(epsSurplus(selectedEarning)) }}</template>
                     <template v-else>—<br><span style="color:var(--text-muted);">{{ comparisonNote(selectedEarning) || '—' }}</span></template>
                   </td></tr>
                 </tbody>
               </table>
-              <p class="px-3 pb-3 text-[11px] leading-4" style="color:var(--text-muted);">预期来源：{{ estimateSourceLabel(selectedEarning) }}。同比仅基于已披露实际值；预期同比缺少同口径历史一致预期时显示“—”。预期与实际<b>币种不同</b>（如报表币种与报价币种）、<b>口径未标明</b>或<b>口径未经同一来源确认</b>时，「较预期」显示“—”（数值仍按各自来源原样列出），避免把不同口径的两个数相减。</p>
+              <p class="px-3 pb-3 text-[11px] leading-4" style="color:var(--text-muted);">预期来源：{{ estimateSourceLabel(selectedEarning) }}。同比仅基于已披露实际值；预期同比缺少同口径历史一致预期时显示“—”。预期与实际<b>币种不同</b>（如报表币种与报价币种）、<b>口径未标明</b>或<b>口径未经同一来源确认</b>时，「较预期」显示“—”（数值仍按各自来源原样列出），避免把不同口径的两个数相减。本期与上期的实际值之间同样适用该规则：两侧币种/口径不一致时，同比显示“不可比”而不是百分比（「—」不是数据缺失）。</p>
             </div>
 
             <!-- Longbridge quarterly consensus section -->
@@ -369,10 +369,11 @@
 
             <div v-if="decision" class="section-title">财报决策指标</div>
             <div v-if="decision" class="surface p-3 mb-3">
-              <div class="detail-row"><span class="detail-label">EPS 同比 / 环比（实际）</span><span class="detail-value">{{ fmtPct(decision.actual_growth.eps_yoy) }} / {{ fmtPct(decision.actual_growth.eps_qoq) }}</span></div>
-              <div class="detail-row"><span class="detail-label">营收同比 / 环比（实际）</span><span class="detail-value">{{ fmtPct(decision.actual_growth.revenue_yoy) }} / {{ fmtPct(decision.actual_growth.revenue_qoq) }}</span></div>
+              <div class="detail-row"><span class="detail-label">EPS 同比 / 环比（实际）</span><span class="detail-value" :title="growthNote(decision, 'eps_yoy') || growthNote(decision, 'eps_qoq')">{{ fmtPct(growthValue(decision, 'eps_yoy')) }} / {{ fmtPct(growthValue(decision, 'eps_qoq')) }}</span></div>
+              <div class="detail-row"><span class="detail-label">营收同比 / 环比（实际）</span><span class="detail-value" :title="growthNote(decision, 'revenue_yoy') || growthNote(decision, 'revenue_qoq')">{{ fmtPct(growthValue(decision, 'revenue_yoy')) }} / {{ fmtPct(growthValue(decision, 'revenue_qoq')) }}</span></div>
               <div class="detail-row"><span class="detail-label">EPS 超预期 / 不及预期连续</span><span class="detail-value">{{ decision.beat_miss_streak.kind === 'beat' ? '超预期' : decision.beat_miss_streak.kind === 'miss' ? '不及预期' : '—' }} {{ decision.beat_miss_streak.count || '' }}{{ decision.beat_miss_streak.count ? '季' : '' }}</span></div>
               <div class="detail-row"><span class="detail-label">财报后价格反应</span><span class="detail-value" style="color:var(--text-muted);">暂无可靠可用数据源</span></div>
+              <p v-if="growthSuppressedNote(decision)" class="mt-2 text-[11px] leading-4" style="color:var(--text-muted);">{{ growthSuppressedNote(decision) }}</p>
               <p class="mt-2 text-[11px] leading-4" style="color:var(--text-muted);">增长及连续表现仅由已记录实际值与当时一致预期计算；不构成投资建议。</p>
             </div>
             <div v-if="decision" class="section-title">预期修正趋势</div>

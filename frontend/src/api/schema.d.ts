@@ -424,6 +424,33 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * ActualGrowth
+         * @description Cross-period growth of a row's own actuals (Issue #63).
+         *
+         *     Each ratio is only present when the two periods' actuals were attributed to
+         *     the same currency and basis; otherwise it is ``None`` and ``<metric>_reason``
+         *     carries the language-independent reason the UI renders "—" for.  A ratio and
+         *     a reason are never both set.
+         */
+        ActualGrowth: {
+            /** Eps Yoy */
+            eps_yoy?: string | null;
+            /** Eps Yoy Reason */
+            eps_yoy_reason?: string | null;
+            /** Eps Qoq */
+            eps_qoq?: string | null;
+            /** Eps Qoq Reason */
+            eps_qoq_reason?: string | null;
+            /** Revenue Yoy */
+            revenue_yoy?: string | null;
+            /** Revenue Yoy Reason */
+            revenue_yoy_reason?: string | null;
+            /** Revenue Qoq */
+            revenue_qoq?: string | null;
+            /** Revenue Qoq Reason */
+            revenue_qoq_reason?: string | null;
+        };
         /** AppConfig */
         AppConfig: {
             /**
@@ -507,6 +534,7 @@ export interface components {
             provenance?: components["schemas"]["Provenance"] | {
                 [key: string]: unknown;
             } | null;
+            actual_growth?: components["schemas"]["ActualGrowth"] | null;
         } & {
             [key: string]: unknown;
         };

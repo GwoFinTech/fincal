@@ -239,13 +239,14 @@ class ReadPathTests(TestCase):
         """The panel's actual and its growth must come from the same row."""
         rows = [
             {"id": 10, "symbol": "UUUU", "market": "US", "fiscal_year": 2025, "fiscal_quarter": 2,
-             "report_date": date(2025, 8, 6), "eps_actual": 1, "eps_estimate": 1, "revenue_actual": None},
+             "report_date": date(2025, 8, 6), "eps_actual": 1, "eps_estimate": 1, "revenue_actual": None,
+             "actual_currency": "USD", "actual_source": "longbridge"},
             {"id": 11, "symbol": "UUUU", "market": "US", "fiscal_year": 2026, "fiscal_quarter": 2,
              "report_date": date(2026, 8, 5), "eps_actual": -0.13, "eps_estimate": -0.04,
              "revenue_actual": None},
             {"id": 12, "symbol": "UUUU", "market": "US", "fiscal_year": 2026, "fiscal_quarter": 2,
              "report_date": date(2026, 8, 6), "eps_actual": 27.898188, "eps_estimate": -0.04,
-             "revenue_actual": None},
+             "revenue_actual": None, "actual_currency": "USD", "actual_source": "longbridge"},
         ]
         # The user opened row 12 (the one the API shows for the period).
         metrics = build_decision_metrics(rows, earning_id=12)

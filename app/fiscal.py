@@ -286,6 +286,64 @@ def comparison_unavailable_reason(row) -> str | None:
     return None if _same_declared_source(row) else COMPARISON_BASIS_UNVERIFIED
 
 
+def _same_actual_source(first_row, second_row) -> bool:
+    """True when one provider wrote both rows' actuals."""
+    first_source = first_row.get("actual_source")
+    second_source = second_row.get("actual_source")
+    if not first_source or not second_source:
+        return False
+    return str(first_source).strip().lower() == str(second_source).strip().lower()
+
+
+#: The derived metrics that compare two different fiscal periods' actuals.
+GROWTH_VALUE_FIELDS = {"eps": "eps_actual", "revenue": "revenue_actual"}
+
+
+def growth_unavailable_reason(current_row, prior_row, metric: str = "eps") -> str | None:
+    """Why two periods' actuals must not be turned into a growth percentage (#63).
+
+    The cross-period counterpart of :func:`comparison_unavailable_reason`: 同比
+    (same quarter, prior year) and 环比 (previous quarter) subtract the same
+    metric from two **different** rows, so the row-level contract does not cover
+    them — production rendered ``+5647.7%`` for TSM while the same panel called
+    the same row's estimate/actual pair non-comparable.
+
+    ``None`` means the two actuals are attributed consistently — a declared,
+    identical currency, and either the same stated basis on both sides or both
+    numbers written by one provider — so the ratio describes a real change.
+    Otherwise the same language-independent reason codes as the row-level rule
+    are returned (``currency_unknown`` / ``currency_mismatch`` /
+    ``basis_mismatch`` / ``basis_unverified``).
+
+    ``metric`` selects the compared column (``eps`` → ``eps_actual``,
+    ``revenue`` → ``revenue_actual``).  A missing row or a missing value returns
+    ``None``: there is no pair to compute, which the read paths already render as
+    "—" without it being a comparability problem.
+    """
+    try:
+        field = GROWTH_VALUE_FIELDS[metric]
+    except KeyError:  # pragma: no cover - a typo must never silently compare EPS
+        raise ValueError(f"unknown growth metric: {metric!r}") from None
+    if not current_row or not prior_row:
+        return None
+    if current_row.get(field) is None or prior_row.get(field) is None:
+        return None
+    current_currency = declared_attribution(current_row, "actual_currency")
+    prior_currency = declared_attribution(prior_row, "actual_currency")
+    if current_currency is None or prior_currency is None:
+        return COMPARISON_CURRENCY_UNKNOWN
+    if current_currency != prior_currency:
+        return COMPARISON_CURRENCY_MISMATCH
+    current_basis = declared_attribution(current_row, "actual_basis")
+    prior_basis = declared_attribution(prior_row, "actual_basis")
+    if current_basis and prior_basis:
+        return None if current_basis == prior_basis else COMPARISON_BASIS_MISMATCH
+    # At least one period left its basis unstated. One provider computing both
+    # actuals is harmless; across providers the two figures are not proven to
+    # share a basis (GAAP against adjusted, per-share against per-ADR).
+    return None if _same_actual_source(current_row, prior_row) else COMPARISON_BASIS_UNVERIFIED
+
+
 def _identity_query() -> str:
     return (
         "SELECT e.id, e.symbol, e.market, e.fiscal_year, e.fiscal_quarter,"

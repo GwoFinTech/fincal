@@ -176,7 +176,7 @@ def api_earning_decision(earning_id: int, user=Depends(get_current_user)):
         if not earning:
             raise NotFoundError("earning")
         earning = dict(earning)
-        cur.execute("SELECT id,fiscal_year,fiscal_quarter,report_date,eps_actual,revenue_actual,eps_estimate FROM earnings WHERE symbol=%s AND market=%s ORDER BY report_date", (earning["symbol"], earning["market"]))
+        cur.execute("SELECT id,fiscal_year,fiscal_quarter,report_date,eps_actual,revenue_actual,eps_estimate,actual_currency,actual_basis,actual_source FROM earnings WHERE symbol=%s AND market=%s ORDER BY report_date", (earning["symbol"], earning["market"]))
         history = [dict(row) for row in cur.fetchall()]
         cur.execute("SELECT captured_at,eps_estimate,revenue_estimate,source FROM earnings_estimate_snapshots WHERE earning_id=%s ORDER BY captured_at", (earning_id,))
         snapshots = [dict(row) for row in cur.fetchall()]
@@ -189,7 +189,7 @@ def api_earning_decision(earning_id: int, user=Depends(get_current_user)):
         "institution_rating": dict(rating) if rating else {"status": "unavailable", "source": "longbridge"},
         "guidance": dict(guidance) if guidance else {"status": "unavailable", "reason": "longbridge_guidance_endpoint_unavailable", "source": "longbridge"},
         **build_decision_metrics(history, earning_id),
-        "provenance": {"revision_trend": "earnings_estimate_snapshots / Longbridge finance-calendar", "institution_rating": "Longbridge institution-rating", "actual_growth": "earnings actuals (Longbridge/Futu as recorded)", "price_reaction": "unavailable: no reliable provider configured"},
+        "provenance": {"revision_trend": "earnings_estimate_snapshots / Longbridge finance-calendar", "institution_rating": "Longbridge institution-rating", "actual_growth": "earnings actuals (Longbridge/Futu as recorded); a period pair is only compared when both actuals share a declared currency and basis", "price_reaction": "unavailable: no reliable provider configured"},
     }
 
 

@@ -6,6 +6,7 @@ schema coverage. Frontend TypeScript types are auto-generated from this.
 from __future__ import annotations
 
 from datetime import date, datetime
+from decimal import Decimal
 from pydantic import BaseModel
 
 
@@ -120,12 +121,34 @@ class Provenance(BaseModel):
     actual_growth: str = ""
     price_reaction: str = ""
 
+class ActualGrowth(BaseModel):
+    """Cross-period growth of a row's own actuals (Issue #63).
+
+    Each ratio is only present when the two periods' actuals were attributed to
+    the same currency and basis; otherwise it is ``None`` and ``<metric>_reason``
+    carries the language-independent reason the UI renders "—" for.  A ratio and
+    a reason are never both set.
+    """
+    eps_yoy: Decimal | None = None
+    eps_yoy_reason: str | None = None
+    eps_qoq: Decimal | None = None
+    eps_qoq_reason: str | None = None
+    revenue_yoy: Decimal | None = None
+    revenue_yoy_reason: str | None = None
+    revenue_qoq: Decimal | None = None
+    revenue_qoq_reason: str | None = None
+
+
 class DecisionResponse(BaseModel):
     status: str
     revision_trend: dict | None = None
     institution_rating: InstitutionRating | dict | None = None
     guidance: GuidanceStatus | dict | None = None
     provenance: Provenance | dict | None = None
+    # Derived from two fiscal periods' actuals (Issue #63), declared here so the
+    # generated TypeScript client types the ratio and its reason instead of
+    # treating the whole object as opaque.
+    actual_growth: ActualGrowth | None = None
     # Additional dynamic fields from build_decision_metrics
     model_config = {"extra": "allow"}
 
