@@ -323,11 +323,15 @@ class ReadOnlyContractTests(TestCase):
 
 class HealthIntegrationTests(TestCase):
     def _health_results(self, stage_ages, derived_ages):
-        # The postgresql probe only executes a statement (no fetch), so the
-        # freshness queries are the first two fetches the fake cursor serves.
+        # `admin.health_check()` judges with its own (real) clock: unlike
+        # `check_freshness(now=...)` it takes no injected reference.  The ages
+        # below are therefore laid out relative to the clock it will actually
+        # read — building them from the module's fixed NOW made this class
+        # "stale" purely because real time had moved on (Issue #64 note).
+        now = datetime.now(timezone.utc)
         return [
-            _stage_rows(**stage_ages),
-            _derived_rows(**derived_ages),
+            [{"stage": stage, "last_success_at": now - age} for stage, age in stage_ages.items()],
+            [{"name": name, "last_at": now - age} for name, age in derived_ages.items()],
         ]
 
     def _call_health(self, results):
