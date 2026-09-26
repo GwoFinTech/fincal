@@ -120,6 +120,9 @@ class Provenance(BaseModel):
     institution_rating: str = ""
     actual_growth: str = ""
     price_reaction: str = ""
+    # Issue #64: the streak is derived from the same rows as actual_growth, so its
+    # provenance states the same comparability contract.
+    beat_miss_streak: str = ""
 
 class ActualGrowth(BaseModel):
     """Cross-period growth of a row's own actuals (Issue #63).
@@ -139,6 +142,33 @@ class ActualGrowth(BaseModel):
     revenue_qoq_reason: str | None = None
 
 
+class BeatMissPeriod(BaseModel):
+    """The fiscal period a beat/miss run stopped at (Issue #64)."""
+    fiscal_year: int | None = None
+    fiscal_quarter: int | None = None
+
+
+class BeatMissStreak(BaseModel):
+    """Contiguous EPS beat/miss run of one quarter (Issue #64).
+
+    ``kind`` is ``beat``/``miss`` only while every counted quarter's own
+    estimate/actual pair passed :func:`app.fiscal.comparison_unavailable_reason`
+    (and was adjacent, decidable and in the same direction); a run is counted
+    backwards from the quarter the panel is open on.  When no run can be stated —
+    the opened quarter's own pair is not comparable — ``kind`` is ``unavailable``,
+    ``count`` is ``0`` and ``reason`` carries the language-independent code the UI
+    renders "—" for.  ``break_period``/``break_reason`` name the quarter the count
+    stopped at and why (a ``COMPARISON_*`` code, or ``missing_values`` /
+    ``direction_changed`` / ``not_adjacent``).  A meaningful ``count`` and a
+    ``reason`` are never both set.
+    """
+    kind: str = "unavailable"
+    count: int = 0
+    reason: str | None = None
+    break_period: BeatMissPeriod | None = None
+    break_reason: str | None = None
+
+
 class DecisionResponse(BaseModel):
     status: str
     revision_trend: dict | None = None
@@ -149,6 +179,9 @@ class DecisionResponse(BaseModel):
     # generated TypeScript client types the ratio and its reason instead of
     # treating the whole object as opaque.
     actual_growth: ActualGrowth | None = None
+    # The streak was the last derived metric the client received untrusted
+    # (Issue #64): it is declared here for the same reason as actual_growth.
+    beat_miss_streak: BeatMissStreak | None = None
     # Additional dynamic fields from build_decision_metrics
     model_config = {"extra": "allow"}
 

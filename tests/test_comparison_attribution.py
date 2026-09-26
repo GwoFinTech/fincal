@@ -34,6 +34,7 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from unittest import TestCase, skipUnless
+from unittest import mock
 from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
@@ -59,6 +60,7 @@ def _load(name: str, relative: str):
 sync_earnings = _load("sync_earnings_issue61", "scripts/sync_earnings.py")
 sync_futu = _load("sync_futu_issue61", "scripts/sync_futu.py")
 backfill = _load("backfill_comparison_attribution", "scripts/backfill_comparison_attribution.py")
+streak_check = _load("check_streak_guard_issue64", "scripts/check_streak_guard.py")
 
 APP_JS = ROOT / "app" / "static" / "assets" / "app-setup.js"
 INDEX_HTML = ROOT / "app" / "static" / "index.html"
@@ -742,6 +744,18 @@ class DecisionGrowthContractTests(TestCase):
         for field in ("actual_currency", "actual_basis", "actual_source"):
             self.assertIn(field, history_query, f"the growth rule needs {field} in the history query")
 
+    def test_the_history_query_carries_both_sides_of_the_attribution(self):
+        """Issue #64: the streak reads the estimate side too, so it must be sent."""
+        source = (ROOT / "app" / "routers" / "api.py").read_text(encoding="utf-8")
+        history_query = next(line for line in source.splitlines()
+                             if "FROM earnings WHERE symbol=%s AND market=%s" in line)
+        for field in ("estimate_currency", "estimate_basis", "estimate_source"):
+            self.assertIn(
+                field, history_query,
+                f"without {field} the row-level rule degrades to currency_unknown "
+                f"and every streak reads as unmatched (Issue #64)",
+            )
+
     def test_the_detailed_panel_never_renders_a_ratio_for_a_flagged_pair(self):
         html = INDEX_HTML.read_text(encoding="utf-8")
         self.assertNotIn("decision.actual_growth.eps_yoy", html)
@@ -814,3 +828,260 @@ class DecisionEndpointTests(TestCase):
         growth = body["actual_growth"]
         self.assertEqual(Decimal(str(growth["eps_yoy"])), Decimal("0.25"))
         self.assertIsNone(growth["eps_yoy_reason"])
+
+    # ── Issue #64: the streak is judged by the same rule ───────────────────
+
+    def test_the_streak_of_the_production_asml_row_is_withheld(self):
+        """ASML FY2026 Q2 used to render "不及预期 3季" from three EUR-vs-USD pairs."""
+        earning = {"id": 3, "symbol": "ASML", "market": "US", "fiscal_year": 2026,
+                   "fiscal_quarter": 2, "report_date": date(2026, 7, 15), "report_type": "Q",
+                   "is_predicted": False, "eps_actual": 7.59, "eps_estimate": 16.00777,
+                   "estimate_currency": "USD", "actual_currency": "EUR",
+                   "estimate_source": "longbridge", "actual_source": "futu",
+                   "revenue_actual": None, "revenue_estimate": None}
+        history = [
+            {"id": 3, "fiscal_year": 2026, "fiscal_quarter": 2, "report_date": date(2026, 7, 15),
+             "eps_actual": 7.59, "eps_estimate": 16.00777, "revenue_actual": None,
+             "estimate_currency": "USD", "actual_currency": "EUR",
+             "estimate_source": "longbridge", "actual_source": "futu"},
+            {"id": 2, "fiscal_year": 2026, "fiscal_quarter": 1, "report_date": date(2026, 4, 15),
+             "eps_actual": 7.15, "eps_estimate": 7.567625, "revenue_actual": None,
+             "estimate_currency": "USD", "actual_currency": "EUR",
+             "estimate_source": "longbridge", "actual_source": "futu"},
+            {"id": 1, "fiscal_year": 2025, "fiscal_quarter": 4, "report_date": date(2026, 1, 28),
+             "eps_actual": 6.9, "eps_estimate": 7.0, "revenue_actual": None,
+             "estimate_currency": "USD", "actual_currency": "EUR",
+             "estimate_source": "longbridge", "actual_source": "futu"},
+        ]
+        streak = self._decision(earning, history)["beat_miss_streak"]
+        self.assertEqual(streak["kind"], "unavailable")
+        self.assertEqual(streak["count"], 0)
+        self.assertEqual(streak["reason"], "currency_mismatch")
+        self.assertEqual(streak["break_period"], {"fiscal_year": 2026, "fiscal_quarter": 2})
+        # A language-independent code only: no user-visible prose in the API.
+        self.assertNotIn("币种", json.dumps(streak, ensure_ascii=False))
+
+    def test_a_comparable_run_still_returns_its_count(self):
+        earning = {"id": 4, "symbol": "AZO", "market": "US", "fiscal_year": 2026,
+                   "fiscal_quarter": 3, "report_date": date(2026, 9, 22), "report_type": "Q",
+                   "is_predicted": False, "eps_actual": 50.0, "eps_estimate": 45.0,
+                   "estimate_currency": "USD", "actual_currency": "USD",
+                   "estimate_source": "longbridge", "actual_source": "longbridge",
+                   "revenue_actual": None, "revenue_estimate": None}
+        history = [
+            {"id": 4, "fiscal_year": 2026, "fiscal_quarter": 3, "report_date": date(2026, 9, 22),
+             "eps_actual": 50.0, "eps_estimate": 45.0, "revenue_actual": None,
+             "estimate_currency": "USD", "actual_currency": "USD",
+             "estimate_source": "longbridge", "actual_source": "longbridge"},
+            {"id": 5, "fiscal_year": 2026, "fiscal_quarter": 2, "report_date": date(2026, 6, 22),
+             "eps_actual": 40.0, "eps_estimate": 38.0, "revenue_actual": None,
+             "estimate_currency": "USD", "actual_currency": "USD",
+             "estimate_source": "longbridge", "actual_source": "longbridge"},
+        ]
+        streak = self._decision(earning, history)["beat_miss_streak"]
+        self.assertEqual((streak["kind"], streak["count"]), ("beat", 2))
+        self.assertIsNone(streak["reason"])
+
+
+class BeatMissStreakContractTests(TestCase):
+    """Issue #64: the streak ships a typed contract, and the panel obeys it."""
+
+    def test_the_response_model_declares_the_streak_and_its_reason(self):
+        from app.schemas import BeatMissPeriod, BeatMissStreak, DecisionResponse
+
+        self.assertIn("beat_miss_streak", DecisionResponse.model_fields)
+        self.assertEqual(set(BeatMissStreak.model_fields),
+                         {"kind", "count", "reason", "break_period", "break_reason"})
+        self.assertEqual(set(BeatMissPeriod.model_fields), {"fiscal_year", "fiscal_quarter"})
+
+    def test_the_streak_model_accepts_the_metric_output(self):
+        """Every shape build_decision_metrics can emit must validate."""
+        from app.phase3 import build_decision_metrics
+        from app.schemas import BeatMissStreak
+
+        rows = [
+            {"id": 2, "fiscal_year": 2026, "fiscal_quarter": 2, "report_date": "2026-07-15",
+             "eps_actual": 7.59, "eps_estimate": 16.00777, "estimate_currency": "USD",
+             "actual_currency": "EUR", "estimate_source": "longbridge", "actual_source": "futu"},
+            {"id": 1, "fiscal_year": 2026, "fiscal_quarter": 1, "report_date": "2026-04-15",
+             "eps_actual": 7.15, "eps_estimate": 7.567625, "estimate_currency": "USD",
+             "actual_currency": "EUR", "estimate_source": "longbridge", "actual_source": "futu"},
+        ]
+        streak = build_decision_metrics(rows, earning_id=2)["beat_miss_streak"]
+        model = BeatMissStreak.model_validate(streak)
+        self.assertEqual(model.count, 0)
+        self.assertEqual(model.reason, fiscal.COMPARISON_CURRENCY_MISMATCH)
+        self.assertEqual(model.break_reason, fiscal.COMPARISON_CURRENCY_MISMATCH)
+
+    def test_a_count_and_a_reason_are_never_both_meaningful(self):
+        """The invariant the panel relies on, checked over every shape."""
+        from app.phase3 import build_decision_metrics
+
+        cases = [
+            # comparable run, incomparable boundary, missing boundary, direction flip
+            ([{"id": 3, "fiscal_year": 2026, "fiscal_quarter": 4, "report_date": "2026-01-29",
+               "eps_actual": 1.44, "eps_estimate": 1.30, "estimate_currency": "USD",
+               "actual_currency": "USD", "estimate_source": "longbridge", "actual_source": "longbridge"},
+              {"id": 2, "fiscal_year": 2026, "fiscal_quarter": 3, "report_date": "2025-10-29",
+               "eps_actual": 1.32, "eps_estimate": 1.20, "estimate_currency": "USD",
+               "actual_currency": "USD", "estimate_source": "longbridge", "actual_source": "longbridge"},
+              {"id": 1, "fiscal_year": 2026, "fiscal_quarter": 2, "report_date": "2025-07-29",
+               "eps_actual": 7.59, "eps_estimate": 16.0, "estimate_currency": "USD",
+               "actual_currency": "EUR", "estimate_source": "longbridge", "actual_source": "futu"}], 3),
+            ([{"id": 2, "fiscal_year": 2026, "fiscal_quarter": 2, "report_date": "2026-07-15",
+               "eps_actual": None, "eps_estimate": None}], 2),
+            ([], 1),
+        ]
+        for rows, earning_id in cases:
+            streak = build_decision_metrics(rows, earning_id=earning_id)["beat_miss_streak"]
+            with self.subTest(rows=rows):
+                if streak["reason"] is not None:
+                    self.assertEqual(streak["count"], 0, "a reason must come with no count")
+                    self.assertEqual(streak["kind"], "unavailable")
+
+    def test_the_panel_never_renders_the_streak_without_the_guard(self):
+        html = INDEX_HTML.read_text(encoding="utf-8")
+        # The raw fields are gone from the template: the cell goes through the
+        # formatter that refuses a flagged streak, like 较预期 and 同比/环比 do.
+        self.assertNotIn("decision.beat_miss_streak.kind", html)
+        self.assertNotIn("decision.beat_miss_streak.count", html)
+        self.assertIn("beatMissStreakText(decision)", html)
+        self.assertIn("beatMissStreakNote(decision)", html)
+
+    @skipUnless(shutil.which("node"), "node is required for the JS behaviour check")
+    def test_the_streak_formatter_refuses_a_streak_the_api_flagged(self):
+        """Run the real formatter code from app-setup.js under node."""
+        result = _run_streak_probe()
+        self.assertEqual(result["flagged_text"], "—")
+        self.assertEqual(result["flagged_name_text"], "—", "a name is not a run")
+        self.assertIn("币种不同", result["flagged_note"])
+        self.assertIn("无法判断", result["flagged_note"])
+        self.assertIn("不是数据缺失", result["flagged_note"])
+        self.assertEqual(result["healthy_text"], "超预期 3季")
+        self.assertEqual(result["healthy_note"], "")
+        self.assertEqual(result["miss_text"], "不及预期 2季")
+        # An incomparable boundary is disclosed without discarding a real run.
+        self.assertIn("26Q1", result["break_note"])
+        self.assertIn("币种不同", result["break_note"])
+        self.assertEqual(result["missing_text"], "—")
+        self.assertEqual(result["empty_note"], "")
+
+
+class StreakAcceptanceCheckTests(TestCase):
+    """The read-only acceptance script Issue #64 criterion 5 asks for."""
+
+    def test_the_acceptance_check_reads_what_the_endpoint_reads(self):
+        """A missing attribution column would silently disable the whole rule."""
+        source = (ROOT / "app" / "routers" / "api.py").read_text(encoding="utf-8")
+        query = next(line for line in source.splitlines()
+                     if "FROM earnings WHERE symbol=%s AND market=%s" in line)
+        projected = query.split("SELECT", 1)[1].split(" FROM", 1)[0]
+        endpoint_fields = {field.strip() for field in projected.split(",")}
+        script_fields = {field.strip() for field in streak_check.HISTORY_COLUMNS.split(",")}
+        self.assertEqual(endpoint_fields, script_fields)
+
+    def test_the_acceptance_check_is_read_only_and_reports_the_guard(self):
+        histories: dict = {
+            # The production ASML/TSM shape: USD estimate against a TWD actual.
+            ("TSM", "US"): [
+                {"id": 3, "fiscal_year": 2026, "fiscal_quarter": 2, "report_date": date(2026, 7, 15),
+                 "eps_actual": 7.59, "eps_estimate": 16.00777, "revenue_actual": None,
+                 "estimate_currency": "USD", "actual_currency": "EUR",
+                 "estimate_source": "longbridge", "actual_source": "futu"},
+                {"id": 2, "fiscal_year": 2026, "fiscal_quarter": 1, "report_date": date(2026, 4, 15),
+                 "eps_actual": 7.15, "eps_estimate": 7.567625, "revenue_actual": None,
+                 "estimate_currency": "USD", "actual_currency": "EUR",
+                 "estimate_source": "longbridge", "actual_source": "futu"},
+            ],
+            # A healthy row: one provider produced both numbers, adjacent quarters.
+            ("AZO", "US"): [
+                {"id": 9, "fiscal_year": 2026, "fiscal_quarter": 4, "report_date": date(2026, 1, 29),
+                 "eps_actual": 56.05, "eps_estimate": 53.88695, "revenue_actual": None,
+                 "estimate_currency": "USD", "actual_currency": "USD",
+                 "estimate_source": "longbridge", "actual_source": "longbridge"},
+                {"id": 8, "fiscal_year": 2026, "fiscal_quarter": 3, "report_date": date(2025, 10, 29),
+                 "eps_actual": 50.0, "eps_estimate": 45.0, "revenue_actual": None,
+                 "estimate_currency": "USD", "actual_currency": "USD",
+                 "estimate_source": "longbridge", "actual_source": "longbridge"},
+            ],
+        }
+        executed = []
+
+        class _HistoryCursor:
+            """Serves one symbol's history per statement, like the endpoint's query."""
+
+            def __init__(self):
+                self._rows = []
+
+            def execute(self, sql, params=None):
+                executed.append(sql)
+                key = tuple(params or ())
+                self._rows = histories.get(key[:2], [])
+
+            def fetchall(self):
+                return self._rows
+
+        cursor = _HistoryCursor()
+        from app import fiscal as fiscal_module
+
+        fake_db = MagicMock()
+        fake_db.db_cursor.return_value.__enter__.return_value = cursor
+        fake_db.db_cursor.return_value.__exit__.return_value = False
+
+        def _visible(symbols=None, markets=None, start=None, end=None):
+            return [
+                dict(TSM_ROW, id=3, symbol="TSM", fiscal_year=2026, fiscal_quarter=2),
+                dict(LONGBRIDGE_ROW, id=9, symbol="AZO", fiscal_year=2026, fiscal_quarter=4),
+            ]
+
+        with mock.patch.object(streak_check, "db", fake_db), \
+             mock.patch.object(streak_check, "popular_stocks", return_value=(["TSM", "AZO"], [])), \
+             mock.patch.object(streak_check, "fetch_earnings_from_db", _visible):
+            report = streak_check.scan()
+            exit_code = streak_check.main(["--json"])
+
+        for sql in executed:
+            for forbidden in ("INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE"):
+                self.assertNotIn(forbidden, str(sql).upper(), f"{forbidden} in {sql}")
+            self.assertIn("SELECT", str(sql).upper())
+        self.assertEqual(report["rows_with_eps_pair"], 2)
+        self.assertEqual(report["rows_marked_non_comparable"], 1)
+        self.assertEqual(report["reason_counts"], {fiscal_module.COMPARISON_CURRENCY_MISMATCH: 1})
+        # The flagged row answered with no direction, the comparable one did.
+        self.assertEqual(report["non_comparable_rows_with_direction"], 0)
+        self.assertEqual(report["directional_rows"], 1)
+        self.assertTrue(report["guard_holds"])
+        self.assertEqual(exit_code, 0, "the acceptance check must gate on the guard")
+        self.assertIn("guard : holds", streak_check._format(report))
+
+
+def _run_streak_probe() -> dict:
+    """Probe the streak guard with decision payloads shaped like the API's."""
+    probe = f"""
+{_formatters_function_source()}
+const fmt = useFormatters();
+const flagged = {{ beat_miss_streak: {{ kind: 'unavailable', count: 0, reason: 'currency_mismatch',
+  break_period: {{ fiscal_year: 2026, fiscal_quarter: 2 }}, break_reason: 'currency_mismatch' }} }};
+const healthy = {{ beat_miss_streak: {{ kind: 'beat', count: 3, reason: null,
+  break_period: null, break_reason: null }} }};
+const miss = {{ beat_miss_streak: {{ kind: 'miss', count: 2, reason: null,
+  break_period: {{ fiscal_year: 2026, fiscal_quarter: 1 }}, break_reason: 'currency_mismatch' }} }};
+const missing = {{ beat_miss_streak: {{ kind: 'unavailable', count: 0, reason: null,
+  break_period: {{ fiscal_year: 2026, fiscal_quarter: 4 }}, break_reason: 'missing_values' }} }};
+const out = {{
+  flagged_text: fmt.beatMissStreakText(flagged),
+  flagged_name_text: fmt.beatMissStreakText({{ beat_miss_streak: {{ kind: 'bogus', count: 2, reason: null }} }}),
+  flagged_note: fmt.beatMissStreakNote(flagged),
+  healthy_text: fmt.beatMissStreakText(healthy),
+  healthy_note: fmt.beatMissStreakNote(healthy),
+  miss_text: fmt.beatMissStreakText(miss),
+  break_note: fmt.beatMissStreakNote(miss),
+  missing_text: fmt.beatMissStreakText(missing),
+  empty_note: fmt.beatMissStreakNote({{}}),
+  guarded: fmt.beatMissStreak(flagged) === null && fmt.beatMissStreak(healthy) !== null,
+}};
+console.log(JSON.stringify(out));
+"""
+    completed = subprocess.run(["node", "-e", probe], capture_output=True, text=True, timeout=30)
+    assert completed.returncode == 0, completed.stderr
+    return json.loads(completed.stdout.strip().splitlines()[-1])

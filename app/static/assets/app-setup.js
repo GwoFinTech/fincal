@@ -422,6 +422,45 @@
       if (!parts.length) return '';
       return '「—」表示两个期间的实际值不可比，不是数据缺失：' + parts.join('；') + '。';
     }
+    // Issue #64: 连续 was the third and last derived metric rendered without the
+    // comparability rule — the panel showed "不及预期 3季" for ASML FY2026 Q2 while
+    // the same row's 较预期 already said "—（预期与实际币种不同）". The API now only
+    // counts a quarter whose own pair passed that rule, so a count is rendered
+    // only when no reason came back; otherwise the cell shows "—" and the note
+    // below says why, reusing the same reason labels as the other two guards.
+    const STREAK_BREAK_LABELS = {
+      missing_values: '该季预期或实际值缺失（或两者相等）',
+      direction_changed: '该季方向相反',
+      not_adjacent: '该季与上一季不相邻',
+    };
+    function beatMissStreak(decision) {
+      const streak = decision && decision.beat_miss_streak;
+      if (!streak || streak.reason || !streak.count) return null;
+      if (streak.kind !== 'beat' && streak.kind !== 'miss') return null;
+      return streak;
+    }
+    function beatMissStreakText(decision) {
+      const streak = beatMissStreak(decision);
+      if (!streak) return '—';
+      return (streak.kind === 'beat' ? '超预期' : '不及预期') + ' ' + streak.count + '季';
+    }
+    function beatMissStreakNote(decision) {
+      const streak = decision && decision.beat_miss_streak;
+      if (!streak) return '';
+      const boundary = streak.break_period
+        ? fqLabel(streak.break_period.fiscal_year, streak.break_period.fiscal_quarter)
+        : '';
+      if (streak.reason) {
+        return '「—」表示无法判断连续季数，不是数据缺失：本期'
+          + (boundary ? '（' + boundary + '）' : '') + '的预期与实际'
+          + attributionNote(streak.reason) + '。';
+      }
+      if (!streak.count || !streak.break_reason) return '';
+      const cause = ATTRIBUTION_LABELS[streak.break_reason]
+        ? '该季的预期与实际' + attributionNote(streak.break_reason)
+        : (STREAK_BREAK_LABELS[streak.break_reason] || '无法继续累计');
+      return '连续季数只累计相邻且可比的财季：' + (boundary ? boundary + ' ' : '') + cause + '，不计入并在此中断。';
+    }
     function epsSurplus(e) {
       if (comparisonUnavailable(e)) return null;
       if (e.eps_estimate == null || e.eps_actual == null) return null;
@@ -494,6 +533,7 @@
       epsSurplus, epsSurplusClass, revSurplus, revSurplusClass,
       hasComparison, comparisonNote, comparisonUnavailable, attributionNote,
       growthValue, growthReason, growthNote, growthCell, growthSuppressedNote,
+      beatMissStreak, beatMissStreakText, beatMissStreakNote,
       metricDelta, fmtNum, fmtPct, signedPct, fmtBigNum,
       estimateSourceLabel, hasLongbridgeConsensus, fqLabel, periodLabel,
     };

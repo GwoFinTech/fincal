@@ -246,14 +246,21 @@ class ReadPathTests(TestCase):
              "revenue_actual": None},
             {"id": 12, "symbol": "UUUU", "market": "US", "fiscal_year": 2026, "fiscal_quarter": 2,
              "report_date": date(2026, 8, 6), "eps_actual": 27.898188, "eps_estimate": -0.04,
-             "revenue_actual": None, "actual_currency": "USD", "actual_source": "longbridge"},
+             "revenue_actual": None, "actual_currency": "USD", "actual_source": "longbridge",
+             # Issue #64: the streak only counts a quarter whose estimate/actual
+             # pair is attributed on both sides, so this comparable row declares
+             # the estimate side too (without it the rule reports currency_unknown).
+             "estimate_currency": "USD", "estimate_source": "longbridge"},
         ]
         # The user opened row 12 (the one the API shows for the period).
         metrics = build_decision_metrics(rows, earning_id=12)
         self.assertEqual(metrics["actual_growth"]["eps_yoy"], Decimal("27.898188") - Decimal("1"))
-        # A duplicated period must not be counted twice in the streak.
+        # A duplicated period must not be counted twice in the streak, and the run
+        # stops at 2025Q2 because 2026Q1 is not stored (Issue #64: adjacency).
         self.assertEqual(metrics["beat_miss_streak"]["kind"], "beat")
         self.assertEqual(metrics["beat_miss_streak"]["count"], 1)
+        self.assertEqual(metrics["beat_miss_streak"]["reason"], None)
+        self.assertEqual(metrics["beat_miss_streak"]["break_reason"], "not_adjacent")
 
 
 # ── write paths ─────────────────────────────────────────────────────────────

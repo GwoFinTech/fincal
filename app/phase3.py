@@ -92,13 +92,118 @@ def _period_lookup(rows, earning_id):
     return lookup
 
 
+# ── EPS beat/miss streak (Issue #64) ───────────────────────────────────────
+#
+# The third derived metric of the detail panel, and the last one still counted
+# without the Issue #61 rule: ``beat_miss_streak`` decided direction from
+# ``actual > estimate`` and never asked whether the two numbers were comparable,
+# so the panel rendered "不及预期 3季" for ASML FY2026 Q2 while the *same* row's
+# 较预期 was already "—（预期与实际币种不同）".  In the default universe window
+# 147 of 180 visible disclosed rows produced a directional count, and 247 of the
+# 290 quarters those counts were built from were incomparable pairs.  A quarter is
+# now counted only when its own pair passes
+# :func:`app.fiscal.comparison_unavailable_reason`, and a quarter that fails
+# neither counts nor gets crossed.
+
+#: Break codes for a streak boundary that is *not* a comparability problem.  The
+#: rest of the vocabulary is :mod:`app.fiscal`'s ``COMPARISON_*`` codes.
+STREAK_BREAK_MISSING_VALUES = "missing_values"
+STREAK_BREAK_DIRECTION_CHANGED = "direction_changed"
+STREAK_BREAK_NOT_ADJACENT = "not_adjacent"
+
+
+def _streak_period(row) -> dict | None:
+    """The fiscal period of a streak row, shaped as the API reports it."""
+    fiscal_year, fiscal_quarter = row.get("fiscal_year"), row.get("fiscal_quarter")
+    if fiscal_year is None or fiscal_quarter is None:
+        return None
+    return {"fiscal_year": int(fiscal_year), "fiscal_quarter": int(fiscal_quarter)}
+
+
+def _previous_period(fiscal_year: int, fiscal_quarter: int) -> tuple[int, int]:
+    """The fiscal period immediately before ``(fiscal_year, fiscal_quarter)``."""
+    return (fiscal_year - 1, 4) if fiscal_quarter == 1 else (fiscal_year, fiscal_quarter - 1)
+
+
+def _no_streak(reason: str | None = None, period: dict | None = None,
+               break_reason: str | None = None) -> dict:
+    """No run can be stated — ``count`` stays 0 whenever ``reason`` is set.
+
+    ``reason`` carries the comparability code of the quarter the panel is open
+    on (its own estimate/actual pair cannot be compared, so no direction and no
+    count exist); ``break_period``/``break_reason`` name the boundary the count
+    stopped at, which is that same quarter in this case.
+    """
+    return {
+        "kind": "unavailable", "count": 0, "reason": reason,
+        "break_period": period,
+        "break_reason": break_reason if break_reason is not None else reason,
+    }
+
+
+def _beat_miss_streak(rows, fiscal_year: int, fiscal_quarter: int) -> dict:
+    """Count the contiguous comparable EPS beats/misses ending at one quarter.
+
+    ``rows`` is the symbol's history, newest first and one row per fiscal period,
+    whose first entry is the quarter the panel is open on: the run is counted
+    *backwards* from that quarter, so a predicted/unreported quarter after it can
+    neither be counted nor shorten it.
+
+    A quarter extends the run only while it is
+
+    * the immediate predecessor of the counted quarter (相邻财季 — a gap in the
+      stored history ends the run instead of being crossed),
+    * comparable per :func:`app.fiscal.comparison_unavailable_reason`,
+    * decidable (both values present and different), and
+    * in the same direction as the run.
+
+    Anything else ends the run at that quarter and is reported in
+    ``break_reason``/``break_period``.  A quarter that itself fails the rule is
+    neither a beat nor a miss, so it can never be crossed by a count.
+    """
+    kind, count = None, 0
+    break_period: dict | None = None
+    break_reason: str | None = None
+    expected = (fiscal_year, fiscal_quarter)
+    for row in rows:
+        period = _streak_period(row)
+        current = None if period is None else (period["fiscal_year"], period["fiscal_quarter"])
+        if current != expected:
+            break_period, break_reason = period, STREAK_BREAK_NOT_ADJACENT
+            break
+        reason = fiscal.comparison_unavailable_reason(row)
+        if reason:
+            if count == 0:
+                return _no_streak(reason, period)
+            break_period, break_reason = period, reason
+            break
+        actual, estimate = as_decimal(row.get("eps_actual")), as_decimal(row.get("eps_estimate"))
+        if actual is None or estimate is None or actual == estimate:
+            if count == 0:
+                return _no_streak(None, period, STREAK_BREAK_MISSING_VALUES)
+            break_period, break_reason = period, STREAK_BREAK_MISSING_VALUES
+            break
+        row_kind = "beat" if actual > estimate else "miss"
+        if kind is None:
+            kind = row_kind
+        elif row_kind != kind:
+            break_period, break_reason = period, STREAK_BREAK_DIRECTION_CHANGED
+            break
+        count += 1
+        expected = _previous_period(*expected)
+    return {
+        "kind": kind or "unavailable", "count": count, "reason": None,
+        "break_period": break_period, "break_reason": break_reason,
+    }
+
+
 def build_decision_metrics(rows, earning_id):
     """Calculate actual-only growth and contiguous EPS beat/miss streak for one earning."""
     by_id = {row.get("id"): row for row in rows}
     current = by_id.get(earning_id)
     unavailable = _unavailable_growth()
     if not current or not current.get("fiscal_year") or not current.get("fiscal_quarter"):
-        return {"actual_growth": unavailable, "beat_miss_streak": {"kind": "unavailable", "count": 0}, "price_reaction": {"status": "unavailable", "reason": "no_reliable_provider_configured", "source": None}}
+        return {"actual_growth": unavailable, "beat_miss_streak": _no_streak(), "price_reaction": {"status": "unavailable", "reason": "no_reliable_provider_configured", "source": None}}
     fy, fq = int(current["fiscal_year"]), int(current["fiscal_quarter"])
     lookup = _period_lookup(rows, earning_id)
     yoy = lookup.get((fy - 1, fq))
@@ -117,17 +222,9 @@ def build_decision_metrics(rows, earning_id):
     # One row per fiscal period: a duplicated period must not be counted twice in
     # the streak, and must not hide the streak behind a staleness mismatch.
     ordered = sorted(lookup.values(), key=lambda row: str(row.get("report_date") or ""), reverse=True)
-    kind, count = None, 0
-    for row in ordered:
-        actual, estimate = as_decimal(row.get("eps_actual")), as_decimal(row.get("eps_estimate"))
-        if actual is None or estimate is None or actual == estimate:
-            if row.get("id") == earning_id:
-                break
-            continue
-        row_kind = "beat" if actual > estimate else "miss"
-        if kind is None:
-            kind = row_kind
-        if row_kind != kind:
-            break
-        count += 1
-    return {"actual_growth": growth, "beat_miss_streak": {"kind": kind or "unavailable", "count": count}, "price_reaction": {"status": "unavailable", "reason": "no_reliable_provider_configured", "source": None}}
+    # The run belongs to the quarter the panel is open on, so counting starts
+    # there: rows newer than it (a rescheduled or predicted later quarter) are
+    # not part of this quarter's streak and must not shorten it (Issue #64).
+    start = next((index for index, row in enumerate(ordered) if row.get("id") == earning_id), None)
+    streak = _no_streak() if start is None else _beat_miss_streak(ordered[start:], fy, fq)
+    return {"actual_growth": growth, "beat_miss_streak": streak, "price_reaction": {"status": "unavailable", "reason": "no_reliable_provider_configured", "source": None}}

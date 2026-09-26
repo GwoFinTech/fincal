@@ -481,6 +481,48 @@ export interface components {
             /** Created At */
             created_at?: string | null;
         };
+        /**
+         * BeatMissPeriod
+         * @description The fiscal period a beat/miss run stopped at (Issue #64).
+         */
+        BeatMissPeriod: {
+            /** Fiscal Year */
+            fiscal_year?: number | null;
+            /** Fiscal Quarter */
+            fiscal_quarter?: number | null;
+        };
+        /**
+         * BeatMissStreak
+         * @description Contiguous EPS beat/miss run of one quarter (Issue #64).
+         *
+         *     ``kind`` is ``beat``/``miss`` only while every counted quarter's own
+         *     estimate/actual pair passed :func:`app.fiscal.comparison_unavailable_reason`
+         *     (and was adjacent, decidable and in the same direction); a run is counted
+         *     backwards from the quarter the panel is open on.  When no run can be stated —
+         *     the opened quarter's own pair is not comparable — ``kind`` is ``unavailable``,
+         *     ``count`` is ``0`` and ``reason`` carries the language-independent code the UI
+         *     renders "—" for.  ``break_period``/``break_reason`` name the quarter the count
+         *     stopped at and why (a ``COMPARISON_*`` code, or ``missing_values`` /
+         *     ``direction_changed`` / ``not_adjacent``).  A meaningful ``count`` and a
+         *     ``reason`` are never both set.
+         */
+        BeatMissStreak: {
+            /**
+             * Kind
+             * @default unavailable
+             */
+            kind: string;
+            /**
+             * Count
+             * @default 0
+             */
+            count: number;
+            /** Reason */
+            reason?: string | null;
+            break_period?: components["schemas"]["BeatMissPeriod"] | null;
+            /** Break Reason */
+            break_reason?: string | null;
+        };
         /** CacheStats */
         CacheStats: {
             /**
@@ -535,6 +577,7 @@ export interface components {
                 [key: string]: unknown;
             } | null;
             actual_growth?: components["schemas"]["ActualGrowth"] | null;
+            beat_miss_streak?: components["schemas"]["BeatMissStreak"] | null;
         } & {
             [key: string]: unknown;
         };
@@ -901,6 +944,11 @@ export interface components {
              * @default
              */
             price_reaction: string;
+            /**
+             * Beat Miss Streak
+             * @default
+             */
+            beat_miss_streak: string;
         };
         /** ProviderErrorStats */
         ProviderErrorStats: {

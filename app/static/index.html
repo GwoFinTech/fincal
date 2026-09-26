@@ -371,10 +371,11 @@
             <div v-if="decision" class="surface p-3 mb-3">
               <div class="detail-row"><span class="detail-label">EPS 同比 / 环比（实际）</span><span class="detail-value" :title="growthNote(decision, 'eps_yoy') || growthNote(decision, 'eps_qoq')">{{ fmtPct(growthValue(decision, 'eps_yoy')) }} / {{ fmtPct(growthValue(decision, 'eps_qoq')) }}</span></div>
               <div class="detail-row"><span class="detail-label">营收同比 / 环比（实际）</span><span class="detail-value" :title="growthNote(decision, 'revenue_yoy') || growthNote(decision, 'revenue_qoq')">{{ fmtPct(growthValue(decision, 'revenue_yoy')) }} / {{ fmtPct(growthValue(decision, 'revenue_qoq')) }}</span></div>
-              <div class="detail-row"><span class="detail-label">EPS 超预期 / 不及预期连续</span><span class="detail-value">{{ decision.beat_miss_streak.kind === 'beat' ? '超预期' : decision.beat_miss_streak.kind === 'miss' ? '不及预期' : '—' }} {{ decision.beat_miss_streak.count || '' }}{{ decision.beat_miss_streak.count ? '季' : '' }}</span></div>
+              <div class="detail-row"><span class="detail-label">EPS 超预期 / 不及预期连续</span><span class="detail-value" :title="beatMissStreakNote(decision)">{{ beatMissStreakText(decision) }}</span></div>
               <div class="detail-row"><span class="detail-label">财报后价格反应</span><span class="detail-value" style="color:var(--text-muted);">暂无可靠可用数据源</span></div>
               <p v-if="growthSuppressedNote(decision)" class="mt-2 text-[11px] leading-4" style="color:var(--text-muted);">{{ growthSuppressedNote(decision) }}</p>
-              <p class="mt-2 text-[11px] leading-4" style="color:var(--text-muted);">增长及连续表现仅由已记录实际值与当时一致预期计算；不构成投资建议。</p>
+              <p v-if="beatMissStreakNote(decision)" class="mt-2 text-[11px] leading-4" style="color:var(--text-muted);">{{ beatMissStreakNote(decision) }}</p>
+              <p class="mt-2 text-[11px] leading-4" style="color:var(--text-muted);">增长及连续表现仅由已记录实际值与当时一致预期计算；「连续」只累计相邻且预期与实际可比的财季，不可比的季度不计入并中断累计；不构成投资建议。</p>
             </div>
             <div v-if="decision" class="section-title">预期修正趋势</div>
             <div v-if="decision" class="surface p-3 mb-3">
