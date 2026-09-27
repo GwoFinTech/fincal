@@ -680,6 +680,25 @@ class OutOfWindowRestatementTests(TestCase):
         self.assertEqual(db2.moves, [])
         self.assertEqual(stats2.restated, 0)
 
+    def test_a_restatement_goes_past_the_horizon_when_the_pattern_says_so(self):
+        """1888.HK FY2027Q4: a March-year-end company whose FY2027 Q4 lands in 2028.
+
+        The stored May-2027 date is an artefact; the rule's output is outside
+        ``MAX_FUTURE_DAYS``, and moving the row there takes it off the calendar instead
+        of leaving the invented date in place.
+        """
+        rows = [
+            _predict_row(1, "1888.HK", "HK", date(2026, 3, 16), 2025, 4, eps_actual=1.2),
+            _predict_row(2, "1888.HK", "HK", date(2026, 7, 15), 2026, 2, eps_actual=1.3),
+            _predict_row(3, "1888.HK", "HK", date(2027, 5, 20), 2027, 4,
+                         is_predicted=True, date_source="algorithm"),
+        ]
+
+        _, db, stats = _run_predict(rows, symbol="1888.HK", market="HK")
+
+        self.assertEqual([move["to"] for move in db.moves], [date(2028, 3, 16)])
+        self.assertEqual(stats.restated, 1)
+
 
 class _PredictDb:
     """In-memory model of the statements ``predict_for_symbol`` issues.
@@ -775,7 +794,7 @@ def _predict_row(row_id, symbol, market, report_date, fiscal_year, fiscal_quarte
     }
 
 
-def _run_predict(rows, extra_holders=()):
+def _run_predict(rows, extra_holders=(), symbol="AAPL", market="US"):
     """Run ``predict_for_symbol`` against the in-memory model; returns (count, db, stats)."""
     db = _PredictDb(rows, extra_holders=extra_holders)
     stats = predict_earnings.PredictionStats()
@@ -783,7 +802,7 @@ def _run_predict(rows, extra_holders=()):
     ctx.__enter__.return_value = db
     ctx.__exit__.return_value = False
     with mock.patch.object(predict_earnings, "db_cursor", return_value=ctx):
-        count = predict_earnings.predict_for_symbol("AAPL", "US", stats)
+        count = predict_earnings.predict_for_symbol(symbol, market, stats)
     return count, db, stats
 
 

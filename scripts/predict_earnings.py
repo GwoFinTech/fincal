@@ -422,9 +422,13 @@ def predict_for_symbol(symbol: str, market: str, stats: "PredictionStats | None"
         history = quarter_patterns.get(fq, [])
         if not history:
             continue
+        # Unlike the window above, a restatement is not capped by the horizon: the row
+        # already exists, and for a March-year-end company its correct date (FY2027Q4 →
+        # March 2028) legitimately lies beyond it.  Skipping such a row is what left the
+        # invented May dates on the calendar; moving it out of the window is honest —
+        # the row is kept, and the read paths simply do not render it any more.
         restated_date = pick_predicted_date(history, fy)
-        if (restated_date is None or restated_date > max_date
-                or restated_date == info.get("report_date")):
+        if restated_date is None or restated_date == info.get("report_date"):
             continue
         with db_cursor() as cur:
             move_superseded_prediction(
