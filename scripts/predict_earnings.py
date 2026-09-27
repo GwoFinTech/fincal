@@ -128,11 +128,10 @@ def pick_predicted_date(samples: list[dict], target_fy: int) -> date | None:
     the one closest to :func:`_expected_point` wins — ties break towards the
     newer sample, so the result is deterministic (no ±1 day drift between runs).
 
-    A candidate that lands on a Saturday/Sunday is only accepted when the company
-    itself has reported this quarter on no weekday: the rule first looks for a
-    non-weekend candidate on a weekday the company actually used, then for any
-    non-weekend candidate, and only then falls back to the nearest weekday next
-    to the chosen date.  Returns ``None`` when no sample could be projected.
+    A projection that lands on a Saturday/Sunday is never kept while the company
+    has a weekday to offer: the rule first takes another real sample date in the
+    same month, and otherwise moves to the adjacent weekday inside that month.
+    Returns ``None`` when no sample could be projected.
     """
     if not samples:
         return None
@@ -149,13 +148,15 @@ def pick_predicted_date(samples: list[dict], target_fy: int) -> date | None:
     ranked = sorted(candidates, key=lambda c: (abs((c.date - anchor).days), -c.sample_year))
     chosen = ranked[0]
     if chosen.date.weekday() in WEEKEND_DAYS:
-        weekdays_used = {
-            s["date"].weekday() for s in samples if isinstance(s.get("date"), date)
-        }
+        # Prefer another real date the company used *in the same month*: the month is
+        # the part of the pattern that repeats.  Candidates from other months are
+        # deliberately not used here — with samples whose ``year_offset`` differs the
+        # nearest one can sit a whole year away, past the prediction horizon (that is
+        # how 0300.HK FY2027Q4 lost its prediction to a 2028 candidate and kept the
+        # stale 2027-05-29 row).  With no weekday sample in that month the date moves
+        # to the adjacent weekday, which :func:`_nearest_weekday` keeps inside it.
         pool = [c for c in ranked
-                if c.date.weekday() not in WEEKEND_DAYS and c.date.weekday() in weekdays_used]
-        if not pool:
-            pool = [c for c in ranked if c.date.weekday() not in WEEKEND_DAYS]
+                if c.date.month == chosen.date.month and c.date.weekday() not in WEEKEND_DAYS]
         chosen = pool[0] if pool else DateCandidate(_nearest_weekday(chosen.date), chosen.sample_year)
     return chosen.date
 
@@ -365,7 +366,8 @@ def predict_for_symbol(symbol: str, market: str, stats: "PredictionStats | None"
                     cur,
                     symbol=symbol, market=market, report_type="Q",
                     row_id=existing["id"], old_date=existing["report_date"],
-                    new_date=pred_date, stats=stats,
+                    new_date=pred_date, fiscal_year=next_fy, fiscal_quarter=next_fq,
+                    stats=stats,
                 )
 
         # Determine before_after

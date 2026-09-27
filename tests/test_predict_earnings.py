@@ -580,6 +580,21 @@ class DateChoiceTests(TestCase):
         self.assertEqual(predict_earnings._nearest_weekday(date(2027, 2, 28)), date(2027, 2, 26))
         self.assertEqual(predict_earnings._nearest_weekday(date(2027, 5, 6)), date(2027, 5, 6))
 
+    def test_weekend_fallback_stays_in_the_sample_month_even_with_a_year_away_candidate(self):
+        """0300.HK FY2027Q4: samples of two different fiscal years.
+
+        The projections are March 2028 (a weekday, because that sample carries
+        ``year_offset = 1``) and Sunday 2027-08-29.  Taking the 2028 date would push
+        the prediction past the 420-day horizon, so the rule stays in the month it
+        chose and moves to the adjacent weekday instead.
+        """
+        samples = [_sample(date(2026, 3, 30), 2025), _sample(date(2026, 8, 29), 2026)]
+
+        predicted = predict_earnings.pick_predicted_date(samples, 2027)
+
+        self.assertEqual(predicted, date(2027, 8, 30))
+        self.assertNotIn(predicted.weekday(), predict_earnings.WEEKEND_DAYS)
+
     def test_february_29_is_clamped(self):
         """Acceptance criterion 3③: a leap-day sample projects onto a legal date."""
         samples = [_sample(date(2024, 2, 29), 2024), _sample(date(2023, 2, 28), 2023)]
