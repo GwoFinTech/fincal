@@ -18,7 +18,9 @@ This module is the single source of truth for the identity and for *which* row
 represents a period, so the read paths (API, export, iCal, derived metrics) and
 the reconciliation script all agree.  The write paths use
 :func:`collapse_rows_by_period` / :func:`reschedule_confirmed_rows` to update the
-period's existing row instead of inserting a new one.
+period's existing row instead of inserting a new one; ``predict_earnings``
+re-dates a superseded *prediction* the same way (Issue #60), which is why
+:func:`authority_key` ranks two pure predictions by their latest computation.
 
 Note on value arbitration: when two rows of one period carry *different* actuals,
 picking the value is a product decision (Issue #50 risk section — the source
@@ -100,14 +102,22 @@ def has_actuals(row) -> bool:
 def authority_key(row, report_date=None) -> tuple:
     """Rank the rows that share one fiscal period; the smallest wins.
 
-    Ordering, and why (Issue #50):
+    Ordering, and why (Issue #50, extended by Issue #60):
 
     1. confirmed before predicted — a prediction must never mask real data;
     2. rows carrying actuals before rows without — a ``scheduled`` row must not
        hide the same period's reported actual (2068.HK / 2600.HK in the issue);
-    3. newest ``report_date`` — the provider's own latest announcement day, so
+    3. for two *pure predictions* (algorithm rows without actuals) the newest
+       ``updated_at`` — a prediction is derived data and the most recent
+       computation is the authoritative one.  A corrected prediction may
+       legitimately move to an *earlier* date (Issue #60 fixes dates that were
+       invented from averaged months), and the older row only survives because
+       the table's key is the display date; ranking by date first would keep
+       showing the stale one.  Rows carrying provider data are unaffected: for
+       them this slot is always ``0``;
+    4. newest ``report_date`` — the provider's own latest announcement day, so
        the displayed date no longer depends on *when* each sync happened to run;
-    4. newest ``updated_at`` and then highest ``id`` — deterministic tie-breaks.
+    5. newest ``updated_at`` and then highest ``id`` — deterministic tie-breaks.
 
     Deliberately *not* part of the ranking: ``date_source`` priority.  Promoting
     Futu over Longbridge here is exactly the arbitration #50 requires a sanity
@@ -115,13 +125,16 @@ def authority_key(row, report_date=None) -> tuple:
     """
     predicted = 1 if row.get("is_predicted") else 0
     reported = 0 if has_actuals(row) else 1
+    ts = row.get("updated_at") or row.get("created_at")
+    # Only a pure prediction (algorithm-owned, no actuals) ranks by recency first.
+    pure_prediction = predicted and not has_actuals(row)
+    recency = -ts.timestamp() if pure_prediction and isinstance(ts, datetime) else 0
     row_date = report_date_of(row, report_date)
     date_key = -row_date.toordinal() if row_date else 0
-    ts = row.get("updated_at") or row.get("created_at")
     ts_key = -ts.timestamp() if isinstance(ts, datetime) else 0
     row_id = row.get("id")
     id_key = -(row_id if isinstance(row_id, int) else 0)
-    return (predicted, reported, date_key, ts_key, id_key)
+    return (predicted, reported, recency, date_key, ts_key, id_key)
 
 
 def sort_key(row) -> tuple:

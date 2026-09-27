@@ -7,7 +7,7 @@ fincal aggregates earnings report dates from [Longbridge](https://longbridge.com
 ## Features
 
 - **Earnings Calendar** — month/week view with report dates, EPS & revenue estimates, actuals, and surprise percentages
-- **Prediction Engine** — predicts future earnings dates from historical quarterly patterns (median month/day + year offset)
+- **Prediction Engine** — predicts future earnings dates by projecting the company's own historical report dates for that quarter onto the target year (nearest to the median month/day expectation, never a weekend the company does not use)
 - **Watchlist** — personal stock list with per-user persistence
 - **iCal Subscription** — one-click `.ics` feed URL for Apple Calendar, Google Calendar, Outlook, etc.
 - **Pluggable Watchlist Source** — read symbols from an external database or any HTTP API ([docs](docs/watchlist-source.md))

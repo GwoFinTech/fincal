@@ -196,6 +196,48 @@ class FiscalIdentityTests(TestCase):
         ]
         self.assertEqual(fiscal.collapse_fiscal_duplicates(rows)[0]["id"], 9)
 
+    def test_the_newest_prediction_wins_over_a_stale_prediction_date(self):
+        """Issue #60: a re-run may move a prediction to an *earlier* date.
+
+        The old row only survives because ``earnings`` is keyed by the display date;
+        ranking the two predictions by date first (Issue #50's rule for provider
+        rows) would keep showing the stale, corrected-away date.
+        """
+        rows = [
+            {"id": 2, "symbol": "AAPL", "market": "US", "fiscal_year": 2027, "fiscal_quarter": 1,
+             "report_date": date(2027, 1, 30), "is_predicted": True, "date_source": "algorithm",
+             "eps_actual": None, "updated_at": _ts(3)},                     # stale Saturday
+            {"id": 1, "symbol": "AAPL", "market": "US", "fiscal_year": 2027, "fiscal_quarter": 1,
+             "report_date": date(2027, 1, 29), "is_predicted": True, "date_source": "algorithm",
+             "eps_actual": None, "updated_at": _ts(9)},                     # recomputed later
+        ]
+        collapsed = fiscal.collapse_fiscal_duplicates(rows)
+        self.assertEqual([row["id"] for row in collapsed], [1])
+
+    def test_a_prediction_with_actuals_still_outranks_a_newer_plain_prediction(self):
+        """The recency rule is scoped to pure predictions; data still comes first."""
+        rows = [
+            {"id": 2, "symbol": "AMD", "market": "US", "fiscal_year": 2026, "fiscal_quarter": 3,
+             "report_date": date(2026, 10, 30), "is_predicted": True, "eps_actual": None,
+             "updated_at": _ts(9)},
+            {"id": 1, "symbol": "AMD", "market": "US", "fiscal_year": 2026, "fiscal_quarter": 3,
+             "report_date": date(2026, 10, 28), "is_predicted": True, "eps_actual": 0.9,
+             "updated_at": _ts(1)},
+        ]
+        self.assertEqual([row["id"] for row in fiscal.collapse_fiscal_duplicates(rows)], [1])
+
+    def test_provider_rows_keep_the_newest_date_rule(self):
+        """Regression: the Issue #50 ordering is untouched for non-predictions."""
+        rows = [
+            {"id": 2, "symbol": "MARA", "market": "US", "fiscal_year": 2025, "fiscal_quarter": 4,
+             "report_date": date(2026, 2, 26), "is_predicted": False, "eps_actual": None,
+             "updated_at": _ts(9)},
+            {"id": 1, "symbol": "MARA", "market": "US", "fiscal_year": 2025, "fiscal_quarter": 4,
+             "report_date": date(2026, 3, 5), "is_predicted": False, "eps_actual": None,
+             "updated_at": _ts(1)},
+        ]
+        self.assertEqual([row["id"] for row in fiscal.collapse_fiscal_duplicates(rows)], [1])
+
     def test_rows_without_a_fiscal_period_pass_through_untouched(self):
         rows = [
             {"id": 1, "symbol": "NVDA", "market": "US", "report_date": date(2026, 8, 26)},

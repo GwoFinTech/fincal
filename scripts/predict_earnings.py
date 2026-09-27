@@ -5,7 +5,10 @@ Logic:
 - For each symbol+market, examine historical earnings grouped by quarter
 - Find the latest reported (fiscal_year, fiscal_quarter) pair
 - Compute the next expected quarter: (fy, fq) → (fy, fq+1) or (fy+1, 1)
-- Use the median month/day from historical same-quarter data for the prediction
+- Predict the date by *choosing one of the company's own historical report
+  dates* for that quarter, shifted onto the target fiscal year, nearest to the
+  median month/day expectation and never a date the company never used
+  (Issue #60)
 - Mark with is_predicted=TRUE; confirmed data from sync overwrites later
 """
 import logging
@@ -40,11 +43,217 @@ def next_quarter(fy: int, fq: int) -> tuple[int, int]:
         return (fy + 1, 1)
 
 
-def predict_for_symbol(symbol: str, market: str) -> int:
+# ── Prediction rule (Issue #60) ─────────────────────────────────────────────
+#
+# A predicted date used to be assembled from independently taken medians —
+# ``int(median([month]))`` and ``int(median([day]))`` — which
+#   * averages a *cyclic* quantity: samples in March and August (``median = 5.5``
+#     → ``5``) produced a May date the company had never reported in (9 visible
+#     periods in production, e.g. ``0300.HK`` FY2027Q4 → 2027-05-29);
+#   * has no notion of weekday: the same day number is a different weekday each
+#     year (``365 % 7 = 1``), so 43 predicted rows landed on a Saturday/Sunday
+#     (HK 24.2% / US 6.3%) although confirmed reports are 3.0% / 0.3% weekend;
+#   * drifts by ±1 day whenever a sample is added (``int(0.5)`` truncation), so
+#     one period was written at a different date on different runs.
+#
+# The rule below keeps the median as an *anchor only* and outputs one of the
+# company's own historical report dates for that quarter, shifted by the
+# sample's own ``year_offset`` — the predicted month is therefore always a month
+# the company has actually used for that quarter.
+
+#: How many of the most recent same-quarter samples the rule chooses from.
+RECENT_SAMPLE_LIMIT = 4
+
+#: ``date.weekday()`` values that are not trading days in either market.
+WEEKEND_DAYS = (5, 6)
+
+
+@dataclass(frozen=True)
+class DateCandidate:
+    """One historical same-quarter report date projected onto the target year."""
+
+    date: date
+    sample_year: int
+
+
+def _shifted_sample_date(sample: dict, target_fy: int) -> date | None:
+    """Project one historical sample onto ``target_fy`` (2/29 clamps to 2/28)."""
+    year = target_fy + sample["year_offset"]
+    day = min(sample["day"], calendar.monthrange(year, sample["month"])[1])
+    try:
+        return date(year, sample["month"], day)
+    except ValueError:      # pragma: no cover - month/day come from real rows
+        return None
+
+
+def _expected_point(samples: list[dict], target_fy: int) -> date:
+    """The legacy median month/day/year-offset date, used only as an anchor.
+
+    This is deliberately *not* a candidate: it may name a month the company never
+    reported in, which is exactly the defect of Issue #60.  It stays in the rule
+    as the expectation the candidates are ranked against, so the output keeps the
+    familiar "company reports around here" position.
+    """
+    month = int(statistics.median([s["month"] for s in samples]))
+    day = int(statistics.median([s["day"] for s in samples]))
+    year = target_fy + int(statistics.median([s["year_offset"] for s in samples]))
+    day = min(max(day, 1), calendar.monthrange(year, month)[1])
+    return date(year, month, day)
+
+
+def _nearest_weekday(day: date) -> date:
+    """Move a weekend date to the adjacent weekday without leaving its month.
+
+    Saturday → Friday and Sunday → Monday; when that neighbour falls into another
+    month (the 1st is a Saturday, the last day is a Sunday) the two-day neighbour
+    inside the same month is used instead, so a predicted month is never invented
+    and the date stays within the fiscal quarter's observed month.
+    """
+    if day.weekday() == 5:
+        neighbour = day - timedelta(days=1)
+        return neighbour if neighbour.month == day.month else day + timedelta(days=2)
+    if day.weekday() == 6:
+        neighbour = day + timedelta(days=1)
+        return neighbour if neighbour.month == day.month else day - timedelta(days=2)
+    return day
+
+
+def pick_predicted_date(samples: list[dict], target_fy: int) -> date | None:
+    """Choose the predicted report date for one quarter (Issue #60).
+
+    ``samples`` are the same-quarter confirmed rows of one symbol (dicts with
+    ``date``, ``year``, ``month``, ``day`` and ``year_offset``); ``target_fy`` is
+    the fiscal year being predicted.  The most recent
+    :data:`RECENT_SAMPLE_LIMIT` samples are projected onto the target year and
+    the one closest to :func:`_expected_point` wins — ties break towards the
+    newer sample, so the result is deterministic (no ±1 day drift between runs).
+
+    A candidate that lands on a Saturday/Sunday is only accepted when the company
+    itself has reported this quarter on no weekday: the rule first looks for a
+    non-weekend candidate on a weekday the company actually used, then for any
+    non-weekend candidate, and only then falls back to the nearest weekday next
+    to the chosen date.  Returns ``None`` when no sample could be projected.
+    """
+    if not samples:
+        return None
+    recent = sorted(samples, key=lambda s: s["year"])[-RECENT_SAMPLE_LIMIT:]
+    candidates: list[DateCandidate] = []
+    for sample in recent:
+        shifted = _shifted_sample_date(sample, target_fy)
+        if shifted is not None:
+            candidates.append(DateCandidate(shifted, sample["year"]))
+    if not candidates:
+        return None
+
+    anchor = _expected_point(recent, target_fy)
+    ranked = sorted(candidates, key=lambda c: (abs((c.date - anchor).days), -c.sample_year))
+    chosen = ranked[0]
+    if chosen.date.weekday() in WEEKEND_DAYS:
+        weekdays_used = {
+            s["date"].weekday() for s in samples if isinstance(s.get("date"), date)
+        }
+        pool = [c for c in ranked
+                if c.date.weekday() not in WEEKEND_DAYS and c.date.weekday() in weekdays_used]
+        if not pool:
+            pool = [c for c in ranked if c.date.weekday() not in WEEKEND_DAYS]
+        chosen = pool[0] if pool else DateCandidate(_nearest_weekday(chosen.date), chosen.sample_year)
+    return chosen.date
+
+
+@dataclass
+class PredictionStats:
+    """Audit counters for one prediction run (Issue #60).
+
+    Re-dating a superseded prediction is a write that changes a row the user can
+    already see, so it must be reported rather than silently performed: the
+    counters land in the run's ``sync_runs.details``.
+    """
+
+    predicted: int = 0            # periods written (insert or in-place merge)
+    rescheduled: int = 0          # superseded predicted rows moved onto the new date
+    reschedule_skipped: int = 0   # periods left alone because the target date is taken
+
+    def details(self) -> dict:
+        return {
+            "predicted": self.predicted,
+            "rescheduled": self.rescheduled,
+            "reschedule_skipped": self.reschedule_skipped,
+        }
+
+
+#: Savepoint guarding a single prediction re-date (Issues #52/#60).
+_RESCHEDULE_SAVEPOINT = "fincal_prediction_reschedule"
+
+#: Whoever already owns the display key ``(symbol, market, report_date,
+#: report_type)`` — deliberately unfiltered by fiscal period or ``is_predicted``,
+#: because any row holding that key blocks the move (Issue #52).
+_TARGET_HOLDER_SQL = (
+    "SELECT id FROM earnings"
+    " WHERE symbol = %s AND market = %s AND report_date = %s AND report_type = %s"
+    " LIMIT 1"
+)
+
+#: The move carries its own proof, like ``_DELETE_ROWS`` in ``merge_duplicate_symbols``:
+#: a row may only be re-dated while it is still an algorithm-owned prediction
+#: without actuals, so a confirmed row can never be moved by this path.
+_MOVE_PREDICTED_ROW_SQL = (
+    "UPDATE earnings SET report_date = %s, updated_at = NOW()"
+    " WHERE id = %s AND report_date = %s AND is_predicted = TRUE"
+    " AND date_source = 'algorithm' AND eps_actual IS NULL AND revenue_actual IS NULL"
+)
+
+
+def move_superseded_prediction(cur, *, symbol, market, report_type, row_id, old_date,
+                               new_date, fiscal_year=None, fiscal_quarter=None,
+                               stats: "PredictionStats | None" = None) -> str:
+    """Re-date a predicted row the current run supersedes (Issue #60).
+
+    ``earnings`` is keyed by ``(symbol, market, report_date, report_type)``, so a
+    corrected prediction would otherwise be *inserted* as a second row of the same
+    fiscal period and the old (wrong) date would keep being displayed — the read
+    path ranks the period's rows by ``report_date``.  Moving the row onto the new
+    date keeps one row per period and keeps its estimate snapshots attached.
+
+    Returns the outcome (``moved`` / ``unchanged`` / ``target_occupied`` /
+    ``unique_violation`` / ``not_algorithm_owned``) and updates ``stats``.
+    """
+    from psycopg2 import errors as pg_errors
+
+    if new_date is None or old_date is None or new_date == old_date:
+        return "unchanged"
+
+    cur.execute(f"SAVEPOINT {_RESCHEDULE_SAVEPOINT}")
+    try:
+        cur.execute(_TARGET_HOLDER_SQL, (symbol, market, new_date, report_type))
+        if cur.fetchone() is not None:
+            outcome = "target_occupied"
+        else:
+            cur.execute(_MOVE_PREDICTED_ROW_SQL, (new_date, row_id, old_date))
+            outcome = "moved" if cur.rowcount else "not_algorithm_owned"
+    except pg_errors.UniqueViolation:
+        cur.execute(f"ROLLBACK TO SAVEPOINT {_RESCHEDULE_SAVEPOINT}")
+        outcome = "unique_violation"
+    cur.execute(f"RELEASE SAVEPOINT {_RESCHEDULE_SAVEPOINT}")
+
+    if stats is not None:
+        if outcome == "moved":
+            stats.rescheduled += 1
+        elif outcome in ("target_occupied", "unique_violation"):
+            stats.reschedule_skipped += 1
+    if outcome in ("target_occupied", "unique_violation", "not_algorithm_owned"):
+        logger.info(
+            "prediction re-date %s: %s.%s FY%s Q%s %s → %s (row %s)",
+            outcome, symbol, market, fiscal_year, fiscal_quarter, old_date, new_date, row_id,
+        )
+    return outcome
+
+
+def predict_for_symbol(symbol: str, market: str, stats: "PredictionStats | None" = None) -> int:
     """Predict next earnings date(s) for a single symbol."""
     with db_cursor() as cur:
         cur.execute(
-            """SELECT report_date, fiscal_year, fiscal_quarter, before_after, is_predicted
+            """SELECT id, report_date, report_type, fiscal_year, fiscal_quarter, before_after,
+                      is_predicted, date_source, eps_actual, revenue_actual
             FROM earnings
             WHERE symbol = %s AND market = %s AND fiscal_year IS NOT NULL AND fiscal_quarter IS NOT NULL
             ORDER BY report_date""",
@@ -61,12 +270,29 @@ def predict_for_symbol(symbol: str, market: str) -> int:
 
     for row in rows:
         key = (row["fiscal_year"], row["fiscal_quarter"])
-        target = predicted if row["is_predicted"] else confirmed
-        # Keep the latest entry per quarter
-        target[key] = {
-            "report_date": row["report_date"],
-            "before_after": row["before_after"],
-        }
+        if row["is_predicted"]:
+            # Keep the row the read path shows for the period: newest report date
+            # wins, and only an algorithm-owned prediction without actuals may be
+            # re-dated (see move_superseded_prediction).
+            previous = predicted.get(key)
+            if previous is None or row["report_date"] > previous["report_date"]:
+                predicted[key] = {
+                    "report_date": row["report_date"],
+                    "report_type": row["report_type"] or "Q",
+                    "before_after": row["before_after"],
+                    "id": row["id"],
+                    "movable": (
+                        str(row["date_source"] or "").lower() == "algorithm"
+                        and row["eps_actual"] is None
+                        and row["revenue_actual"] is None
+                    ),
+                }
+        else:
+            # Keep the latest entry per quarter
+            confirmed[key] = {
+                "report_date": row["report_date"],
+                "before_after": row["before_after"],
+            }
 
     # Build historical quarter patterns from confirmed data only
     # year_offset = report_year - fiscal_year (captures cross-year reporting like Q4 in Jan)
@@ -74,6 +300,7 @@ def predict_for_symbol(symbol: str, market: str) -> int:
     for (fy, fq), info in confirmed.items():
         rd = info["report_date"]
         quarter_patterns[fq].append({
+            "date": rd,
             "year": rd.year,
             "month": rd.month,
             "day": rd.day,
@@ -118,22 +345,10 @@ def predict_for_symbol(symbol: str, market: str) -> int:
             cur_fy, cur_fq = next_fy, next_fq
             continue
 
-        # Compute predicted month, day and year_offset from recent history
-        recent = sorted(history, key=lambda h: h["year"])[-4:]
-        pred_month = int(statistics.median([h["month"] for h in recent]))
-        pred_day = int(statistics.median([h["day"] for h in recent]))
-        pred_year_offset = int(statistics.median([h["year_offset"] for h in recent]))
-
-        # Apply year_offset: e.g. Q4 fiscal_year=2025 → report year = 2026
-        pred_year = next_fy + pred_year_offset
-
-        # Clamp day for the target month/year
-        max_day = calendar.monthrange(pred_year, pred_month)[1]
-        pred_day = min(pred_day, max_day)
-
-        try:
-            pred_date = date(pred_year, pred_month, pred_day)
-        except ValueError:
+        # Pick one of the company's own historical report dates for this quarter,
+        # shifted onto the target fiscal year (Issue #60 — never the median date).
+        pred_date = pick_predicted_date(history, next_fy)
+        if pred_date is None:
             cur_fy, cur_fq = next_fy, next_fq
             continue
 
@@ -141,7 +356,20 @@ def predict_for_symbol(symbol: str, market: str) -> int:
         if pred_date > max_date:
             break
 
+        # A corrected prediction replaces the period's existing row instead of
+        # leaving the old date to be displayed (Issue #60).
+        existing = predicted.get((next_fy, next_fq))
+        if existing and existing.get("movable") and existing["report_type"] == "Q":
+            with db_cursor() as cur:
+                move_superseded_prediction(
+                    cur,
+                    symbol=symbol, market=market, report_type="Q",
+                    row_id=existing["id"], old_date=existing["report_date"],
+                    new_date=pred_date, stats=stats,
+                )
+
         # Determine before_after
+        recent = sorted(history, key=lambda h: h["year"])[-RECENT_SAMPLE_LIMIT:]
         ba_values = [h["before_after"] for h in recent if h["before_after"]]
         pred_ba = statistics.mode(ba_values) if ba_values else None
 
@@ -163,9 +391,16 @@ def predict_for_symbol(symbol: str, market: str) -> int:
                 (symbol, market, company_name, pred_date.isoformat(), next_fy, next_fq, pred_ba),
             )
         predictions_made += 1
+        if stats is not None:
+            stats.predicted += 1
 
         # Also update our tracking
-        predicted[(next_fy, next_fq)] = {"report_date": pred_date, "before_after": pred_ba}
+        predicted[(next_fy, next_fq)] = {
+            "report_date": pred_date,
+            "report_type": "Q",
+            "before_after": pred_ba,
+            "movable": True,
+        }
 
         cur_fy, cur_fq = next_fy, next_fq
 
@@ -414,6 +649,7 @@ if __name__ == "__main__":
         for s in syms:
             all_symbols.append((s, mkt))
     run_id = start_run("prediction", "algorithm", symbol_count=len(all_symbols))
+    stats = PredictionStats()
     try:
         merge_duplicate_symbols()
         mark_confirmed()
@@ -422,7 +658,7 @@ if __name__ == "__main__":
         logger.info("Predicting future earnings dates...")
         total = 0
         for i, (symbol, market) in enumerate(all_symbols):
-            count = predict_for_symbol(symbol, market)
+            count = predict_for_symbol(symbol, market, stats)
             total += count
             if (i + 1) % 10 == 0:
                 logger.info(f"  Processed {i+1}/{len(all_symbols)} symbols, {total} predictions so far")
@@ -431,4 +667,5 @@ if __name__ == "__main__":
         raise
     else:
         logger.info(f"Prediction complete: {total} future earnings dates predicted")
-        finish_run(run_id, status="success", record_count=total)
+        logger.info(f"Prediction row moves: {stats.details()} (Issue #60)")
+        finish_run(run_id, status="success", record_count=total, details=stats.details())
