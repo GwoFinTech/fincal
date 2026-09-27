@@ -629,6 +629,58 @@ class DateChoiceTests(TestCase):
         self.assertIsNone(predict_earnings.pick_predicted_date([], 2027))
 
 
+def _aapl_window_fixture():
+    """AAPL with a stale prediction for a period the forward window no longer reaches.
+
+    FY2026Q3 sits *behind* the window (the latest confirmed quarter is FY2026Q4), the
+    shape CEG had in production: the run only walks the four quarters after the latest
+    confirmed one, so this row kept whatever date an earlier rule invented.
+    """
+    return [
+        _predict_row(1, "AAPL", "US", date(2024, 7, 25), 2024, 3, eps_actual=2.0),
+        _predict_row(2, "AAPL", "US", date(2025, 7, 24), 2025, 3, eps_actual=2.1),
+        _predict_row(3, "AAPL", "US", date(2026, 11, 5), 2026, 4, eps_actual=2.7),
+        _predict_row(4, "AAPL", "US", date(2026, 7, 25), 2026, 3,
+                     is_predicted=True, date_source="algorithm"),
+    ]
+
+
+class OutOfWindowRestatementTests(TestCase):
+    """A stored prediction the forward window no longer reaches is still corrected."""
+
+    def test_prediction_outside_the_window_is_restated(self):
+        count, db, stats = _run_predict(_aapl_window_fixture())
+
+        self.assertEqual(count, 2)                     # FY2027Q3, FY2027Q4
+        self.assertEqual(db.moves, [{"id": 4, "from": date(2026, 7, 25), "to": date(2026, 7, 24)}])
+        self.assertEqual(stats.restated, 1)
+        self.assertEqual(db.rows_of("AAPL", "US")[3]["report_date"], date(2026, 7, 24))
+
+    def test_a_restated_prediction_never_moves_a_provider_row(self):
+        rows = _aapl_window_fixture()
+        rows[3]["date_source"] = "longbridge"
+
+        _, db, stats = _run_predict(rows)
+
+        self.assertEqual(db.moves, [])
+        self.assertEqual(stats.restated, 0)
+
+    def test_restatement_is_idempotent(self):
+        """Second run: the stored date already is the rule's output, so nothing moves."""
+        _, db, _ = _run_predict(_aapl_window_fixture())
+
+        db2 = _PredictDb(db.rows)
+        stats2 = predict_earnings.PredictionStats()
+        ctx = mock.MagicMock()
+        ctx.__enter__.return_value = db2
+        ctx.__exit__.return_value = False
+        with mock.patch.object(predict_earnings, "db_cursor", return_value=ctx):
+            predict_earnings.predict_for_symbol("AAPL", "US", stats2)
+
+        self.assertEqual(db2.moves, [])
+        self.assertEqual(stats2.restated, 0)
+
+
 class _PredictDb:
     """In-memory model of the statements ``predict_for_symbol`` issues.
 

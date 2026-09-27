@@ -173,12 +173,14 @@ class PredictionStats:
     predicted: int = 0            # periods written (insert or in-place merge)
     rescheduled: int = 0          # superseded predicted rows moved onto the new date
     reschedule_skipped: int = 0   # periods left alone because the target date is taken
+    restated: int = 0             # stored predictions outside the window re-applied
 
     def details(self) -> dict:
         return {
             "predicted": self.predicted,
             "rescheduled": self.rescheduled,
             "reschedule_skipped": self.reschedule_skipped,
+            "restated": self.restated,
         }
 
 
@@ -405,6 +407,34 @@ def predict_for_symbol(symbol: str, market: str, stats: "PredictionStats | None"
         }
 
         cur_fy, cur_fq = next_fy, next_fq
+
+    # The forward window is four quarters while the horizon is ``MAX_FUTURE_DAYS``, so a
+    # symbol can hold predictions for periods the loop above no longer reaches (a
+    # provider confirming a later quarter, or a quarter skipped for missing history,
+    # shifts the window).  Those rows keep whatever date an earlier rule invented —
+    # 0300.HK FY2027Q4 sat on a Saturday in May long after the fix, because the run
+    # never looked at that period again.  Re-apply the rule to every remaining stored
+    # prediction of this symbol (no new period is created, no row is deleted) so the
+    # table converges on the current rule instead of on whichever run wrote last.
+    for (fy, fq), info in sorted(predicted.items()):
+        if not info.get("movable") or info.get("report_type") != "Q":
+            continue
+        history = quarter_patterns.get(fq, [])
+        if not history:
+            continue
+        restated_date = pick_predicted_date(history, fy)
+        if (restated_date is None or restated_date > max_date
+                or restated_date == info.get("report_date")):
+            continue
+        with db_cursor() as cur:
+            move_superseded_prediction(
+                cur,
+                symbol=symbol, market=market, report_type="Q",
+                row_id=info["id"], old_date=info["report_date"], new_date=restated_date,
+                fiscal_year=fy, fiscal_quarter=fq, stats=stats,
+            )
+        if stats is not None:
+            stats.restated += 1
 
     return predictions_made
 
