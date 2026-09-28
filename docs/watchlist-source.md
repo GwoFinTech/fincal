@@ -166,3 +166,27 @@ restart.  It now reads through a short TTL cache and is invalidated explicitly
 after `POST/PUT/DELETE /api/admin/watchlist`, so a change is visible on the next
 request; a degraded read keeps the last good (or hardcoded fallback) universe and
 is reported in `/api/admin/diagnostics` under `universe.error_code`.
+
+## Market identity of a code (Issue #66)
+
+FinCal's calendar, sync and iCal feed only exist for **US** and **HK**, so the
+market of a code is decided by its suffix in exactly one place —
+`app/symbol.market_of()` — shared by the read path
+(`group_symbols_by_market_with_skipped`) and the Futu sync
+(`get_futu_symbols_with_skipped`):
+
+| Code | Market | Note |
+|------|--------|------|
+| `AAPL`, `AAPL.US`, `US.AAPL` | US | bare tickers and the `TICKER.US` / `US.TICKER` spellings normalize to the bare ticker |
+| `0700.HK`, `700.HK`, `HK.00700` | HK | normalized to the canonical 4-digit form |
+| `BRK.A`, `BF.B`, `MKC.V`, `ETSS.U` | US | a single-letter suffix is a class-share/unit spelling, not a market |
+| `000651.SZ`, `600519.SH`, `.SS`, `.BJ`, … | — | another exchange: **dropped**, reported, never presented as US |
+
+An upstream watchlist that contains A-share codes (the tsummt watchlist does)
+therefore no longer produces a `US` bucket full of codes that can never have an
+earnings row.  The drop is never silent: it is logged and exposed in
+`/api/admin/diagnostics` as `universe.skipped_count` / `universe.skipped_symbols`.
+The write paths (`POST /api/watchlist`, `POST/PUT /api/admin/watchlist`) reject a
+code whose suffix contradicts the requested market with the language-neutral
+error code `symbol_market_mismatch` (400 / 422) instead of persisting a dead
+entry.

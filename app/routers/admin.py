@@ -23,6 +23,20 @@ def admin_user(user=Depends(get_current_user)):
     return require_admin(user)
 
 
+def _normalize_managed(payload: ManagedInput) -> tuple[str, str]:
+    """Validate a managed-watchlist entry, mapping the code to the admin error
+    contract: a symbol/market mismatch keeps its own language-neutral code so the
+    caller can tell it apart from other invalid input (Issue #66), while the rest
+    stays under the existing ``invalid_symbol`` with the reason in ``details``."""
+    try:
+        return normalize_managed_symbol(payload.symbol, payload.market)
+    except ValueError as exc:
+        code = str(exc)
+        if code == "symbol_market_mismatch":
+            raise AppError(code, "symbol suffix does not match the requested market", 422)
+        raise AppError("invalid_symbol", code, 422)
+
+
 def source_description() -> dict:
     configured = config.WATCHLIST_SOURCE.strip().lower()
     return {
@@ -64,10 +78,7 @@ def list_managed_watchlist(_: dict = Depends(admin_user)):
 
 @router.post("/watchlist", status_code=201)
 def add_managed_watchlist(payload: ManagedInput, _: dict = Depends(admin_user)):
-    try:
-        symbol, market = normalize_managed_symbol(payload.symbol, payload.market)
-    except ValueError as exc:
-        raise AppError("invalid_symbol", str(exc), 422)
+    symbol, market = _normalize_managed(payload)
     with db.db_cursor() as cur:
         cur.execute(
             """INSERT INTO managed_watchlist (symbol, market) VALUES (%s, %s)
@@ -85,10 +96,7 @@ def add_managed_watchlist(payload: ManagedInput, _: dict = Depends(admin_user)):
 
 @router.put("/watchlist/{watchlist_id}", response_model=ManagedWatchlistItem)
 def update_managed_watchlist(watchlist_id: int, payload: ManagedInput, _: dict = Depends(admin_user)):
-    try:
-        symbol, market = normalize_managed_symbol(payload.symbol, payload.market)
-    except ValueError as exc:
-        raise AppError("invalid_symbol", str(exc), 422)
+    symbol, market = _normalize_managed(payload)
     with db.db_cursor() as cur:
         cur.execute("SELECT 1 FROM managed_watchlist WHERE id=%s", (watchlist_id,))
         if not cur.fetchone():

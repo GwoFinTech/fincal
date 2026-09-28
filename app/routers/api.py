@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from datetime import date, timedelta
 from ..auth import get_current_user, ensure_user
 from .. import db, config
-from ..symbol import normalize, sort_key, from_lb_counter_id
+from ..symbol import normalize, sort_key, from_lb_counter_id, market_mismatch
 from ..layer_cache import LayerCache
 from ..errors import AppError, NotFoundError, ForbiddenError
 from ..schemas import (
@@ -78,6 +78,15 @@ def api_add_watchlist(symbol: str, market: str = "US", user=Depends(get_current_
     market = market.strip().upper()
     if market not in ("US", "HK"):
         raise AppError("invalid_market", "market must be US or HK", 400)
+    # A code carrying another exchange's suffix cannot be stored under ``US``:
+    # it would never match an earnings row (the sync skips it every week), so the
+    # watchlist entry would show an empty row forever (Issue #66).
+    if market_mismatch(symbol, market):
+        raise AppError(
+            "symbol_market_mismatch",
+            "symbol suffix does not match the requested market",
+            400,
+        )
     normalized = normalize(symbol, market)
     with db.db_cursor() as cur:
         cur.execute(

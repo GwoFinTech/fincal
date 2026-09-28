@@ -78,6 +78,10 @@ class SymbolUniverse:
 
         self._us = list(self._fallback_us)
         self._hk = list(self._fallback_hk)
+        # Codes the source offers that belong to no market FinCal serves
+        # (``000651.SZ`` …).  They are dropped from the universe but reported in
+        # ``status()`` so the drop is explainable instead of silent (Issue #66).
+        self._skipped: list[str] = []
         self._source = "unloaded"
         self._error_code: str | None = NOT_LOADED
         self._stale = True
@@ -106,6 +110,8 @@ class SymbolUniverse:
                 "symbol_count": len(self._us) + len(self._hk),
                 "us_count": len(self._us),
                 "hk_count": len(self._hk),
+                "skipped_count": len(self._skipped),
+                "skipped_symbols": list(self._skipped),
                 "source": self._source,
                 "stale": self._stale,
                 "error_code": self._error_code,
@@ -129,9 +135,12 @@ class SymbolUniverse:
 
     def _reload(self) -> None:
         by_market: dict[str, list[str]] = {}
+        skipped: list[str] = []
         status = None
         try:
-            by_market, status = self._source_obj().get_symbols_by_market_with_status(force_refresh=True)
+            by_market, skipped, status = self._source_obj().get_symbols_by_market_detailed(
+                force_refresh=True
+            )
         except Exception as exc:
             logger.warning("Failed to load watchlist source: %s", exc)
 
@@ -143,15 +152,17 @@ class SymbolUniverse:
             self._fetched_at = datetime.now(timezone.utc)
             if us or hk:
                 self._us, self._hk = us, hk
+                self._skipped = list(skipped)
                 self._source = (status.source if status is not None else "") or "watchlist"
                 self._error_code = status.error_code if status is not None else None
                 self._stale = bool(self._error_code) or bool(status and status.stale)
                 if status is not None and status.last_success_at:
                     self._last_success_at = status.last_success_at
             else:
-                # Nothing usable upstream: keep the last good universe, or fall
-                # back to the hardcoded one if the source never worked, but
-                # never present either as fresh.
+                # Nothing usable upstream: keep the last good universe (and the
+                # skip list that belongs to it), or fall back to the hardcoded
+                # one if the source never worked, but never present either as
+                # fresh.
                 if self._last_success_at is None:
                     self._us, self._hk = list(self._fallback_us), list(self._fallback_hk)
                     self._source = "fallback"

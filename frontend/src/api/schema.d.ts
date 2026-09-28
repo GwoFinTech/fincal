@@ -1172,6 +1172,16 @@ export interface components {
              */
             hk_count: number;
             /**
+             * Skipped Count
+             * @default 0
+             */
+            skipped_count: number;
+            /**
+             * Skipped Symbols
+             * @default []
+             */
+            skipped_symbols: string[];
+            /**
              * Source
              * @default
              */

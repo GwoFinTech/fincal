@@ -312,3 +312,88 @@ def test_source_market_accessor_still_delegates_to_the_same_mapping():
     source = _FakeSource(["700.HK", "aapl.us"])
     assert source.get_symbols_by_market() == {"US": ["AAPL"], "HK": ["0700.HK"]}
     assert source.get_symbols_by_market(force_refresh=True) == {"US": ["AAPL"], "HK": ["0700.HK"]}
+
+
+# ── Issue #66: the universe must not claim a market FinCal cannot serve ──
+
+# The production watchlist (137 codes) contains 25 A-share codes; they used to be
+# offered as US tickers by /api/popular and the default calendar.
+_MIXED_CODES = ["AAPL.US", "MSFT.US", "0700.HK", "000651.SZ", "512890.SH", "600028.SH"]
+
+
+def test_universe_drops_and_reports_codes_from_other_exchanges(monkeypatch):
+    source = _FakeSource(_MIXED_CODES)
+    _install_universe(monkeypatch, source, ttl=60.0)
+
+    assert universe_mod.popular_stocks() == (["AAPL", "MSFT"], ["0700.HK"])
+
+    status = universe_mod.universe_status()
+    assert status["us_count"] == 2
+    assert status["hk_count"] == 1
+    assert status["symbol_count"] == 3
+    assert status["skipped_count"] == 3
+    assert status["skipped_symbols"] == ["000651.SZ", "512890.SH", "600028.SH"]
+
+
+def test_popular_endpoint_never_labels_another_exchange_as_us(monkeypatch):
+    _install_universe(monkeypatch, _FakeSource(_MIXED_CODES), ttl=60.0)
+    app.dependency_overrides = {get_current_user: lambda: dict(ADMIN)}
+    try:
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/popular")
+    finally:
+        app.dependency_overrides = {}
+
+    assert resp.status_code == 200
+    assert resp.json() == {"US": ["AAPL", "MSFT"], "HK": ["0700.HK"]}
+
+
+def test_diagnostics_reports_the_dropped_codes(monkeypatch):
+    _install_universe(monkeypatch, _FakeSource(_MIXED_CODES), ttl=60.0)
+    universe_mod.popular_stocks()
+
+    app.dependency_overrides = {get_current_user: lambda: dict(ADMIN)}
+    try:
+        with patch.object(db, "db_cursor", lambda: _FakeConn()), \
+                patch("app.freshness.check_freshness", lambda *a, **kw: {"status": "healthy"}):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get("/api/admin/diagnostics")
+            body = resp.json()
+    finally:
+        app.dependency_overrides = {}
+
+    assert resp.status_code == 200, resp.text
+    assert body["universe"]["us_count"] == 2
+    assert body["universe"]["skipped_count"] == 3
+    assert "600028.SH" in body["universe"]["skipped_symbols"]
+
+
+def test_admin_watchlist_write_refuses_a_symbol_market_mismatch(monkeypatch):
+    """A managed symbol joins the default universe, so a dead entry must be
+    refused *before* the write (no row, no universe invalidation)."""
+    source = _FakeSource(["AAPL.US"])
+    universe = _install_universe(monkeypatch, source, ttl=120.0)
+    universe.get()
+    reads_before = source.reads
+
+    app.dependency_overrides = {get_current_user: lambda: dict(ADMIN)}
+    try:
+        with patch.object(db, "db_cursor", lambda: _FakeConn()):
+            client = TestClient(app, raise_server_exceptions=False)
+
+            rejected = client.post("/api/admin/watchlist", json={"symbol": "600028.SH", "market": "US"})
+            assert rejected.status_code == 422, rejected.text
+            assert rejected.json()["error"]["code"] == "symbol_market_mismatch"
+
+            # A refused write must leave the live universe untouched: the cached
+            # read still answers without going back to the source.
+            assert client.get("/api/popular").json() == {"US": ["AAPL"], "HK": []}
+            assert source.reads == reads_before
+
+            # An accepted write does drop that cache (Issue #58 behaviour).
+            accepted = client.post("/api/admin/watchlist", json={"symbol": "XYZ", "market": "US"})
+            assert accepted.status_code == 201, accepted.text
+            assert client.get("/api/popular").status_code == 200
+            assert source.reads == reads_before + 1
+    finally:
+        app.dependency_overrides = {}

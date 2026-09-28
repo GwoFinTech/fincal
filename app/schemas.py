@@ -333,6 +333,11 @@ class UniverseStatus(BaseModel):
     symbol_count: int = 0
     us_count: int = 0
     hk_count: int = 0
+    # Codes the source offers that belong to no market FinCal serves
+    # (000651.SZ / 600519.SH …): dropped from the universe, reported here so the
+    # drop is visible (Issue #66).
+    skipped_count: int = 0
+    skipped_symbols: list[str] = []
     source: str = ""
     stale: bool = False
     error_code: str | None = None

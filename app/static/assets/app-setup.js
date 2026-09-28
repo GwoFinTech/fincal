@@ -44,6 +44,21 @@
     const error = ref(null);
     const toast = ref('');
 
+    // Language-neutral error codes from `app/errors.py` → the one wording this
+    // SPA shows for them. A rejected write must read as a sentence instead of
+    // raw JSON (Issue #66: saving an A-share code as a US symbol).
+    const API_ERROR_LABELS = {
+      symbol_market_mismatch: '代码后缀与所选市场不一致（如 600519.SH 不是美股）',
+    };
+
+    function apiErrorText(body, status) {
+      try {
+        const code = JSON.parse(body)?.error?.code;
+        if (code && API_ERROR_LABELS[code]) return API_ERROR_LABELS[code];
+      } catch (e) { /* not our JSON error envelope — show the body as-is */ }
+      return body || `HTTP ${status}`;
+    }
+
     async function apiFetch(path, opts = {}) {
       try {
         const res = await fetch(path, { ...opts, headers: { 'Content-Type': 'application/json', ...opts.headers } });
@@ -51,7 +66,7 @@
         if (res.status === 404) { return null; }
         if (!res.ok) {
           const text = await res.text().catch(() => '');
-          throw new Error(text || `HTTP ${res.status}`);
+          throw new Error(apiErrorText(text, res.status));
         }
         return res.json();
       } catch (e) {

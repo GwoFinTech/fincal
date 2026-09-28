@@ -14,7 +14,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from ..symbol import normalize
+from ..symbol import bare_ticker, market_of, normalize
 
 logger = logging.getLogger(__name__)
 
@@ -37,23 +37,41 @@ class FetchResult:
         return not self.symbols and self.error_code is not None
 
 
-def group_symbols_by_market(codes: list[str]) -> dict[str, list[str]]:
-    """Bucket canonical ``TICKER.MARKET`` codes into ``{'US': [...], 'HK': [...]}``.
+def group_symbols_by_market_with_skipped(codes: list[str]) -> tuple[dict[str, list[str]], list[str]]:
+    """Bucket codes into ``({'US': [...], 'HK': [...]}, skipped)``.
 
     HK codes are normalized to the canonical 4-digit zero-padded form so they
-    match the earnings table keys (``700.HK`` -> ``0700.HK``); codes without a
-    known suffix are treated as US tickers.
+    match the earnings table keys (``700.HK`` -> ``0700.HK``); bare tickers and
+    ``.US`` codes are US.  A code whose suffix belongs to an exchange FinCal has
+    no calendar for (``000651.SZ``, ``600519.SH``, …) is *not* a US ticker: it is
+    returned in ``skipped`` so the read path cannot offer a symbol the sync path
+    skips every week (Issue #66).  The market decision itself lives in
+    :func:`app.symbol.market_of`, shared with the sync path.
     """
     result: dict[str, list[str]] = {"US": [], "HK": []}
+    skipped: list[str] = []
     for code in codes:
-        code = str(code).strip().upper()
-        if code.endswith(".HK"):
-            result["HK"].append(normalize(code[:-3], "HK"))
-        elif code.endswith(".US"):
-            result["US"].append(code[:-3])  # strip .US suffix
+        raw = str(code).strip().upper()
+        market = market_of(raw)
+        if market == "HK":
+            result["HK"].append(normalize(bare_ticker(raw), "HK"))
+        elif market == "US":
+            result["US"].append(bare_ticker(raw))
         else:
-            result["US"].append(code)
-    return result
+            skipped.append(raw)
+    if skipped:
+        logger.info(
+            "%d watchlist code(s) dropped (no US/HK market): %s",
+            len(skipped), ", ".join(skipped[:10]),
+        )
+    return result, skipped
+
+
+def group_symbols_by_market(codes: list[str]) -> dict[str, list[str]]:
+    """``{'US': [...], 'HK': [...]}`` — see
+    :func:`group_symbols_by_market_with_skipped` for the dropped codes."""
+    by_market, _skipped = group_symbols_by_market_with_skipped(codes)
+    return by_market
 
 
 class WatchlistSource(ABC):
@@ -142,8 +160,18 @@ class WatchlistSource(ABC):
         """``(by_market, status)`` — :meth:`get_symbols_by_market` plus the
         staleness/error metadata callers need to keep a cached copy of the
         universe honest (Issue #58)."""
+        by_market, _skipped, status = self.get_symbols_by_market_detailed(force_refresh=force_refresh)
+        return by_market, status
+
+    def get_symbols_by_market_detailed(
+        self, *, force_refresh: bool = False
+    ) -> tuple[dict[str, list[str]], list[str], FetchResult]:
+        """``(by_market, skipped, status)`` — the bucketed universe plus the
+        codes that belong to no market FinCal serves, so callers can report the
+        drop instead of filtering silently (Issue #66)."""
         status = self.get_symbols_with_status(force_refresh=force_refresh)
-        return group_symbols_by_market(status.symbols), status
+        by_market, skipped = group_symbols_by_market_with_skipped(status.symbols)
+        return by_market, skipped, status
 
     def get_futu_symbols(self, *, force_refresh: bool = False) -> list[str]:
         """Symbols in fincal canonical format (``AAPL.US``, ``0700.HK``).
@@ -170,15 +198,19 @@ class WatchlistSource(ABC):
         symbols: list[str] = []
         skipped: list[str] = []
         for code in codes:
-            code = code.strip().upper()
-            if code.endswith(".HK"):
-                symbols.append(normalize(code[:-3], "HK"))
-            elif code.endswith(".US"):
-                symbols.append(code)
-            elif "." in code:
-                skipped.append(code)
+            raw = str(code).strip().upper()
+            market = market_of(raw)
+            if market == "HK":
+                symbols.append(normalize(bare_ticker(raw), "HK"))
+            elif raw.endswith(".US"):
+                symbols.append(raw)
+            elif market == "US" and "." not in raw:
+                symbols.append(f"{raw}.US")
             else:
-                symbols.append(f"{code}.US")
+                # Another exchange's suffix (000651.SZ / 600519.SH, #49) — and a
+                # dotted US class share, which this sync has never been able to
+                # route either (its skip set is unchanged, #66).
+                skipped.append(raw)
         if skipped:
             logger.info(
                 "%d watchlist code(s) skipped for Futu sync (not US/HK): %s",

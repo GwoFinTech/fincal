@@ -78,6 +78,92 @@ def normalize(symbol: str, market: str) -> str:
     return s
 
 
+# ── Market identity (Issue #66) ────────────────────────────────────
+
+# The only markets FinCal can serve: the earnings table, the Futu/Longbridge
+# sync and the iCal feed all key on US and HK.  A code from any other exchange
+# has no calendar behind it, so it must never be presented as one of these.
+SERVED_MARKETS = ("US", "HK")
+
+
+def bare_ticker(code: str) -> str:
+    """The ticker part of a code, with any market prefix/suffix removed.
+
+    ``AAPL.US`` → ``AAPL``, ``US.AAPL`` → ``AAPL``, ``700.HK`` → ``700``.  A
+    single-letter suffix stays part of the ticker (``BRK.A`` → ``BRK.A``): it is
+    a class-share/unit spelling, not a market.
+    """
+    s = str(code).strip().upper()
+    for prefix in ("US.", "HK."):
+        if s.startswith(prefix) and len(s) > len(prefix):
+            s = s[len(prefix):]
+            break
+    if "." in s:
+        head, tail = s.rsplit(".", 1)
+        if head and tail in SERVED_MARKETS:
+            s = head
+    return s
+
+
+def market_of(code: str) -> str | None:
+    """``'US'`` / ``'HK'`` for a code FinCal can serve, ``None`` otherwise.
+
+    Market identity is a property of the code's suffix, and it must have exactly
+    one definition: the sync path used to classify ``000651.SZ`` as "not US/HK"
+    while the read path bucketed the same code as a US ticker, so the default
+    universe offered 25 A-share codes that can never have an earnings row
+    (Issue #66).
+
+    * ``.HK`` → HK; ``.US`` or no suffix → US (the historical bare-ticker
+      contract);
+    * a single-letter suffix is a class share / unit / similar spelling of a US
+      listing (``BRK.A``, ``BF.B``, ``MKC.V``, ``ETSS.U``) → US;
+    * any other suffix belongs to an exchange FinCal does not serve
+      (``.SZ``/``.SH``/``.SS``/``.BJ``, ``.TW``, …) → ``None``.
+    """
+    s = str(code).strip().upper()
+    if not s:
+        return None
+    for prefix in ("US.", "HK."):
+        if s.startswith(prefix) and len(s) > len(prefix):
+            return prefix[:-1]
+    if "." not in s:
+        return "US"
+    head, tail = s.rsplit(".", 1)
+    if not head:
+        return None
+    if tail in SERVED_MARKETS:
+        return tail
+    if len(tail) == 1 and tail.isalpha():
+        return "US"
+    return None
+
+
+def market_mismatch(symbol: str, market: str) -> bool:
+    """True when ``symbol`` cannot belong to ``market`` (Issue #66).
+
+    Guards the write paths, which used to accept ``market=US`` with an A-share
+    code and persist ``600028.SH`` as a US symbol: the row then never matches an
+    earnings row while every sync keeps skipping it, so the watchlist entry shows
+    an empty row forever with no self-healing path.
+
+    ``market`` is expected to be one of :data:`SERVED_MARKETS` — the callers
+    report an unsupported market as a separate error code first.  An empty
+    symbol is not a mismatch here either (``symbol_required`` covers it).
+    """
+    m = str(market).strip().upper()
+    s = str(symbol).strip().upper()
+    if not s:
+        return False
+    if m == "HK":
+        # HK tickers are numeric and may be pasted bare (700 / 0700 / 00700) or
+        # with the suffix; anything else is another market's code.
+        return not (s.endswith(".HK") or ("." not in s and s.isdigit()))
+    if m == "US":
+        return market_of(s) != "US"
+    return False
+
+
 # ── Longbridge helpers ─────────────────────────────────────────────
 
 def to_lb_symbol(symbol: str) -> str:
