@@ -185,7 +185,6 @@ class FreshnessVerdictTests(TestCase):
                 earnings_consensus=timedelta(days=47),
                 earnings_forecast_eps=timedelta(days=47),
                 earnings_institution_ratings=timedelta(days=47),
-                stock_names=timedelta(days=1),
                 earnings=timedelta(hours=2),
             ),
         ]
@@ -208,7 +207,6 @@ class FreshnessVerdictTests(TestCase):
                 earnings_consensus=None,
                 earnings_forecast_eps=timedelta(hours=1),
                 earnings_institution_ratings=timedelta(hours=1),
-                stock_names=timedelta(hours=1),
                 earnings=timedelta(hours=1),
             ),
         ]
@@ -280,6 +278,87 @@ class FreshnessVerdictTests(TestCase):
         self.assertEqual(summary["status"], "unknown")
         self.assertEqual(summary["error_code"], freshness.ERROR_UNAVAILABLE)
         self.assertEqual(summary["entries"], [])
+
+
+class OnDemandCacheFreshnessTests(TestCase):
+    """Issue #67: a cache that only writes when there is work to do must not be
+    judged by ``MAX(fetched_at)``, or a healthy pipeline reports ``stale`` for
+    ever on the derived row while the stage row stays green."""
+
+    def test_stock_names_is_not_a_derived_table(self):
+        self.assertNotIn("stock_names", {table for table, _ in DERIVED_TABLES})
+        # The UNION the check actually issues must not touch it either.
+        self.assertNotIn("stock_names", freshness._derived_query())
+
+    def test_derived_query_keeps_the_rendered_tables(self):
+        query = freshness._derived_query()
+        self.assertEqual(
+            sorted({table for table, _ in DERIVED_TABLES}),
+            ["earnings", "earnings_consensus", "earnings_forecast_eps",
+             "earnings_institution_ratings"],
+        )
+        for table, column in DERIVED_TABLES:
+            self.assertIn(f"SELECT '{table}' AS name, MAX({column})", query)
+
+    def test_stock_names_is_still_a_monitored_stage(self):
+        """Coverage must not shrink: its own sync_runs row is the only signal."""
+        self.assertIn("stock_names", SYNC_STAGES)
+        self.assertEqual(STAGE_SCRIPTS["stock_names"], "scripts/sync_stock_names.py")
+
+    def test_stage_success_with_nothing_to_resolve_is_healthy(self):
+        """Acceptance 1: every stage green, no pending name ⇒ gate exits 0.
+
+        The 200-day-old ``stock_names`` row below cannot pull the verdict down:
+        the check no longer reads that column at all.
+        """
+        derived = _derived_rows(**{t: timedelta(hours=1) for t, _ in DERIVED_TABLES})
+        derived.append({"name": "stock_names", "last_at": NOW - timedelta(days=200)})
+        results = [
+            _stage_rows(**{s: timedelta(hours=1) for s in SYNC_STAGES}),
+            derived,
+        ]
+        cursor, patcher = _patch_db(results)
+        with patcher:
+            summary = check_freshness(now=NOW)
+
+        self.assertEqual(summary["status"], "healthy")
+        self.assertIsNone(summary["error_code"])
+        self.assertEqual(summary["stale_data"], [])
+        self.assertNotIn("stock_names", cursor.executed[1][0])
+        self.assertEqual([e["stage"] for e in summary["entries"] if e["kind"] == "derived"],
+                         [table for table, _ in DERIVED_TABLES])
+
+    def test_stock_names_stage_that_stopped_running_is_still_reported(self):
+        """Acceptance 2: dropping the derived row must not lose the reverse case."""
+        ages = {s: timedelta(hours=1) for s in SYNC_STAGES}
+        ages["stock_names"] = None
+        results = [
+            _stage_rows(**ages),
+            _derived_rows(**{t: timedelta(hours=1) for t, _ in DERIVED_TABLES}),
+        ]
+        _, patcher = _patch_db(results)
+        with patcher:
+            summary = check_freshness(now=NOW)
+
+        self.assertEqual(summary["status"], "degraded")
+        self.assertEqual(summary["error_code"], freshness.ERROR_STAGE_NEVER)
+        self.assertEqual(summary["never_run_stages"], ["stock_names"])
+
+    def test_stale_stock_names_stage_alone_fails_the_gate(self):
+        ages = {s: timedelta(hours=1) for s in SYNC_STAGES}
+        ages["stock_names"] = timedelta(days=30)
+        results = [
+            _stage_rows(**ages),
+            _derived_rows(**{t: timedelta(hours=1) for t, _ in DERIVED_TABLES}),
+        ]
+        _, patcher = _patch_db(results)
+        with patcher:
+            summary = check_freshness(now=NOW)
+
+        self.assertEqual(summary["stale_stages"], ["stock_names"])
+        with mock.patch.object(check_script, "check_freshness", return_value=summary), \
+                mock.patch("sys.stderr", new_callable=_CapturedStderr):
+            self.assertEqual(check_script.main(), check_script.EXIT_STALE)
 
 
 class ReadOnlyContractTests(TestCase):

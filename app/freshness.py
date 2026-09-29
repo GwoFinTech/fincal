@@ -14,6 +14,13 @@ calls**: "when did each declared stage last succeed, and how old is the data it
 produces?"  The declared stage list is the contract that ``sync_all.sh`` must
 cover; ``tests/test_sync_freshness.py`` fails if the two drift apart, so a stage
 added to the pipeline can never silently go unmonitored again.
+
+Stage staleness and derived-data staleness are two different questions.  A
+derived table is only checked here when it is rendered to users *and* its
+freshness column is rewritten on every successful run — otherwise
+``MAX(column)`` measures "last time there was work to do" and a healthy
+pipeline reads as ``stale`` (Issue #67).  The stage entry, which is written
+every run, carries the verdict for everything else.
 """
 from __future__ import annotations
 
@@ -45,11 +52,21 @@ STAGE_SCRIPTS: dict[str, str] = {
 # Derived tables that are rendered to users, with their freshness column.
 # Identifiers are module constants (never user input), so interpolating them
 # into the UNION query below is safe.
+#
+# A table only belongs here when BOTH hold (Issue #67):
+#   1. it is rendered to users — a stale value is a user-visible defect; and
+#   2. its freshness column is rewritten on **every successful run** of its
+#      stage, so ``MAX(column)`` means "last successful run" rather than
+#      "last time there happened to be work to do".
+# ``stock_names`` fails (2): it is an on-demand name cache written only when a
+# missing name is resolved, so ``MAX(fetched_at)`` freezes as soon as the
+# pending set is empty and would report ``stale`` forever on a perfectly
+# healthy pipeline.  Its observability comes from its own ``sync_runs`` stage
+# entry instead.
 DERIVED_TABLES: tuple[tuple[str, str], ...] = (
     ("earnings_consensus", "fetched_at"),
     ("earnings_forecast_eps", "fetched_at"),
     ("earnings_institution_ratings", "fetched_at"),
-    ("stock_names", "fetched_at"),
     ("earnings", "updated_at"),
 )
 

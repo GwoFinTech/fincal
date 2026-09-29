@@ -253,10 +253,18 @@ declared stage last succeed, and how old is the data it derives?*
 - Staleness is decided from the **most recent success** per stage
   (`sync_runs.status='success'`), never from a fixed window; a stage with no
   successful run at all is reported as `never`.
-- Derived tables rendered to users are checked too (`earnings_consensus`,
-  `earnings_forecast_eps`, `earnings_institution_ratings`, `stock_names` on
-  `MAX(fetched_at)`, `earnings` on `MAX(updated_at)`), so a fresh stage with
-  stale output still shows up.
+- Derived tables are checked too, but only ones that are **rendered to users
+  and rewritten on every successful run** — that is the condition for
+  `MAX(<time column>)` to mean "last successful run" (`earnings_consensus`,
+  `earnings_forecast_eps`, `earnings_institution_ratings` on `MAX(fetched_at)`,
+  `earnings` on `MAX(updated_at)`), so a fresh stage with stale output still
+  shows up.
+- On-demand caches are deliberately **not** judged this way: `stock_names` only
+  writes when a missing name is resolved, so its `MAX(fetched_at)` freezes as
+  soon as the pending set is empty (Issue #67). Its verdict comes from its own
+  stage row, and a round that had targets but resolved none of them is recorded
+  as `failed` with `error_code=stock_names_unresolved` (the stage then exits
+  non-zero) instead of a silent `success`.
 - Threshold: `SYNC_STAGE_STALE_AFTER_HOURS` (default `192` = weekly + 1 day of
   grace). A stage or table older than that is `stale`.
 - `/api/admin/health` gains a `checks.sync_freshness` entry (aggregate status,
