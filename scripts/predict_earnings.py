@@ -244,9 +244,14 @@ _COMPANY_NAME_SQL = (
 #: :data:`_COMPANY_NAME_SQL`; ``date_source = 'algorithm'`` limits the write to the
 #: rows this step owns, so a provider's own spelling is never rewritten, and
 #: ``company_name <>`` makes a steady state write nothing at all.
+#:
+#: ``updated_at`` is deliberately *not* touched: it is not just a timestamp here —
+#: ``app.fiscal.authority_key`` ranks two pure predictions of one fiscal period by
+#: it, so bumping it would let a renamed row claim a recomputation that never
+#: happened and change which date the calendar shows.  A name is not a new date.
 _ALIGN_PREDICTED_NAME_SQL = """
     UPDATE earnings e
-       SET company_name = n.company_name, updated_at = NOW()
+       SET company_name = n.company_name
       FROM (
             SELECT DISTINCT ON (symbol, market) symbol, market, company_name
               FROM earnings

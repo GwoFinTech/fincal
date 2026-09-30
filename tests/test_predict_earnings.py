@@ -961,6 +961,12 @@ class PredictedRowNameTests(TestCase):
         self.assertIn("e.date_source = 'algorithm'", sql)          # only rows this step owns
         self.assertIn("e.company_name <> n.company_name", sql)     # a steady state writes nothing
 
+    def test_the_alignment_writes_the_name_and_nothing_else(self):
+        """Acceptance criterion 5: the read path ranks period duplicates by updated_at."""
+        sql = " ".join(predict_earnings._ALIGN_PREDICTED_NAME_SQL.split())
+        self.assertIn("SET company_name = n.company_name", sql)
+        self.assertNotIn("updated_at", sql)
+
     def test_the_alignment_reports_its_writes_once_per_run(self):
         cursor = mock.MagicMock()
         cursor.rowcount = 5
