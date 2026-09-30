@@ -713,6 +713,7 @@ class _PredictDb:
         self.executed = []
         self.moves = []
         self.inserts = []
+        self.name_aligns = []
         self.savepoints = []
         self.rowcount = 0
         self._result = []
@@ -740,6 +741,8 @@ class _PredictDb:
             return self._target_holder
         if flat.startswith("UPDATE earnings SET report_date"):
             return self._move
+        if flat.startswith("UPDATE earnings SET company_name"):
+            return self._align_name
         if flat.startswith("INSERT INTO earnings"):
             return self._insert
         if flat.startswith(("SAVEPOINT", "RELEASE SAVEPOINT", "ROLLBACK TO SAVEPOINT")):
@@ -752,7 +755,29 @@ class _PredictDb:
                         if row["symbol"] == symbol and row["market"] == market]
 
     def _company_name(self, params):
-        self._result = [{"company_name": "Apple"}] if self.rows else []
+        """Replay the Issue #68 ranking: provider rows first, newest date first."""
+        symbol, market = params
+        candidates = [row for row in self.rows
+                      if row["symbol"] == symbol and row["market"] == market
+                      and row.get("company_name")]
+        candidates.sort(key=lambda row: (
+            str(row.get("date_source") or "").lower() == "algorithm",
+            -row["report_date"].toordinal(),
+            -row["id"],
+        ))
+        self._result = [{"company_name": candidates[0]["company_name"]}] if candidates else []
+
+    def _align_name(self, params):
+        name, symbol, market, _ = params
+        self.name_aligns.append(params)
+        changed = 0
+        for row in self.rows:
+            if (row["symbol"] == symbol and row["market"] == market
+                    and str(row.get("date_source") or "").lower() == "algorithm"
+                    and row.get("company_name") != name):
+                row["company_name"] = name
+                changed += 1
+        self.rowcount = changed
 
     def _target_holder(self, params):
         symbol, market, report_date, report_type = params
@@ -785,12 +810,12 @@ class _PredictDb:
 
 def _predict_row(row_id, symbol, market, report_date, fiscal_year, fiscal_quarter,
                  *, is_predicted=False, date_source="longbridge", eps_actual=None,
-                 revenue_actual=None, report_type="Q"):
+                 revenue_actual=None, report_type="Q", company_name="Apple"):
     return {
         "id": row_id, "symbol": symbol, "market": market, "report_date": report_date,
         "report_type": report_type, "fiscal_year": fiscal_year, "fiscal_quarter": fiscal_quarter,
         "before_after": "after", "is_predicted": is_predicted, "date_source": date_source,
-        "eps_actual": eps_actual, "revenue_actual": revenue_actual, "company_name": "Apple",
+        "eps_actual": eps_actual, "revenue_actual": revenue_actual, "company_name": company_name,
     }
 
 
@@ -886,3 +911,102 @@ class SupersededPredictionMoveTests(TestCase):
         self.assertEqual(db.moves, [])
         self.assertEqual(stats.rescheduled, 0)
         self.assertEqual(stats.predicted, 1)
+
+
+def _tencent_fixture():
+    """The production shape of Issue #68 (``0700.HK``), reduced to its two names.
+
+    The provider's own naming moved from ``TENCENT`` to ``腾讯控股`` at some point;
+    the stored algorithm rows still carry ``TENCENT`` because the name they were
+    first written with came from the symbol's *oldest* row.  Both Q4 periods are
+    algorithm rows without a confirmed Q4 sample, so the forward walk cannot reach
+    them — only the Issue #68 alignment pass can correct their name.  The old
+    provider rows keep their own spelling (they are outside every rendered window,
+    and rewriting a provider row is not this step's business).
+    """
+    return [
+        _predict_row(1, "0700.HK", "HK", date(2025, 8, 13), 2025, 2, date_source="unknown",
+                     eps_actual=5.1, company_name="TENCENT"),
+        _predict_row(2, "0700.HK", "HK", date(2025, 11, 13), 2025, 3, date_source="futu",
+                     eps_actual=5.3, company_name="TENCENT"),
+        _predict_row(3, "0700.HK", "HK", date(2026, 5, 13), 2026, 1, date_source="futu",
+                     eps_actual=6.0, company_name="腾讯控股"),
+        _predict_row(4, "0700.HK", "HK", date(2026, 8, 12), 2026, 2, date_source="futu",
+                     eps_actual=6.2, company_name="腾讯控股"),
+        _predict_row(5, "0700.HK", "HK", date(2026, 11, 18), 2026, 3, date_source="futu",
+                     company_name="腾讯控股"),
+        _predict_row(6, "0700.HK", "HK", date(2027, 3, 18), 2026, 4, is_predicted=True,
+                     date_source="algorithm", company_name="TENCENT"),
+        _predict_row(7, "0700.HK", "HK", date(2027, 11, 18), 2027, 3, is_predicted=True,
+                     date_source="algorithm", company_name="TENCENT"),
+    ]
+
+
+class PredictedRowNameTests(TestCase):
+    """Issue #68: every row of one symbol is rendered under one name."""
+
+    def test_the_name_query_can_never_fall_back_to_index_order(self):
+        """Acceptance criterion 1: the ranking is explicit, not the index order."""
+        sql = " ".join(predict_earnings._COMPANY_NAME_SQL.split())
+        self.assertIn("ORDER BY", sql)
+        self.assertIn("report_date DESC", sql)
+        self.assertIn("(COALESCE(date_source, '') = 'algorithm')", sql)
+        self.assertIn("LIMIT 1", sql)
+
+    def test_a_written_prediction_carries_the_provider_name(self):
+        """Acceptance criterion 2: predictions agree with the confirmed events."""
+        _, db, _ = _run_predict(_tencent_fixture(), symbol="0700.HK", market="HK")
+
+        self.assertTrue(db.inserts)
+        self.assertEqual({params[2] for params in db.inserts}, {"腾讯控股"})
+
+    def test_every_algorithm_row_ends_up_on_that_name(self):
+        _, db, stats = _run_predict(_tencent_fixture(), symbol="0700.HK", market="HK")
+
+        rows = db.rows_of("0700.HK", "HK")
+        # Every algorithm row carries the provider name …
+        self.assertEqual({row["company_name"] for row in rows
+                          if row["date_source"] == "algorithm"}, {"腾讯控股"})
+        # … and no visible period is rendered under the other spelling any more.
+        self.assertEqual({row["company_name"] for row in rows
+                          if row["date_source"] != "algorithm"
+                          and row["report_date"] >= date(2026, 1, 1)}, {"腾讯控股"})
+        # The two Q4 rows are outside the walk, so the alignment pass is what fixed them.
+        self.assertEqual(stats.names_aligned, 2)
+
+    def test_the_alignment_reaches_only_algorithm_rows(self):
+        rows = _tencent_fixture()
+        provider_before = {row["id"]: row["company_name"] for row in rows
+                           if row["date_source"] != "algorithm"}
+
+        _, db, _ = _run_predict(rows, symbol="0700.HK", market="HK")
+
+        provider_after = {row["id"]: row["company_name"]
+                          for row in db.rows_of("0700.HK", "HK")
+                          if row["date_source"] != "algorithm"}
+        self.assertEqual(provider_after, provider_before)
+
+    def test_the_alignment_sql_carries_its_own_guard(self):
+        sql = " ".join(predict_earnings._ALIGN_PREDICTED_NAME_SQL.split())
+        self.assertIn("date_source = 'algorithm'", sql)
+        self.assertIn("company_name <> %s", sql)     # a steady state writes nothing
+
+    def test_the_upsert_may_correct_an_algorithm_rows_name(self):
+        """The old guard kept ``earnings.company_name`` for any row that existed."""
+        _, db, _ = _run_predict(_tencent_fixture(), symbol="0700.HK", market="HK")
+
+        insert_sql = next(sql for sql, _ in db.executed if sql.startswith("INSERT INTO earnings"))
+        self.assertIn("earnings.date_source = 'algorithm'", insert_sql)
+        self.assertIn("EXCLUDED.company_name <> ''", insert_sql)
+
+    def test_a_second_run_has_nothing_left_to_align(self):
+        _, db, _ = _run_predict(_tencent_fixture(), symbol="0700.HK", market="HK")
+        second = _PredictDb(db.rows)
+        stats = predict_earnings.PredictionStats()
+        ctx = mock.MagicMock()
+        ctx.__enter__.return_value = second
+        ctx.__exit__.return_value = False
+        with mock.patch.object(predict_earnings, "db_cursor", return_value=ctx):
+            predict_earnings.predict_for_symbol("0700.HK", "HK", stats)
+
+        self.assertEqual(stats.names_aligned, 0)

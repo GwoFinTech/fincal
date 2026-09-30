@@ -9,6 +9,9 @@ Logic:
   dates* for that quarter, shifted onto the target fiscal year, nearest to the
   median month/day expectation and never a date the company never used
   (Issue #60)
+- Give the prediction the symbol's newest *provider* name, and pull its existing
+  algorithm rows onto that name, so one symbol is never rendered under two names
+  (Issue #68)
 - Mark with is_predicted=TRUE; confirmed data from sync overwrites later
 """
 import logging
@@ -174,6 +177,7 @@ class PredictionStats:
     rescheduled: int = 0          # superseded predicted rows moved onto the new date
     reschedule_skipped: int = 0   # periods left alone because the target date is taken
     restated: int = 0             # stored predictions outside the window re-applied
+    names_aligned: int = 0        # algorithm rows pulled onto the symbol's provider name
 
     def details(self) -> dict:
         return {
@@ -181,6 +185,7 @@ class PredictionStats:
             "rescheduled": self.rescheduled,
             "reschedule_skipped": self.reschedule_skipped,
             "restated": self.restated,
+            "names_aligned": self.names_aligned,
         }
 
 
@@ -204,6 +209,52 @@ _MOVE_PREDICTED_ROW_SQL = (
     " WHERE id = %s AND report_date = %s AND is_predicted = TRUE"
     " AND date_source = 'algorithm' AND eps_actual IS NULL AND revenue_actual IS NULL"
 )
+
+# ── The name a prediction carries (Issue #68) ───────────────────────────────
+#
+# A predicted row copies the symbol's name from an existing row, so whatever this
+# query reads becomes the name the calendar, the export and the iCal ``SUMMARY``
+# show for that row — and it must not read a name *back out of* an algorithm row,
+# or the copy is circular.  Two defects compounded:
+#
+#   * the query had no ``ORDER BY``, so ``LIMIT 1`` fell on the index order and
+#     returned the symbol's *oldest* report date — the name the provider itself had
+#     already replaced (``TENCENT`` where every current row says ``腾讯控股``);
+#   * the upsert kept ``earnings.company_name`` whenever the row existed, so the
+#     name a prediction was first written with could never be corrected.
+#
+# ``ORDER BY report_date DESC LIMIT 1`` alone does not fix it either: predictions
+# are dated in the future, so a symbol's newest rows *are* its predictions, and the
+# stale name would keep re-selecting itself (production ``0700.HK`` returns
+# ``TENCENT`` from its 2027 rows).  Ranking provider rows ahead of algorithm rows
+# makes the source the name the confirmed events of the same view already use;
+# ``id DESC`` breaks ties without depending on index order.
+_COMPANY_NAME_SQL = (
+    "SELECT company_name FROM earnings"
+    " WHERE symbol = %s AND market = %s AND company_name <> ''"
+    " ORDER BY (COALESCE(date_source, '') = 'algorithm'), report_date DESC, id DESC"
+    " LIMIT 1"
+)
+
+#: Pull the symbol's algorithm-owned rows onto that name (Issue #68).  The upsert
+#: only reaches the periods this run walks, so a prediction whose period has left
+#: the window — or which was skipped for missing history — would keep its first
+#: name forever, and one symbol would still be rendered under two names.  Limited to
+#: ``date_source = 'algorithm'`` (the module's ownership convention) so a provider's
+#: own spelling is never rewritten, and to rows that actually differ, so a steady
+#: state writes nothing at all.
+_ALIGN_PREDICTED_NAME_SQL = (
+    "UPDATE earnings SET company_name = %s, updated_at = NOW()"
+    " WHERE symbol = %s AND market = %s AND date_source = 'algorithm'"
+    " AND company_name <> %s"
+)
+
+
+def _company_name_for(cur, symbol: str, market: str) -> str:
+    """The name one of this symbol's predictions should carry (Issue #68)."""
+    cur.execute(_COMPANY_NAME_SQL, (symbol, market))
+    row = cur.fetchone()
+    return row["company_name"] if row else ""
 
 
 def move_superseded_prediction(cur, *, symbol, market, report_type, row_id, old_date,
@@ -317,16 +368,23 @@ def predict_for_symbol(symbol: str, market: str, stats: "PredictionStats | None"
 
     latest_fy, latest_fq = max(confirmed.keys(), key=lambda k: (k[0], k[1]))
 
-    # Get company name from any existing row
-    company_name = ""
+    # The name every row of this symbol's predictions carries, taken from the newest
+    # *provider* row rather than from index order (Issue #68).
     with db_cursor() as cur:
-        cur.execute(
-            "SELECT company_name FROM earnings WHERE symbol = %s AND market = %s AND company_name != '' LIMIT 1",
-            (symbol, market),
-        )
-        row = cur.fetchone()
-        if row:
-            company_name = row["company_name"]
+        company_name = _company_name_for(cur, symbol, market)
+
+    # Converge the symbol's stored predictions on that name even when this run does
+    # not walk their period (Issue #68): the name is display-only, so a row left
+    # behind is a name the user sees next to the same company under a different
+    # spelling.  No write happens once the rows already agree.
+    if company_name:
+        with db_cursor() as cur:
+            cur.execute(_ALIGN_PREDICTED_NAME_SQL, (company_name, symbol, market, company_name))
+            aligned = cur.rowcount
+        if aligned:
+            logger.info("Aligned %d predicted row(s) of %s.%s onto %r", aligned, symbol, market, company_name)
+            if stats is not None:
+                stats.names_aligned += aligned
 
     # Predict forward from the latest confirmed quarter
     predictions_made = 0
@@ -389,7 +447,9 @@ def predict_for_symbol(symbol: str, market: str, stats: "PredictionStats | None"
                     date_source = CASE WHEN earnings.date_source = 'algorithm' THEN 'algorithm' ELSE earnings.date_source END,
                     date_status = CASE WHEN earnings.date_source = 'algorithm' THEN 'predicted' ELSE earnings.date_status END,
                     before_after = COALESCE(EXCLUDED.before_after, earnings.before_after),
-                    company_name = CASE WHEN earnings.company_name = '' THEN EXCLUDED.company_name ELSE earnings.company_name END,
+                    company_name = CASE WHEN earnings.date_source = 'algorithm'
+                                             AND EXCLUDED.company_name <> ''
+                                        THEN EXCLUDED.company_name ELSE earnings.company_name END,
                     updated_at = NOW()
                 """,
                 (symbol, market, company_name, pred_date.isoformat(), next_fy, next_fq, pred_ba),
