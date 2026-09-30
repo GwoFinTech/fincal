@@ -236,18 +236,28 @@ _COMPANY_NAME_SQL = (
     " LIMIT 1"
 )
 
-#: Pull the symbol's algorithm-owned rows onto that name (Issue #68).  The upsert
-#: only reaches the periods this run walks, so a prediction whose period has left
-#: the window — or which was skipped for missing history — would keep its first
-#: name forever, and one symbol would still be rendered under two names.  Limited to
-#: ``date_source = 'algorithm'`` (the module's ownership convention) so a provider's
-#: own spelling is never rewritten, and to rows that actually differ, so a steady
-#: state writes nothing at all.
-_ALIGN_PREDICTED_NAME_SQL = (
-    "UPDATE earnings SET company_name = %s, updated_at = NOW()"
-    " WHERE symbol = %s AND market = %s AND date_source = 'algorithm'"
-    " AND company_name <> %s"
-)
+#: Pull every algorithm-owned row onto its symbol's provider name (Issue #68).
+#: One set-based statement for the whole table rather than a per-symbol pass: the
+#: stage only walks the symbols its universe returns, and a name that is only
+#: "usually" converged would come back as soon as a symbol entered the universe or
+#: a run saw a shorter symbol list.  ``DISTINCT ON`` applies the same ranking as
+#: :data:`_COMPANY_NAME_SQL`; ``date_source = 'algorithm'`` limits the write to the
+#: rows this step owns, so a provider's own spelling is never rewritten, and
+#: ``company_name <>`` makes a steady state write nothing at all.
+_ALIGN_PREDICTED_NAME_SQL = """
+    UPDATE earnings e
+       SET company_name = n.company_name, updated_at = NOW()
+      FROM (
+            SELECT DISTINCT ON (symbol, market) symbol, market, company_name
+              FROM earnings
+             WHERE company_name <> ''
+             ORDER BY symbol, market, (COALESCE(date_source, '') = 'algorithm'),
+                      report_date DESC, id DESC
+           ) n
+     WHERE e.symbol = n.symbol AND e.market = n.market
+       AND e.date_source = 'algorithm'
+       AND e.company_name <> n.company_name
+"""
 
 
 def _company_name_for(cur, symbol: str, market: str) -> str:
@@ -255,6 +265,21 @@ def _company_name_for(cur, symbol: str, market: str) -> str:
     cur.execute(_COMPANY_NAME_SQL, (symbol, market))
     row = cur.fetchone()
     return row["company_name"] if row else ""
+
+
+def align_predicted_names(stats: "PredictionStats | None" = None) -> int:
+    """Converge every stored prediction on its symbol's provider name (Issue #68).
+
+    Returns the number of rows written; with the table already converged it is 0.
+    """
+    with db_cursor() as cur:
+        cur.execute(_ALIGN_PREDICTED_NAME_SQL)
+        aligned = cur.rowcount
+    if aligned:
+        logger.info("Aligned %d predicted row(s) onto their symbol's provider name", aligned)
+    if stats is not None:
+        stats.names_aligned += aligned
+    return aligned
 
 
 def move_superseded_prediction(cur, *, symbol, market, report_type, row_id, old_date,
@@ -369,22 +394,10 @@ def predict_for_symbol(symbol: str, market: str, stats: "PredictionStats | None"
     latest_fy, latest_fq = max(confirmed.keys(), key=lambda k: (k[0], k[1]))
 
     # The name every row of this symbol's predictions carries, taken from the newest
-    # *provider* row rather than from index order (Issue #68).
+    # *provider* row rather than from index order (Issue #68).  Stored predictions are
+    # converged on it by align_predicted_names() before the walk starts.
     with db_cursor() as cur:
         company_name = _company_name_for(cur, symbol, market)
-
-    # Converge the symbol's stored predictions on that name even when this run does
-    # not walk their period (Issue #68): the name is display-only, so a row left
-    # behind is a name the user sees next to the same company under a different
-    # spelling.  No write happens once the rows already agree.
-    if company_name:
-        with db_cursor() as cur:
-            cur.execute(_ALIGN_PREDICTED_NAME_SQL, (company_name, symbol, market, company_name))
-            aligned = cur.rowcount
-        if aligned:
-            logger.info("Aligned %d predicted row(s) of %s.%s onto %r", aligned, symbol, market, company_name)
-            if stats is not None:
-                stats.names_aligned += aligned
 
     # Predict forward from the latest confirmed quarter
     predictions_made = 0
@@ -750,6 +763,9 @@ if __name__ == "__main__":
         merge_duplicate_symbols()
         mark_confirmed()
         cleanup_stale_predictions()
+        # Stored predictions converge on their symbol's provider name before the walk
+        # writes any new one (Issue #68).
+        align_predicted_names(stats)
 
         logger.info("Predicting future earnings dates...")
         total = 0
