@@ -219,17 +219,98 @@ def api_popular(user=Depends(get_current_user)):
     return popular_stocks_by_market()
 
 
+# ── Watchlist search (Issue #69) ────────────────────────────────────────────
+#
+# `/api/search` is the watchlist page's only add-candidate source, so one code has
+# to come back as one candidate.  The previous statement selected
+# `DISTINCT symbol, market, company_name` straight off `earnings`, and that name is
+# a *row-level* display field: Longbridge and Futu each write their own spelling and
+# a rename leaves the older rows behind, so `DISTINCT` emitted the same symbol once
+# per spelling (`0700.HK TENCENT` and `0700.HK 腾讯控股`, 43/112 of the visible
+# universe).  Worse, `ORDER BY market, symbol` ranked a name-substring hit exactly
+# like an exact code hit under the same `LIMIT 20`, so `q=META` was drowned by
+# `MetaLight` / `Ardagh Metal Packaging` / … and the symbol itself fell out of view.
+#
+# The statement now:
+#   * keeps one row per `(symbol, market)`;
+#   * displays the symbol's authoritative name — the `stock_names` cache (Kurumi >
+#     Longbridge > Futu, `app/company_name.py`) when it has one, else the newest
+#     *provider* row's name.  Algorithm-owned rows are ranked last because they
+#     merely copy a provider's name, and a symbol's newest rows are its predictions
+#     (the same ordering rule as `predict_earnings._COMPANY_NAME_SQL`, Issue #68).
+#     `stock_names` is an on-demand cache, so it is a `LEFT JOIN` with a fallback:
+#     an uncached symbol behaves exactly as before rather than losing its name;
+#   * still *finds* a symbol by any spelling any of its rows ever carried, so a
+#     rename does not take the old name out of the search index;
+#   * orders the matches by relevance — exact code, code prefix, code substring,
+#     then name-only — with `market, symbol` keeping each tier stable.
+_SEARCH_SQL = """
+WITH authoritative_name AS (
+    SELECT DISTINCT ON (symbol, market) symbol, market, company_name
+    FROM earnings
+    WHERE company_name IS NOT NULL AND company_name <> ''
+    ORDER BY symbol, market, (COALESCE(date_source, '') = 'algorithm'),
+             report_date DESC, id DESC
+),
+symbols AS (
+    SELECT DISTINCT symbol, market FROM earnings
+),
+named AS (
+    SELECT s.symbol, s.market,
+           COALESCE(NULLIF(sn.company_name, ''), a.company_name, '') AS company_name
+    FROM symbols s
+    LEFT JOIN authoritative_name a ON a.symbol = s.symbol AND a.market = s.market
+    LEFT JOIN stock_names sn ON sn.symbol = s.symbol AND sn.market = s.market
+)
+SELECT symbol, market, company_name
+FROM named
+WHERE symbol ILIKE %(like)s
+   OR company_name ILIKE %(like)s
+   OR EXISTS (
+        SELECT 1 FROM earnings e
+        WHERE e.symbol = named.symbol AND e.market = named.market
+          AND e.company_name ILIKE %(like)s
+      )
+ORDER BY
+    CASE
+        WHEN upper(symbol) = upper(%(exact)s) THEN 0
+        WHEN symbol ILIKE %(prefix)s THEN 1
+        WHEN symbol ILIKE %(like)s THEN 2
+        ELSE 3
+    END,
+    market, symbol
+LIMIT %(limit)s
+"""
+
+
+def _search_pattern(q: str) -> str:
+    """The user's text as a literal LIKE pattern (Issue #69).
+
+    `%` and `_` are LIKE metacharacters; unescaped, typing `_` in the search box
+    would match any character and a bare `%` would return the first page of the
+    whole table.  Backslash is PostgreSQL's default LIKE escape character.
+    """
+    escaped = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
+def search_stocks(cur, q: str, limit: int = 20) -> list[dict]:
+    """One row per symbol matching ``q``, most relevant first (Issue #69)."""
+    like = _search_pattern(q)
+    cur.execute(_SEARCH_SQL, {
+        "like": like,
+        "prefix": like[1:] if len(like) > 1 else like,   # strip the leading wildcard
+        "exact": q.strip(),
+        "limit": limit,
+    })
+    return [dict(row) for row in cur.fetchall()]
+
+
 @router.get("/search", response_model=list[SearchItem])
 def api_search_stocks(q: str, user=Depends(get_current_user)):
     """Search for stocks to add to watchlist."""
     with db.db_cursor() as cur:
-        cur.execute(
-            """SELECT DISTINCT symbol, market, company_name FROM earnings
-            WHERE (symbol ILIKE %s OR company_name ILIKE %s)
-            ORDER BY market, symbol LIMIT 20""",
-            (f"%{q}%", f"%{q}%"),
-        )
-        results = [dict(row) for row in cur.fetchall()]
+        results = search_stocks(cur, q)
 
     if not results:
         try:
@@ -238,11 +319,16 @@ def api_search_stocks(q: str, user=Depends(get_current_user)):
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
             if proc.returncode == 0:
                 data = json.loads(proc.stdout)
+                # The CLI provider is the second source for the same list, so it
+                # must not re-introduce a symbol a previous item (or a DB row)
+                # already answered with (Issue #69).
+                seen = {(r["symbol"], r["market"]) for r in results}
                 for item in data.get("list", []):
                     cid = item.get("counter_id", "")
                     name = item.get("name", "")
                     symbol, market = from_lb_counter_id(cid)
-                    if symbol and market:
+                    if symbol and market and (symbol, market) not in seen:
+                        seen.add((symbol, market))
                         results.append({"symbol": symbol, "market": market, "company_name": name})
         except Exception:
             pass
