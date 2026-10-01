@@ -11,9 +11,9 @@ exact code hit in the same tier as a name substring hit under one `LIMIT 20`, so
 
 Covered here:
 
-* the statement's contract — one row per `(symbol, market)`, the authoritative name
-  (`stock_names` first, then the newest *provider* row, never an algorithm row's
-  copied name), and the relevance ladder;
+* the statement's contract — one row per `(symbol, market)`, the name the calendar
+  shows for that symbol (the newest *provider* row, never an algorithm row's copied
+  name, with the `stock_names` cache as the fallback), and the relevance ladder;
 * LIKE metacharacters in the query are escaped rather than treated as wildcards;
 * the Longbridge CLI fallback cannot re-introduce a symbol already listed;
 * an executable check against the local PostgreSQL: two spellings of one test symbol
@@ -59,9 +59,15 @@ def test_statement_keys_the_result_by_symbol_and_market():
     assert "DISTINCT symbol, market, company_name" not in _SEARCH_SQL
 
 
-def test_statement_prefers_the_cached_name_then_the_newest_provider_row():
+def test_statement_names_a_candidate_the_way_the_calendar_names_it():
+    """Displayed name: the newest provider row, with the cached name as fallback.
+
+    Naming this list from the cache *first* would print a spelling the calendar and
+    the watchlist never show for that symbol — the defect class Issue #68 fixed one
+    surface over (23 of today's 65 multi-spelling symbols differ between the two).
+    """
+    assert "COALESCE(row_name, cached_name, '')" in _SEARCH_SQL
     assert "LEFT JOIN stock_names" in _SEARCH_SQL
-    assert "COALESCE(NULLIF(sn.company_name, ''), a.company_name, '')" in _SEARCH_SQL
     # Algorithm rows only copy a provider name, and a symbol's newest rows *are* its
     # predictions — ranking them last is what keeps the copy from being circular
     # (the ordering rule `predict_earnings._COMPANY_NAME_SQL` uses, Issue #68).
@@ -69,9 +75,13 @@ def test_statement_prefers_the_cached_name_then_the_newest_provider_row():
     assert "report_date DESC, id DESC" in _SEARCH_SQL
 
 
-def test_statement_still_matches_a_name_the_symbol_no_longer_uses():
-    """A rename must not take the old spelling out of the search index."""
+def test_statement_finds_a_symbol_by_its_cached_and_historical_names():
+    """Narrowing the *displayed* name must not narrow the search itself."""
+    # A rename must not take the old spelling out of the index...
     assert "EXISTS (" in _SEARCH_SQL
+    # ...nor may a symbol stop being reachable by the name the cache resolved for it.
+    assert "cached_name ILIKE %(like)s" in _SEARCH_SQL
+    assert "COALESCE(row_name, cached_name) ILIKE %(like)s" in _SEARCH_SQL
 
 
 def test_statement_ranks_an_exact_code_before_a_name_substring():
@@ -240,6 +250,9 @@ def test_one_row_per_symbol_on_a_real_database():
             ], f"expected one row per symbol with its authoritative name, got {rows}"
             # The old spelling still finds the symbol, under the current name.
             assert [r["symbol"] for r in search_stocks(cur, "Old Spelling")] == [TEST_SYMBOL]
+            # And the cached name of a symbol whose own rows are unnamed still finds
+            # it, even though the displayed name comes from the rows when they have one.
+            assert [r["symbol"] for r in search_stocks(cur, "Cached Name")] == [TEST_OTHER]
     finally:
         conn.rollback()
         conn.close()

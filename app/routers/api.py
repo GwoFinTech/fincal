@@ -233,15 +233,19 @@ def api_popular(user=Depends(get_current_user)):
 #
 # The statement now:
 #   * keeps one row per `(symbol, market)`;
-#   * displays the symbol's authoritative name — the `stock_names` cache (Kurumi >
-#     Longbridge > Futu, `app/company_name.py`) when it has one, else the newest
-#     *provider* row's name.  Algorithm-owned rows are ranked last because they
-#     merely copy a provider's name, and a symbol's newest rows are its predictions
-#     (the same ordering rule as `predict_earnings._COMPANY_NAME_SQL`, Issue #68).
-#     `stock_names` is an on-demand cache, so it is a `LEFT JOIN` with a fallback:
-#     an uncached symbol behaves exactly as before rather than losing its name;
-#   * still *finds* a symbol by any spelling any of its rows ever carried, so a
-#     rename does not take the old name out of the search index;
+#   * displays the name the rest of the product already shows for that symbol — the
+#     newest *provider* row's name.  Algorithm-owned rows are ranked last because they
+#     merely copy a provider name, and a symbol's newest rows are its predictions (the
+#     ordering rule `predict_earnings._COMPANY_NAME_SQL` uses, Issue #68).  The
+#     `stock_names` cache (Kurumi > Longbridge > Futu, `app/company_name.py`) is the
+#     fallback for a symbol whose own rows never carried a name: naming this list from
+#     the cache first instead would print a second spelling beside the one the calendar
+#     and the watchlist use — 23 of today's 65 multi-spelling symbols differ that way,
+#     and 21 of the 112 visible symbols would answer a code search with a name their
+#     calendar events never show;
+#   * still *finds* a symbol by any spelling that is attached to it anywhere — its own
+#     rows (including a rename it no longer uses) or its cached name — so narrowing the
+#     display name does not narrow the search;
 #   * orders the matches by relevance — exact code, code prefix, code substring,
 #     then name-only — with `market, symbol` keeping each tier stable.
 _SEARCH_SQL = """
@@ -257,15 +261,17 @@ symbols AS (
 ),
 named AS (
     SELECT s.symbol, s.market,
-           COALESCE(NULLIF(sn.company_name, ''), a.company_name, '') AS company_name
+           a.company_name AS row_name,
+           NULLIF(sn.company_name, '') AS cached_name
     FROM symbols s
     LEFT JOIN authoritative_name a ON a.symbol = s.symbol AND a.market = s.market
     LEFT JOIN stock_names sn ON sn.symbol = s.symbol AND sn.market = s.market
 )
-SELECT symbol, market, company_name
+SELECT symbol, market, COALESCE(row_name, cached_name, '') AS company_name
 FROM named
 WHERE symbol ILIKE %(like)s
-   OR company_name ILIKE %(like)s
+   OR COALESCE(row_name, cached_name) ILIKE %(like)s
+   OR cached_name ILIKE %(like)s
    OR EXISTS (
         SELECT 1 FROM earnings e
         WHERE e.symbol = named.symbol AND e.market = named.market
