@@ -229,6 +229,21 @@ class HealthEndpointTests(TestCase):
         self.assertEqual(response["checks"]["kurumi"]["status"], "healthy")
         self.assertEqual(response["checks"]["kurumi"], {"status": "healthy"})
 
+    def test_probe_verdict_is_not_shaped_as_a_freshness_check(self):
+        """The verdict carries a status and a code — no freshness fields."""
+        from app.schemas import HealthResponse
+
+        with mock.patch.object(config, "KURUMI_API_URL", "http://localhost:8000"), \
+                mock.patch.object(config, "PORT", 8000), \
+                mock.patch("urllib.request.urlopen", _forbid_call):
+            payload = HealthResponse(**self._call_health()).model_dump()
+
+        check = payload["checks"]["kurumi"]
+        self.assertLessEqual(set(check), {"status", "error_code", "error"})
+        self.assertEqual(check["status"], "degraded")
+        self.assertEqual(check["error_code"],
+                         company_name.ERROR_DEPENDENCY_NOT_CONFIGURED)
+
 
 class DocsAndGateTests(TestCase):
     """A missing KURUMI_API_URL must be visible, not silent."""

@@ -581,6 +581,24 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /**
+         * DependencyProbe
+         * @description One external dependency probe inside ``HealthResponse.checks`` (Issue #70).
+         *
+         *     Its own shape so a probe verdict cannot be coerced into the freshness check
+         *     (`SyncFreshnessCheck`) just because it carries an ``error_code``: a Kurumi
+         *     outage or a missing/self-referencing `KURUMI_API_URL` reports
+         *     ``dependency_not_configured`` / ``kurumi_unreachable`` here with no
+         *     freshness fields attached.
+         */
+        DependencyProbe: {
+            /** Status */
+            status: string;
+            /** Error Code */
+            error_code?: string | null;
+            /** Error */
+            error?: string | null;
+        };
         /** DiagnosticsResponse */
         DiagnosticsResponse: {
             /**
@@ -796,7 +814,7 @@ export interface components {
              * @default {}
              */
             checks: {
-                [key: string]: components["schemas"]["SourceCheck"] | components["schemas"]["SyncFreshnessCheck"] | {
+                [key: string]: components["schemas"]["SourceCheck"] | components["schemas"]["DependencyProbe"] | components["schemas"]["SyncFreshnessCheck"] | {
                     [key: string]: unknown;
                 };
             };

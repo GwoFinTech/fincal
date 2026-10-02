@@ -250,6 +250,19 @@ class SourceCheck(BaseModel):
     status: str
     error: str | None = None
 
+class DependencyProbe(BaseModel):
+    """One external dependency probe inside ``HealthResponse.checks`` (Issue #70).
+
+    Its own shape so a probe verdict cannot be coerced into the freshness check
+    (`SyncFreshnessCheck`) just because it carries an ``error_code``: a Kurumi
+    outage or a missing/self-referencing `KURUMI_API_URL` reports
+    ``dependency_not_configured`` / ``kurumi_unreachable`` here with no
+    freshness fields attached.
+    """
+    status: str
+    error_code: str | None = None
+    error: str | None = None
+
 class SyncFreshnessCheck(BaseModel):
     """Aggregate-only sync freshness (Issue #53).
 
@@ -286,7 +299,7 @@ class FreshnessResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     version: str = "dev"
-    checks: dict[str, SourceCheck | SyncFreshnessCheck | dict] = {}
+    checks: dict[str, SourceCheck | DependencyProbe | SyncFreshnessCheck | dict] = {}
 
 class ReadyResponse(BaseModel):
     status: str
