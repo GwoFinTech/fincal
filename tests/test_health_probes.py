@@ -192,6 +192,31 @@ class UnreachableTests(TestCase):
             self.assertNotIn("://", str(value))
 
 
+class TargetLabelTests(TestCase):
+    """`scripts/deploy.sh` prints the address — never a credential (Issue #70)."""
+
+    def _label(self, url):
+        with mock.patch.object(config, "KURUMI_API_URL", url):
+            return company_name.kurumi_target_label()
+
+    def test_label_keeps_host_and_port_only(self):
+        self.assertEqual(self._label("http://tsummt-api:8000/api/v1?x=1"),
+                         "http://tsummt-api:8000")
+        self.assertEqual(self._label("https://kurumi.example.com"), "https://kurumi.example.com")
+        self.assertEqual(self._label("localhost:8000"), "http://localhost:8000")
+
+    def test_label_strips_userinfo(self):
+        label = self._label("http://user:secret@kurumi.internal:9000/")
+        self.assertEqual(label, "http://kurumi.internal:9000")
+        self.assertNotIn("secret", label)
+        self.assertNotIn("@", label)
+
+    def test_label_reports_unset_and_invalid(self):
+        self.assertEqual(self._label(""), "<unset>")
+        self.assertEqual(self._label("   "), "<unset>")
+        self.assertEqual(self._label("http://[::1"), "<invalid>")
+
+
 class HealthEndpointTests(TestCase):
     """The verdict reaches /api/admin/health, and the aggregate stops lying."""
 

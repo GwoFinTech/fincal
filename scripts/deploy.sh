@@ -153,11 +153,11 @@ fi
 # is a host/network decision).
 echo "=== Kurumi dependency address (Issue #70) ==="
 KURUMI_VERDICT=$(docker exec fincal python -c "
-import json, os
-from app.company_name import probe_kurumi
+import json
+from app.company_name import probe_kurumi, kurumi_target_label
 from app.config import PORT
 result = probe_kurumi()
-result['KURUMI_API_URL'] = os.environ.get('KURUMI_API_URL') or '<unset>'
+result['target'] = kurumi_target_label()
 result['PORT'] = PORT
 print(json.dumps(result))
 " 2>/dev/null || echo '{}')

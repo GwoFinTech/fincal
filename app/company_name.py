@@ -22,6 +22,7 @@ import subprocess
 import urllib.request
 from dataclasses import dataclass
 from urllib.error import URLError
+from urllib.parse import urlsplit
 
 import app.config as config
 from app.provider_client import (
@@ -69,6 +70,28 @@ def kurumi_base_url() -> str:
 def kurumi_overview_url(symbol: str, market: str) -> str:
     """URL of the Kurumi overview endpoint FinCal actually reads."""
     return f"{kurumi_base_url()}/api/stock/{kurumi_symbol(symbol, market)}/overview"
+
+
+def kurumi_target_label() -> str:
+    """Credential-free label for the configured Kurumi address (Issue #70).
+
+    ``scheme://host:port`` only — it is printed by ``scripts/deploy.sh`` and
+    must never carry userinfo, a path or a query, whatever the operator put in
+    ``KURUMI_API_URL``. Returns ``<unset>`` / ``<invalid>`` for values that
+    cannot be parsed.
+    """
+    base = (config.KURUMI_API_URL or "").strip()
+    if not base:
+        return "<unset>"
+    try:
+        parsed = urlsplit(base if "://" in base else f"//{base}")
+        host, port = parsed.hostname, parsed.port
+    except ValueError:
+        return "<invalid>"
+    if not host:
+        return "<invalid>"
+    scheme = parsed.scheme or "http"
+    return f"{scheme}://{host}:{port}" if port else f"{scheme}://{host}"
 
 
 # Symbol used by ``probe_kurumi``. It must be one the upstream always knows, so
