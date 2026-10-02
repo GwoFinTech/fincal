@@ -4,6 +4,7 @@ All values are read from environment variables with sensible defaults.
 For production, set at minimum: DB_HOST, DB_PASSWORD, ICAL_BASE_URL.
 """
 import os
+from urllib.parse import urlsplit
 
 APP_NAME = "fincal"
 PORT = int(os.getenv("PORT", "8000"))
@@ -95,8 +96,45 @@ ICAL_BASE_URL = os.getenv("ICAL_BASE_URL", "")
 CALENDAR_FORWARD_DAYS = int(os.getenv("CALENDAR_FORWARD_DAYS", "420"))
 
 # Kurumi (tsummt) API — preferred company-name source for FinCal symbols.
+# Issue #70: the default is FinCal's *own* listen address inside the production
+# container, and FinCal answers the old probe path (`/api/config`) itself, so a
+# reachability probe against it could never fail. `kurumi_target_is_self()`
+# below lets the dependency probe recognise that self-reference (and an unset
+# value) instead of reporting a false `healthy`.
 KURUMI_API_URL = os.getenv("KURUMI_API_URL", "http://localhost:8000")
 KURUMI_API_TIMEOUT = float(os.getenv("KURUMI_API_TIMEOUT", "5"))
+
+# Hosts that mean "this machine". A base URL pointing at one of them *and* at
+# this service' own port cannot be a reachable external dependency.
+_SELF_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0"})
+
+
+def kurumi_target_is_self(value: str | None = None) -> bool:
+    """True when ``value`` (default ``KURUMI_API_URL``) points back at FinCal.
+
+    Guards the Kurumi dependency probe (Issue #70): the shipped default
+    ``http://localhost:8000`` matches ``PORT``, so probing it only proves that
+    this process is alive. An empty/unset value is treated the same way —
+    "no address configured" is not a healthy dependency either.
+    """
+    base = (KURUMI_API_URL if value is None else value) or ""
+    base = base.strip()
+    if not base:
+        return True
+    try:
+        parsed = urlsplit(base if "://" in base else f"//{base}")
+    except ValueError:
+        return False
+    if (parsed.hostname or "").lower() not in _SELF_HOSTS:
+        return False
+    try:
+        port = parsed.port
+    except ValueError:
+        return False
+    if port is None:
+        port = 443 if parsed.scheme == "https" else 80
+    return port == PORT
+
 
 # Sync freshness monitoring (Issue #53). The pipeline declared by
 # scripts/sync_all.sh runs weekly, so a stage (or the derived table it owns)

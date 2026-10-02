@@ -218,16 +218,17 @@ def health_check():
     except Exception as exc:
         checks["postgresql"] = {"status": "not_ready", "error": type(exc).__name__}
 
-    # Kurumi API
+    # Kurumi API — preferred company-name source (Issue #70). Probes the
+    # endpoint the client actually reads (`/api/stock/{symbol}/overview`, see
+    # app/company_name.py) and reports `dependency_not_configured` when the base
+    # URL resolves back to this service: the previous probe asked FinCal's own
+    # `/api/config` (a constant 200), so it could never fail.
     try:
-        from .. import config
-        import urllib.request
-        url = f"{config.KURUMI_API_URL}/api/config"
-        req = urllib.request.Request(url, headers={"Accept": "application/json"})
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            checks["kurumi"] = {"status": "healthy" if resp.status == 200 else "degraded"}
-    except Exception:
-        checks["kurumi"] = {"status": "degraded"}
+        from ..company_name import probe_kurumi
+        checks["kurumi"] = probe_kurumi()
+    except Exception as exc:
+        checks["kurumi"] = {"status": "degraded", "error_code": "kurumi_probe_failed",
+                            "error": type(exc).__name__}
 
     # Futu OpenD
     try:

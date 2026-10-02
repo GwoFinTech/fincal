@@ -182,6 +182,8 @@ All configuration is via environment variables. See [`.env.example`](.env.exampl
 | `DB_USER` | `postgres` | Database user |
 | `DB_PASSWORD` | *(empty)* | Database password |
 | `WATCHLIST_SOURCE` | `tsummt` | `tsummt` or `http` ([docs](docs/watchlist-source.md)) |
+| `KURUMI_API_URL` | `http://localhost:8000` | Base URL of the Kurumi/tsummt API used for company names. **Must be set inside the container** — the default is FinCal's own port, so the dependency probe reports `dependency_not_configured` instead of a false `healthy` (Issue #70) |
+| `KURUMI_API_TIMEOUT` | `5` | Kurumi request timeout (seconds) |
 | `ICAL_BASE_URL` | — | Public URL for iCal feeds |
 | `CALENDAR_FORWARD_DAYS` | `420` | Forward horizon (days) of the iCal feed and the default `/api/earnings` window |
 | `FUTU_HOST` | `127.0.0.1` | Futu OpenD host |
@@ -299,6 +301,20 @@ DB_HOST=localhost uv run python scripts/check_sync_freshness.py
 
 Timestamps are compared and printed in UTC regardless of the database session
 timezone, so the ages are stable.
+
+### Dependency probes (Issue #70)
+
+`/api/admin/health`'s `checks.kurumi` asks the endpoint the client actually
+reads — `{KURUMI_API_URL}/api/stock/{symbol}/overview`, built by the same helper
+as `company_name.fetch_from_kurumi`, so the probe cannot drift from the client
+path again. A base URL that resolves back to FinCal itself (`localhost` /
+`127.0.0.1` on `PORT`, or an unset value) is **not** probed and reported as
+`{"status": "degraded", "error_code": "dependency_not_configured"}`: FinCal
+answers its own port, so such a probe could only ever "succeed". An unreachable
+upstream (refused, timed out or 404) is `degraded` with
+`error_code=kurumi_unreachable`. `scripts/deploy.sh` prints the same verdict
+from inside the container and raises `ACTION REQUIRED (Issue #70)` when
+`KURUMI_API_URL` is unset there or points at FinCal itself.
 
 ## Tech Stack
 

@@ -10,6 +10,9 @@ runs never re-hit the upstream providers for the same symbol.
 
 Issue #4: returns NameResult with error metadata.
 Issue #6: uses unified provider_client for timeouts and error classification.
+Issue #70: the URL the health probe asks and the URL ``fetch_from_kurumi``
+reads come from one place (``kurumi_overview_url``), and a base URL that
+resolves back to FinCal itself is reported as not configured rather than probed.
 """
 from __future__ import annotations
 
@@ -53,9 +56,64 @@ def kurumi_symbol(symbol: str, market: str) -> str:
     return f"{symbol}.US"
 
 
+def kurumi_base_url() -> str:
+    """Configured Kurumi base URL without a trailing slash (Issue #70).
+
+    Single source for both the client path and the health probe: they used to
+    diverge (`fetch_from_kurumi` asked for ``/api/stock/{symbol}/overview`` while
+    the probe asked FinCal itself for ``/api/config``).
+    """
+    return (config.KURUMI_API_URL or "").strip().rstrip("/")
+
+
+def kurumi_overview_url(symbol: str, market: str) -> str:
+    """URL of the Kurumi overview endpoint FinCal actually reads."""
+    return f"{kurumi_base_url()}/api/stock/{kurumi_symbol(symbol, market)}/overview"
+
+
+# Symbol used by ``probe_kurumi``. It must be one the upstream always knows, so
+# that a 404 means "this base URL is not Kurumi" rather than "no such stock".
+KURUMI_PROBE_SYMBOL = "0700.HK"
+KURUMI_PROBE_MARKET = "HK"
+
+# Language-neutral probe verdicts (Issue #70).
+ERROR_DEPENDENCY_NOT_CONFIGURED = "dependency_not_configured"
+ERROR_KURUMI_UNREACHABLE = "kurumi_unreachable"
+
+
+def probe_kurumi(symbol: str = KURUMI_PROBE_SYMBOL,
+                 market: str = KURUMI_PROBE_MARKET) -> dict:
+    """Probe the Kurumi dependency the way the client uses it (Issue #70).
+
+    Returns ``{"status": ..., "error_code": ...}`` — never a credential or an
+    upstream message. A base URL that resolves back to FinCal's own port is
+    reported as ``dependency_not_configured`` instead of being called: the
+    service answers its own port, so such a probe could only ever "succeed".
+    """
+    if config.kurumi_target_is_self():
+        return {"status": "degraded", "error_code": ERROR_DEPENDENCY_NOT_CONFIGURED}
+    try:
+        name = fetch_from_kurumi(symbol, market)
+    except ProviderError as exc:
+        return {
+            "status": "degraded",
+            "error_code": ERROR_KURUMI_UNREACHABLE,
+            "error": exc.error_code,
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "status": "degraded",
+            "error_code": ERROR_KURUMI_UNREACHABLE,
+            "error": type(exc).__name__,
+        }
+    if not name:
+        return {"status": "degraded", "error_code": ERROR_KURUMI_UNREACHABLE}
+    return {"status": "healthy"}
+
+
 def fetch_from_kurumi(symbol: str, market: str) -> str:
     """Query Kurumi /api/stock/{symbol}/overview. Raises ProviderError on failure."""
-    url = f"{config.KURUMI_API_URL}/api/stock/{kurumi_symbol(symbol, market)}/overview"
+    url = kurumi_overview_url(symbol, market)
     try:
         req = urllib.request.Request(url, headers={"Accept": "application/json"})
         with urllib.request.urlopen(req, timeout=_KURUMI_CFG.timeout) as resp:

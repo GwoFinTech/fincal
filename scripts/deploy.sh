@@ -145,4 +145,28 @@ if [ "$READY" != "ready" ]; then
     exit 1
 fi
 
+# Dependency-address gate (Issue #70).  The Kurumi probe used to fetch FinCal's
+# own `/api/config` because KURUMI_API_URL defaults to http://localhost:8000 —
+# inside the container that is this service, so the "external dependency" check
+# could never fail, and the variable was documented nowhere.  Ask the running
+# container for the verdict and its address (warn only: repointing the address
+# is a host/network decision).
+echo "=== Kurumi dependency address (Issue #70) ==="
+KURUMI_VERDICT=$(docker exec fincal python -c "
+import json, os
+from app.company_name import probe_kurumi
+from app.config import PORT
+result = probe_kurumi()
+result['KURUMI_API_URL'] = os.environ.get('KURUMI_API_URL') or '<unset>'
+result['PORT'] = PORT
+print(json.dumps(result))
+" 2>/dev/null || echo '{}')
+echo "probe      : $KURUMI_VERDICT"
+if ! printf '%s' "$KURUMI_VERDICT" | grep -q '"status": "healthy"'; then
+    echo "ACTION REQUIRED (Issue #70): set KURUMI_API_URL in $DST.env to an address the container can reach"
+    echo "  unset or self-referencing => the dependency probe reports dependency_not_configured,"
+    echo "  and a real Kurumi outage would still be reported as such (no false healthy)."
+    echo "  verify with: docker exec fincal python -c \"from app.company_name import probe_kurumi; print(probe_kurumi())\""
+fi
+
 echo "=== Done — fincal $COMMIT deployed and ready ==="

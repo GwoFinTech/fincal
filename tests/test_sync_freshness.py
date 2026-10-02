@@ -426,7 +426,13 @@ class HealthIntegrationTests(TestCase):
         ok_response = mock.MagicMock(status=200)
         ok_response.__enter__ = lambda self: ok_response
         ok_response.__exit__ = lambda self, *exc: False
-        with mock.patch.object(db, "db_cursor", _db_cursor), \
+        ok_response.read.return_value = b'{"name": "Tencent"}'
+        # Issue #70: the Kurumi probe now rejects a base URL that resolves back
+        # to FinCal's own port (which is what the shipped default refers to
+        # inside the container), so the fixture has to name a reachable,
+        # non-self dependency for this test to be about freshness at all.
+        with mock.patch.object(config, "KURUMI_API_URL", "http://kurumi-api:8000"), \
+                mock.patch.object(db, "db_cursor", _db_cursor), \
                 mock.patch("socket.create_connection", mock.MagicMock()), \
                 mock.patch("urllib.request.urlopen", mock.MagicMock(return_value=ok_response)), \
                 mock.patch("subprocess.run", ok_process):
