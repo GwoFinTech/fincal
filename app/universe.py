@@ -211,8 +211,8 @@ def invalidate_symbol_universe() -> None:
     try:
         # Owned by the API router, which knows which response caches embed the
         # universe; imported lazily to keep this module import-cycle free.
-        from .routers.api import invalidate_universe_caches
+        from .routers.api import invalidate_calendar_caches
 
-        invalidate_universe_caches()
+        invalidate_calendar_caches()
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("derived cache invalidation failed: %s", exc)

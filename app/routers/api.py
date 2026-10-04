@@ -25,12 +25,17 @@ router = APIRouter(prefix="/api", tags=["api"])
 _earnings_cache = LayerCache(default_ttl=120.0, stale_ttl=1800.0)
 
 
-def invalidate_universe_caches() -> None:
-    """Drop the response caches that embed the symbol universe (Issue #58).
+def invalidate_calendar_caches() -> None:
+    """Drop the cached ``/api/earnings`` responses (Issues #58, #72).
 
-    Called by :func:`app.universe.invalidate_symbol_universe` after an admin
-    watchlist mutation: the universe change alone would still be masked by this
-    response cache until its TTL expired.
+    Two writers change the symbol set a cached default-calendar response was
+    built from, and both must be visible on the next request instead of after
+    the 120s TTL — the cached body alone would keep the old set:
+
+    * :func:`app.universe.invalidate_symbol_universe` after an admin watchlist
+      mutation (the universe changed, Issue #58);
+    * the user watchlist write paths below (the default view folds the caller's
+      own watchlist symbols in, Issue #72).
     """
     _earnings_cache.invalidate()
 
@@ -97,6 +102,11 @@ def api_add_watchlist(symbol: str, market: str = "US", user=Depends(get_current_
         row = cur.fetchone()
     from .ical import invalidate_ical_cache
     invalidate_ical_cache(fincal_user.get("ical_token"))
+    # The default calendar view folds this user's own watchlist into its symbol
+    # set (see _fetch below), so the response cached for the caller has to go as
+    # well — the watchlist page reads live and would otherwise disagree with the
+    # calendar about the symbol just added for up to 120s (Issue #72).
+    invalidate_calendar_caches()
     return dict(row) if row else {"status": "already_exists"}
 
 
@@ -113,6 +123,9 @@ def api_remove_watchlist(symbol: str, market: str = "US", user=Depends(get_curre
         )
     from .ical import invalidate_ical_cache
     invalidate_ical_cache(fincal_user.get("ical_token"))
+    # Same reason as in api_add_watchlist: a removed symbol must not linger on
+    # the calendar (Issue #72).
+    invalidate_calendar_caches()
     return {"status": "removed"}
 
 
@@ -138,6 +151,9 @@ def api_earnings(
         end = date.today() + timedelta(days=config.CALENDAR_FORWARD_DAYS)
 
     cache_key = f"earnings:{start}:{end}:{watchlistOnly}:{fincal_user['id']}"
+    # The key is per user, so any writer that changes this user's symbol set must
+    # drop it (invalidate_calendar_caches) or the calendar keeps the old body
+    # (Issue #72).
 
     if watchlistOnly:
         with db.db_cursor() as cur:

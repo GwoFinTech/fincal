@@ -8,7 +8,8 @@ up.  These tests pin the properties the fix has to hold:
 
 1. importing ``app.earnings`` reads nothing;
 2. an upstream change lands without a restart (TTL / explicit invalidation);
-3. an admin watchlist write is visible on the very next request;
+3. an admin watchlist write is visible on the very next request — and a user's
+   own watchlist write is too (Issue #72);
 4. a startup-time degradation neither sticks nor hides;
 5. the ``/api/popular`` contract is unchanged and TTL-internal reads hit the
    source only once.
@@ -93,6 +94,70 @@ class _FakeConn:
 
     def __enter__(self):
         return _FakeCursor()
+
+    def __exit__(self, *a):
+        return False
+
+
+class _WatchlistState:
+    """In-memory stand-in for the ``watchlist`` table."""
+
+    def __init__(self, rows=()):
+        self.rows = [(symbol, market) for symbol, market in rows]
+
+
+class _WatchlistCursor:
+    """Fake cursor covering the statements the watchlist write paths issue.
+
+    ``INSERT INTO users`` (``ensure_user``) and anything else answer with the
+    superset row, like :class:`_FakeCursor` does.
+    """
+
+    rowcount = 1
+
+    def __init__(self, state):
+        self.state = state
+        self._rows = []
+        self._row = dict(_ROW)
+
+    def execute(self, sql, params=()):
+        statement = " ".join(str(sql).split())
+        if statement.startswith("INSERT INTO watchlist"):
+            _, symbol, market = params
+            if (symbol, market) not in self.state.rows:
+                self.state.rows.append((symbol, market))
+            self._row = {"symbol": symbol, "market": market}
+        elif statement.startswith("DELETE FROM watchlist"):
+            _, symbol, market = params
+            self.state.rows = [r for r in self.state.rows if r != (symbol, market)]
+            self._row = None
+        elif "FROM watchlist" in statement:
+            self._rows = [{"symbol": s, "market": m} for s, m in self.state.rows]
+
+    def fetchall(self):
+        return list(self._rows)
+
+    def fetchone(self):
+        return self._row
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class _WatchlistConn:
+    """Connection handing cursors to one shared watchlist state."""
+
+    def __init__(self, state):
+        self.state = state
+
+    def cursor(self, **kw):
+        return _WatchlistCursor(self.state)
+
+    def __enter__(self):
+        return _WatchlistCursor(self.state)
 
     def __exit__(self, *a):
         return False
@@ -257,6 +322,61 @@ def test_admin_watchlist_write_is_visible_without_a_restart(monkeypatch):
             assert client.delete("/api/admin/watchlist/1").status_code == 200
             assert client.get("/api/earnings?watchlistOnly=false").status_code == 200
             assert "XYZ" not in captured["symbols"]
+    finally:
+        app.dependency_overrides = {}
+        api_router._earnings_cache.invalidate()
+
+
+# ── Criterion 3 / Issue #72: a user's own watchlist write is visible at once ──
+
+def test_user_watchlist_write_is_visible_on_the_next_calendar_request(monkeypatch):
+    """The default calendar folds the caller's watchlist into its symbol set.
+
+    The user write paths invalidated only the iCal cache, so the per-user
+    ``/api/earnings`` response kept the pre-write set for up to 120s: the
+    watchlist page (read live) said "added" while the calendar still lacked the
+    symbol — and a removed symbol lingered the same way (Issue #72).
+    """
+    source = _FakeSource(["AAPL.US"])
+    _install_universe(monkeypatch, source, ttl=120.0)
+    api_router._earnings_cache.invalidate()
+
+    state = _WatchlistState([("AAPL", "US")])
+    captured = {}
+
+    def _fake_fetch(*, symbols=None, markets=None, start=None, end=None):
+        captured["symbols"] = list(symbols or [])
+        return []
+
+    app.dependency_overrides = {get_current_user: lambda: dict(ADMIN)}
+    try:
+        with patch.object(db, "db_cursor", lambda: _WatchlistConn(state)), \
+                patch("app.earnings.fetch_earnings_from_db", _fake_fetch), \
+                patch("app.routers.ical.invalidate_ical_cache") as ical_invalidate:
+            client = TestClient(app, raise_server_exceptions=False)
+
+            assert client.get("/api/earnings?watchlistOnly=false").status_code == 200
+            assert "NEW" not in captured["symbols"]
+
+            assert client.post("/api/watchlist?symbol=NEW&market=US").status_code == 200
+            assert ("NEW", "US") in state.rows
+
+            # A cached body would still answer AAPL: the write must drop it.
+            assert client.get("/api/earnings?watchlistOnly=false").status_code == 200
+            assert "NEW" in captured["symbols"], \
+                "the user watchlist write was masked by the response cache"
+            assert ical_invalidate.called, "the iCal invalidation must stay in place"
+
+            # The uncached view is unaffected and agrees with the calendar.
+            assert client.get("/api/earnings?watchlistOnly=true").status_code == 200
+            assert sorted(captured["symbols"]) == ["AAPL", "NEW"]
+
+            # Removing it must disappear from the calendar too, not linger.
+            state.rows = [("AAPL", "US")]
+            assert client.delete("/api/watchlist?symbol=NEW&market=US").status_code == 200
+            assert client.get("/api/earnings?watchlistOnly=false").status_code == 200
+            assert "NEW" not in captured["symbols"], \
+                "a removed symbol must not linger on the calendar"
     finally:
         app.dependency_overrides = {}
         api_router._earnings_cache.invalidate()
