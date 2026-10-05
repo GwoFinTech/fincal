@@ -87,12 +87,14 @@ def _attributed_amount(label: str, value, currency: str | None) -> str:
 
 
 def _event_moment(event: dict) -> datetime | None:
-    """Parse the row's write timestamp (``updated_at`` / ``created_at``).
+    """Parse the row's write timestamp (``updated_at``).
 
     Returns ``None`` when the event carries no usable timestamp, so callers can
     pick their own deterministic fallback.  Naive timestamps are read as UTC.
+    ``created_at`` used to be read as a fallback, but ``earnings`` has no such
+    column (Issue #73), so it could only ever be ``None``.
     """
-    value = event.get("updated_at") or event.get("created_at")
+    value = event.get("updated_at")
     if isinstance(value, datetime):
         return value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
     if isinstance(value, str):

@@ -186,7 +186,9 @@ def ical_feed(
             headers={"Retry-After": "30"},
         )
     etag = '"' + sha256(ical_content.encode("utf-8")).hexdigest() + '"'
-    timestamps = [e.get("updated_at") or e.get("created_at") for e in earnings]
+    # ``earnings`` has no ``created_at`` column, so the old fallback was dead code
+    # (Issue #73): the feed's validator is the row's write timestamp or nothing.
+    timestamps = [e.get("updated_at") for e in earnings]
     timestamps = [value for value in timestamps if value is not None]
     latest = max(timestamps) if timestamps else None
     if isinstance(latest, datetime):

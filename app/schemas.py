@@ -58,7 +58,15 @@ class SearchItem(BaseModel):
 
 # ── Earnings ───────────────────────────────────────────────────────
 
+# Contract (Issue #73): this model must declare every field the read path
+# returns — FastAPI drops undeclared row fields silently, which is how
+# ``estimate_as_of`` / ``actual_as_of`` / ``consensus_normalized_net_income``
+# went missing from ``/api/earnings`` while the read SQL, both exports and the
+# CSV header list kept carrying them.  ``tests/test_response_contracts.py``
+# asserts the read path and this model expose the same field set, in both
+# directions, so the next drift turns red instead of shipping.
 class EarningItem(BaseModel):
+    """One earnings-calendar row."""
     id: int
     symbol: str
     market: str
@@ -76,7 +84,13 @@ class EarningItem(BaseModel):
     date_source: str | None = None
     date_status: str | None = None
     estimate_source: str | None = None
+    # When each side of the pair was last collected (Issue #73). The writer has
+    # maintained both columns since #61 and both exports have carried them, but
+    # they were missing from this model — hence absent from every /api/earnings
+    # response, i.e. "is this estimate a months-old snapshot?" was unanswerable.
+    estimate_as_of: datetime | None = None
     actual_source: str | None = None
+    actual_as_of: datetime | None = None
     # Attribution of the estimate/actual pair (Issue #61): which currency and
     # which base each side is stated in, and — when they are not comparable — the
     # language-independent reason the UI must render "—" instead of a surplus.
@@ -90,9 +104,9 @@ class EarningItem(BaseModel):
     consensus_revenue: float | None = None
     consensus_ebit: float | None = None
     consensus_net_income: float | None = None
+    consensus_normalized_net_income: float | None = None
     consensus_currency: str | None = None
     consensus_fetched_at: datetime | None = None
-    created_at: datetime | None = None
     updated_at: datetime | None = None
 
 class InstitutionRating(BaseModel):

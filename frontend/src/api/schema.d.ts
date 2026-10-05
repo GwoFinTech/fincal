@@ -650,7 +650,17 @@ export interface components {
             freshness?: components["schemas"]["FreshnessResponse"] | null;
             universe?: components["schemas"]["UniverseStatus"] | null;
         };
-        /** EarningItem */
+        /**
+         * EarningItem
+         * @description One calendar row, as the read path returns it.
+         *
+         *     The field set is an exact mirror of what ``app.earnings.fetch_earnings_from_db``
+         *     produces (the ``earnings`` columns, the ``consensus_*`` aliases and
+         *     ``comparison_unavailable_reason``): a field the read SQL returns but this model
+         *     omits is *silently dropped* by FastAPI, so the same row would be visible in
+         *     ``/api/export`` and invisible in ``/api/earnings`` (Issues #44, #47, #73).
+         *     ``tests/test_response_contracts.py`` asserts the two sets are equal.
+         */
         EarningItem: {
             /** Id */
             id: number;
@@ -698,8 +708,12 @@ export interface components {
             date_status?: string | null;
             /** Estimate Source */
             estimate_source?: string | null;
+            /** Estimate As Of */
+            estimate_as_of?: string | null;
             /** Actual Source */
             actual_source?: string | null;
+            /** Actual As Of */
+            actual_as_of?: string | null;
             /** Estimate Currency */
             estimate_currency?: string | null;
             /** Estimate Basis */
@@ -720,12 +734,12 @@ export interface components {
             consensus_ebit?: number | null;
             /** Consensus Net Income */
             consensus_net_income?: number | null;
+            /** Consensus Normalized Net Income */
+            consensus_normalized_net_income?: number | null;
             /** Consensus Currency */
             consensus_currency?: string | null;
             /** Consensus Fetched At */
             consensus_fetched_at?: string | null;
-            /** Created At */
-            created_at?: string | null;
             /** Updated At */
             updated_at?: string | null;
         };

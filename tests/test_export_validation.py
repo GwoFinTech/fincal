@@ -129,8 +129,9 @@ def test_export_valid_json_returns_200():
 
 def test_export_csv_headers_include_provenance_and_consensus():
     """CSV export must expose provenance/status + consensus_* columns, matching
-    the JSON export and the EarningItem contract (Issue #47)."""
+    the JSON export and the EarningItem contract (Issues #47, #73)."""
     sample = [{
+        "id": 1,
         "symbol": "AAPL", "market": "US", "company_name": "Apple Inc.",
         "report_date": "2026-07-30", "report_type": "Q",
         "fiscal_year": 2026, "fiscal_quarter": 3,
@@ -141,6 +142,8 @@ def test_export_csv_headers_include_provenance_and_consensus():
         "estimate_source": "longbridge", "estimate_as_of": None,
         "estimate_currency": "USD", "estimate_basis": None,
         "actual_source": "futu", "actual_as_of": None,
+        "actual_currency": "USD", "actual_basis": None,
+        "comparison_unavailable_reason": None,
         "updated_at": "2026-07-30T00:00:00Z",
         "consensus_currency": "USD", "consensus_eps_gaap": 1.50,
         "consensus_eps_adjusted": 1.52, "consensus_revenue": 96000,
@@ -167,12 +170,20 @@ def test_export_csv_headers_include_provenance_and_consensus():
               "consensus_fetched_at"):
         assert f in headers, f"CSV header missing '{f}': {header_line}"
 
-    # CSV field set must equal the JSON field set (Issue #47 criterion 2).
+    # CSV field set must equal the JSON field set (Issue #47 criterion 2) *and*
+    # the EarningItem contract (Issue #73 criterion 3): the row that reaches both
+    # exports is the row the calendar JSON model has to be able to express.
     json_list = json.loads(json_resp.text)
     assert json_list, "expected a non-empty JSON export"
     expected = set(json_list[0].keys())
     assert set(headers) == expected, (
         f"CSV header set {sorted(headers)} != JSON field set {sorted(expected)}"
+    )
+    from app.schemas import EarningItem
+    assert set(headers) == set(EarningItem.model_fields), (
+        "export field set != EarningItem contract:\n"
+        f"  in export only : {sorted(set(headers) - set(EarningItem.model_fields))}\n"
+        f"  in model only  : {sorted(set(EarningItem.model_fields) - set(headers))}"
     )
 
 
