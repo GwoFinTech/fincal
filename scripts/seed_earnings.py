@@ -67,12 +67,16 @@ def seed_demo_data():
         ("1398.HK", "HK", "ICBC", "2026-08-30", "Q", 2026, 2, None, None, None, None, None),
         ("3988.HK", "HK", "Bank of China", "2026-08-29", "Q", 2026, 2, None, None, None, None, None),
 
-        # Some June 2026 entries for immediate visibility
+        # Some June 2026 entries for immediate visibility.
+        # Each of these carries a fiscal period of its own: the same symbol's
+        # July/September row above already owns the later quarter, and
+        # ``idx_earnings_fiscal_identity`` rejects a second confirmed row for the
+        # same period (Issue #74).
         ("AAPL", "US", "Apple Inc.", "2026-06-10", "Q", 2026, 2, 1.45, None, 95000, None, "after"),
         ("NVDA", "US", "NVIDIA Corp.", "2026-06-11", "Q", 2026, 1, 0.85, None, 43000, None, "after"),
-        ("TSLA", "US", "Tesla Inc.", "2026-06-12", "Q", 2026, 2, 0.62, None, 25000, None, "after"),
-        ("MSFT", "US", "Microsoft Corp.", "2026-06-18", "Q", 2026, 4, 2.95, None, 64000, None, "after"),
-        ("GOOGL", "US", "Alphabet Inc.", "2026-06-20", "Q", 2026, 2, 1.89, None, 74000, None, "after"),
+        ("TSLA", "US", "Tesla Inc.", "2026-06-12", "Q", 2026, 1, 0.62, None, 25000, None, "after"),
+        ("MSFT", "US", "Microsoft Corp.", "2026-06-18", "Q", 2026, 3, 2.95, None, 64000, None, "after"),
+        ("GOOGL", "US", "Alphabet Inc.", "2026-06-20", "Q", 2026, 1, 1.89, None, 74000, None, "after"),
         ("0700.HK", "HK", "Tencent", "2026-06-16", "Q", 2026, 1, None, None, None, None, None),
     ]
 
