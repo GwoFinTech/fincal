@@ -178,6 +178,120 @@ def parse_report_date(date_str: str) -> str | None:
         return None
 
 
+_DISCLOSURE_PERIOD_TYPES = {"saf", "af"}
+_VALID_PERIOD_TYPES = {"qf", "3q"}
+
+
+def _parse_int(value) -> int | None:
+    try:
+        return int(value) if value not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _raw_fiscal_period(ext: dict, report_date: str, market: str) -> tuple[int | None, int | None, str]:
+    """Read a Longbridge fiscal period without conflating event sequences."""
+    period_type = str(ext.get("period_type") or "").strip().lower()
+    fiscal_quarter = _parse_int(ext.get("period"))
+    if fiscal_quarter not in (1, 2, 3, 4):
+        fiscal_quarter = None
+
+    fiscal_year = _parse_int(ext.get("fiscal_year") or ext.get("year"))
+    if fiscal_year is None and fiscal_quarter is not None:
+        rd_month = int(report_date[5:7])
+        if market == "US":
+            if fiscal_quarter <= 2:
+                fiscal_year = int(report_date[:4])
+            else:
+                fiscal_year = int(report_date[:4]) - 1 if rd_month <= 6 else int(report_date[:4])
+        else:
+            if fiscal_quarter in (1, 2):
+                fiscal_year = int(report_date[:4])
+            else:
+                fiscal_year = int(report_date[:4]) - 1 if rd_month <= 3 else int(report_date[:4])
+    return fiscal_year, fiscal_quarter, period_type
+
+
+def build_fiscal_period_index(pages: list[dict]) -> dict[tuple[str, str], list[dict]]:
+    """Index canonical qf/3q events for mapping disclosure-only events.
+
+    Longbridge's ``saf`` and ``af`` events are disclosure sequences, not a second
+    fiscal-quarter numbering scheme.  The index is built before writing so a
+    disclosure event can be ignored when its canonical qf event is present.
+    """
+    index: dict[tuple[str, str], list[dict]] = {}
+    for page in pages:
+        for info in page.get("infos", []):
+            symbol, market = from_lb_counter_id(info.get("counter_id", ""))
+            report_date = parse_report_date(info.get("date", ""))
+            if not symbol or not report_date:
+                continue
+            ext = info.get("ext", {}).get("financial_report", {})
+            fiscal_year, fiscal_quarter, period_type = _raw_fiscal_period(ext, report_date, market)
+            if fiscal_year is None or fiscal_quarter is None:
+                continue
+            if period_type and period_type not in _VALID_PERIOD_TYPES:
+                continue
+            index.setdefault((symbol, market), []).append({
+                "symbol": symbol,
+                "market": market,
+                "fiscal_year": fiscal_year,
+                "fiscal_quarter": fiscal_quarter,
+                "report_date": report_date,
+            })
+    return index
+
+
+def fiscal_period_for_event(symbol: str, market: str, report_date: str, ext: dict,
+                            canonical_periods: dict[tuple[str, str], list[dict]]) -> tuple[int | None, int | None, bool]:
+    """Return ``(FY, quarter, skip)`` using Longbridge event-sequence semantics.
+
+    ``saf``/``af`` are ignored when their canonical qf/3q event is present; this
+    prevents a disclosure event with ``period=4`` from creating a false Q4 row.
+    If no canonical event exists, retain the date but leave its fiscal identity
+    unset rather than inventing a quarter.
+    """
+    fiscal_year, fiscal_quarter, period_type = _raw_fiscal_period(ext, report_date, market)
+    if period_type in _DISCLOSURE_PERIOD_TYPES:
+        candidates = [row for row in canonical_periods.get((symbol, market), [])
+                      if fiscal_year is None or row["fiscal_year"] == fiscal_year]
+        if candidates:
+            event_date = date.fromisoformat(report_date)
+            nearest = min(candidates, key=lambda row: abs(
+                (date.fromisoformat(row["report_date"]) - event_date).days
+            ))
+            logger.debug(
+                "ignoring Longbridge %s disclosure event %s.%s %s near FY%s Q%s",
+                period_type, symbol, market, report_date,
+                nearest["fiscal_year"], nearest["fiscal_quarter"],
+            )
+            return None, None, True
+        logger.warning(
+            "Longbridge %s event has no canonical qf/3q match: %s.%s %s FY%s period=%s; "
+            "keeping date without fiscal identity",
+            period_type, symbol, market, report_date, fiscal_year, fiscal_quarter,
+        )
+        return None, None, False
+
+    if period_type and period_type not in _VALID_PERIOD_TYPES:
+        logger.warning(
+            "ignoring unsupported Longbridge period_type=%s for %s.%s %s",
+            period_type, symbol, market, report_date,
+        )
+        return None, None, False
+
+    rows = canonical_periods.get((symbol, market), [])
+    if fiscal_year is not None and fiscal_quarter is not None and not fiscal.fiscal_label_consistent(
+        symbol, market, fiscal_year, fiscal_quarter, report_date, rows
+    ):
+        logger.warning(
+            "rejecting inconsistent Longbridge fiscal label %s.%s %s FY%s Q%s",
+            symbol, market, report_date, fiscal_year, fiscal_quarter,
+        )
+        return None, None, False
+    return fiscal_year, fiscal_quarter, False
+
+
 def dedupe_batch(rows: list[tuple]) -> list[tuple]:
     """Collapse provider duplicates before a bulk UPSERT.
 
@@ -349,6 +463,7 @@ def sync_earnings(run_id: int, stats: SyncStats | None = None) -> SyncStats:
         logger.info(f"=== Fetching {market} earnings [{start} → {end}] ===")
         pages = fetch_calendar(market, start, end)
         logger.info(f"  Total pages received: {len(pages)}")
+        canonical_periods = build_fiscal_period_index(pages)
 
         batch = []
         for page in pages:
@@ -371,36 +486,11 @@ def sync_earnings(run_id: int, stats: SyncStats | None = None) -> SyncStats:
                 currency = normalize_currency(info.get("currency"))
 
                 ext = info.get("ext", {}).get("financial_report", {})
-                fiscal_quarter = None
-                try:
-                    fq = int(ext.get("period", "0") or "0")
-                    if 1 <= fq <= 4:
-                        fiscal_quarter = fq
-                except (ValueError, TypeError):
-                    pass
-
-                # Try to get fiscal_year from API response
-                fiscal_year = None
-                fy_from_api = ext.get("fiscal_year") or ext.get("year")
-                if fy_from_api:
-                    try:
-                        fiscal_year = int(fy_from_api)
-                    except (ValueError, TypeError):
-                        pass
-
-                # Fallback: heuristic from report date
-                if not fiscal_year and fiscal_quarter:
-                    rd_month = int(report_date[5:7])
-                    if mkt == "US":
-                        if fiscal_quarter <= 2:
-                            fiscal_year = int(report_date[:4])
-                        else:
-                            fiscal_year = int(report_date[:4]) - 1 if rd_month <= 6 else int(report_date[:4])
-                    else:
-                        if fiscal_quarter in (1, 2):
-                            fiscal_year = int(report_date[:4])
-                        else:
-                            fiscal_year = int(report_date[:4]) - 1 if rd_month <= 3 else int(report_date[:4])
+                fiscal_year, fiscal_quarter, skip_event = fiscal_period_for_event(
+                    symbol, mkt, report_date, ext, canonical_periods
+                )
+                if skip_event:
+                    continue
 
                 batch.append((
                     symbol, mkt, company_name, report_date, "Q",

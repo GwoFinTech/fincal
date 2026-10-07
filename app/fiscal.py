@@ -147,6 +147,44 @@ def sort_key(row) -> tuple:
     )
 
 
+def fiscal_label_consistent(symbol, market, fiscal_year, fiscal_quarter,
+                            report_date, existing_rows) -> bool:
+    """Return whether a fiscal label preserves date order for one symbol/year.
+
+    A higher fiscal quarter must not be dated before a lower quarter of the same
+    fiscal year, and a lower quarter must not be dated after a higher one.  The
+    check is deliberately conservative: incomplete rows or a different symbol,
+    market, or fiscal year do not provide evidence to reject the candidate.
+    """
+    candidate = report_date_of({}, report_date)
+    try:
+        candidate_quarter = int(fiscal_quarter)
+        candidate_year = int(fiscal_year)
+    except (TypeError, ValueError):
+        return True
+    if candidate is None or not symbol or not market:
+        return True
+
+    for row in existing_rows or ():
+        if row.get("symbol") != symbol or row.get("market") != market:
+            continue
+        try:
+            row_year = int(row.get("fiscal_year"))
+            row_quarter = int(row.get("fiscal_quarter"))
+        except (TypeError, ValueError):
+            continue
+        if row_year != candidate_year or row_quarter == candidate_quarter:
+            continue
+        row_date = report_date_of(row)
+        if row_date is None:
+            continue
+        if row_quarter < candidate_quarter and row_date > candidate:
+            return False
+        if row_quarter > candidate_quarter and row_date < candidate:
+            return False
+    return True
+
+
 def collapse_fiscal_duplicates(rows: list[dict]) -> list[dict]:
     """Collapse rows sharing a fiscal period down to one authoritative row.
 
