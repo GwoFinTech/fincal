@@ -55,13 +55,77 @@ def test_qf_period_remains_the_canonical_fiscal_identity():
     assert result == (2026, 2, False)
 
 
-def test_unmatched_disclosure_keeps_date_but_not_invented_identity():
+def test_unmatched_half_year_disclosure_stays_the_half_year_event():
+    """1347.HK publishes only a ``saf`` event: that *is* its interim result."""
     result = sync_earnings.fiscal_period_for_event(
         "1347.HK", "HK", "2026-08-26",
-        {"period": "4", "period_type": "saf", "fiscal_year": "2026"},
+        {"period": "4", "period_type": "saf", "fiscal_year": "2027"},
         {},
     )
+    assert result == (2026, 2, False)
+
+
+def test_annual_report_without_a_release_event_keeps_its_quarter():
+    """HSBC's annual result is published as ``af`` with no ``qf/4`` to pair."""
+    canonical = {("0005.HK", "HK"): [
+        {"symbol": "0005.HK", "market": "HK", "fiscal_year": 2026,
+         "fiscal_quarter": 3, "report_date": "2026-10-27"},
+    ]}
+    result = sync_earnings.fiscal_period_for_event(
+        "0005.HK", "HK", "2027-02-23",
+        {"period": "4", "period_type": "af", "fiscal_year": "2026"},
+        canonical,
+    )
+    assert result == (2026, 4, False)
+
+
+def test_disclosure_ignores_its_own_fiscal_year_when_matching_the_release():
+    """8033.HK's sav event claims FY2027 for an August-2026 interim."""
+    canonical = {("8033.HK", "HK"): [
+        {"symbol": "8033.HK", "market": "HK", "fiscal_year": 2026,
+         "fiscal_quarter": 2, "report_date": "2026-08-24"},
+    ]}
+    result = sync_earnings.fiscal_period_for_event(
+        "8033.HK", "HK", "2026-08-21",
+        {"period": "4", "period_type": "saf", "fiscal_year": "2027"},
+        canonical,
+    )
+    assert result == (None, None, True)
+
+
+def test_a_release_months_away_is_not_the_same_announcement():
+    """The disclosure keeps its own identity instead of matching a distant row."""
+    canonical = {("TEST.HK", "HK"): [
+        {"symbol": "TEST.HK", "market": "HK", "fiscal_year": 2026,
+         "fiscal_quarter": 2, "report_date": "2026-04-01"},
+    ]}
+    result = sync_earnings.fiscal_period_for_event(
+        "TEST.HK", "HK", "2026-08-20",
+        {"period": "4", "period_type": "saf", "fiscal_year": "2026"},
+        canonical,
+    )
+    assert result == (2026, 2, False)
+
+
+def test_disclosure_label_is_rejected_when_it_breaks_fiscal_order():
+    canonical = {("TEST.HK", "HK"): [
+        {"symbol": "TEST.HK", "market": "HK", "fiscal_year": 2026,
+         "fiscal_quarter": 3, "report_date": "2026-11-06"},
+    ]}
+    result = sync_earnings.fiscal_period_for_event(
+        "TEST.HK", "HK", "2026-11-20",
+        {"period": "4", "period_type": "saf", "fiscal_year": "2026"},
+        canonical,
+    )
     assert result == (None, None, False)
+
+
+def test_fiscal_year_is_derived_from_the_event_date_per_market():
+    assert sync_earnings._fiscal_year_for("HK", 2, "2026-08-26") == 2026
+    assert sync_earnings._fiscal_year_for("HK", 4, "2027-03-30") == 2026
+    assert sync_earnings._fiscal_year_for("US", 4, "2027-02-18") == 2026
+    assert sync_earnings._fiscal_year_for("US", 4, "2026-11-24") == 2026
+    assert sync_earnings._fiscal_year_for("US", 1, "2026-05-11") == 2026
 
 
 def test_fiscal_label_guard_rejects_quarter_before_lower_quarter():

@@ -228,6 +228,30 @@ DB_HOST=localhost python scripts/sync_earnings.py
 DB_HOST=localhost python scripts/predict_earnings.py
 ```
 
+### Longbridge event sequences (Issue #75)
+
+One company can appear several times on the same day in the Longbridge calendar.
+`ext.financial_report.period_type` tells the sequences apart, and only one of
+them encodes a fiscal quarter:
+
+- `qf` / `3q` — earnings release. `period` is the fiscal quarter (1–4) and is the
+  only value that becomes a fiscal identity.
+- `saf` — half-year report disclosure. Its `period` is *not* the quarter (a
+  half-year event is published as `period=4`), and its `fiscal_year` belongs to
+  the disclosure sequence. It normally follows the `qf` release of the same
+  quarter by 0–2 days.
+- `af` — annual report disclosure, with the same caveat. For many non-US names
+  this *is* the annual result event, with no separate `qf/4` event to pair with.
+
+`scripts/sync_earnings.py` therefore takes a disclosure's quarter from its
+sequence (`saf` → Q2, `af` → Q4) and its fiscal year from the event's own date.
+A disclosure whose quarter already has a release event within
+`DISCLOSURE_SAME_PERIOD_DAYS` (14) days is the same announcement and is skipped;
+one with no release event at all keeps the identity, because it is that period's
+only event. Reading `period` for `saf`/`af` is what previously labelled 394
+production rows "Q4" on an August date (a half-year event rendered as "same
+fiscal year Q4 before Q3").
+
 ### Weekly sync behavior
 
 The Longbridge sync is required. Futu is an optional enrichment source: before

@@ -1,7 +1,32 @@
 #!/usr/bin/env python3
 """Full sync of earnings data from Longbridge finance-calendar into fincal DB.
 Covers wide date ranges and uses pagination to get all records.
-Uses batch inserts for performance."""
+Uses batch inserts for performance.
+
+Longbridge event sequences (Issue #75)
+--------------------------------------
+One company has several event sequences in the same calendar, told apart by
+``ext.financial_report.period_type``:
+
+============  ==========================================================
+``qf``/``3q``  earnings release ("业绩公布").  ``period`` is the fiscal
+               quarter of the *report* (1–4), so it is the only sequence
+               whose ``period`` may become a fiscal identity.
+``saf``        half-year report disclosure ("半年报").  ``period`` is not
+               the quarter — a half-year event is published as ``period=4``
+               — and it normally follows the ``qf`` release of the same
+               period by 0–2 days.
+``af``         annual report disclosure ("年报").  Same caveat as ``saf``;
+               for many non-US names this *is* the annual result event,
+               with no separate ``qf/4`` event to pair with.
+============  ==========================================================
+
+Reading ``period`` for ``saf``/``af`` is what labelled 394 production rows
+"Q4" on an August date (a half-year event, rendered as "same fiscal year Q4
+before Q3").  The quarter of a disclosure therefore comes from its sequence
+(``saf`` → Q2, ``af`` → Q4) and its fiscal year from the event's own date,
+never from the disclosure's ``period``/``fiscal_year`` fields.
+"""
 import subprocess
 import json
 import logging
@@ -178,8 +203,17 @@ def parse_report_date(date_str: str) -> str | None:
         return None
 
 
-_DISCLOSURE_PERIOD_TYPES = {"saf", "af"}
+#: Disclosure sequences keyed to the fiscal quarter they disclose.  A half-year
+#: report is the second quarter and an annual report the fourth, whatever their
+#: ``period`` field says (Issue #75).
+_DISCLOSURE_QUARTERS = {"saf": 2, "af": 4}
+_DISCLOSURE_PERIOD_TYPES = frozenset(_DISCLOSURE_QUARTERS)
 _VALID_PERIOD_TYPES = {"qf", "3q"}
+
+#: A disclosure event this close to the release event of the quarter it
+#: discloses is the same announcement: the release already recorded the period,
+#: so writing the disclosure too would only duplicate the row.
+DISCLOSURE_SAME_PERIOD_DAYS = 14
 
 
 def _parse_int(value) -> int | None:
@@ -187,6 +221,30 @@ def _parse_int(value) -> int | None:
         return int(value) if value not in (None, "") else None
     except (TypeError, ValueError):
         return None
+
+
+def _fiscal_year_for(market: str, fiscal_quarter: int, report_date: str) -> int | None:
+    """Derive a quarter's fiscal year from the event's own date.
+
+    Fiscal years end in any month, but the calendar date of a quarter follows a
+    stable convention per market: a December year-end company reports Q1/Q2 of
+    the calendar year they fall in and Q3/Q4 out of the previous fiscal year,
+    while a June year-end company (common for US names) reports Q3/Q4 of the
+    previous fiscal year once the calendar has passed mid-year.  This is the
+    same mapping the calendar used before, now shared by every code path.
+    """
+    try:
+        year = int(report_date[:4])
+        month = int(report_date[5:7])
+    except (TypeError, ValueError, IndexError):
+        return None
+    if market == "US":
+        if fiscal_quarter <= 2:
+            return year
+        return year - 1 if month <= 6 else year
+    if fiscal_quarter in (1, 2):
+        return year
+    return year - 1 if month <= 3 else year
 
 
 def _raw_fiscal_period(ext: dict, report_date: str, market: str) -> tuple[int | None, int | None, str]:
@@ -198,18 +256,16 @@ def _raw_fiscal_period(ext: dict, report_date: str, market: str) -> tuple[int | 
 
     fiscal_year = _parse_int(ext.get("fiscal_year") or ext.get("year"))
     if fiscal_year is None and fiscal_quarter is not None:
-        rd_month = int(report_date[5:7])
-        if market == "US":
-            if fiscal_quarter <= 2:
-                fiscal_year = int(report_date[:4])
-            else:
-                fiscal_year = int(report_date[:4]) - 1 if rd_month <= 6 else int(report_date[:4])
-        else:
-            if fiscal_quarter in (1, 2):
-                fiscal_year = int(report_date[:4])
-            else:
-                fiscal_year = int(report_date[:4]) - 1 if rd_month <= 3 else int(report_date[:4])
+        fiscal_year = _fiscal_year_for(market, fiscal_quarter, report_date)
     return fiscal_year, fiscal_quarter, period_type
+
+
+def _day_distance(one: str | None, other: str | None) -> int | None:
+    """Absolute distance in days between two ISO dates, or None."""
+    try:
+        return abs((date.fromisoformat(str(one)) - date.fromisoformat(str(other))).days)
+    except (TypeError, ValueError):
+        return None
 
 
 def build_fiscal_period_index(pages: list[dict]) -> dict[tuple[str, str], list[dict]]:
@@ -217,7 +273,8 @@ def build_fiscal_period_index(pages: list[dict]) -> dict[tuple[str, str], list[d
 
     Longbridge's ``saf`` and ``af`` events are disclosure sequences, not a second
     fiscal-quarter numbering scheme.  The index is built before writing so a
-    disclosure event can be ignored when its canonical qf event is present.
+    disclosure event can be recognised as the announcement of a period that
+    already has its own release event.
     """
     index: dict[tuple[str, str], list[dict]] = {}
     for page in pages:
@@ -246,32 +303,55 @@ def fiscal_period_for_event(symbol: str, market: str, report_date: str, ext: dic
                             canonical_periods: dict[tuple[str, str], list[dict]]) -> tuple[int | None, int | None, bool]:
     """Return ``(FY, quarter, skip)`` using Longbridge event-sequence semantics.
 
-    ``saf``/``af`` are ignored when their canonical qf/3q event is present; this
-    prevents a disclosure event with ``period=4`` from creating a false Q4 row.
-    If no canonical event exists, retain the date but leave its fiscal identity
-    unset rather than inventing a quarter.
+    A ``saf``/``af`` event is the *disclosure* of a quarter: its own ``period``
+    and ``fiscal_year`` fields belong to the disclosure sequence and are ignored
+    (see the module docstring).  Its quarter comes from the sequence and its
+    fiscal year from the event date, so the row lands on the period the release
+    event already uses.
+
+    ``skip`` is returned when that period already has its release event within
+    :data:`DISCLOSURE_SAME_PERIOD_DAYS` days — the disclosure repeats a period
+    that is on the calendar, and writing it would duplicate the row.  When the
+    period has no release event at all (an ``af`` annual report with no ``qf``
+    counterpart, e.g. HSBC's annual result), the disclosure *is* that period's
+    event and keeps the identity, subject to the same ordering guard as any
+    other label.
     """
     fiscal_year, fiscal_quarter, period_type = _raw_fiscal_period(ext, report_date, market)
-    if period_type in _DISCLOSURE_PERIOD_TYPES:
-        candidates = [row for row in canonical_periods.get((symbol, market), [])
-                      if fiscal_year is None or row["fiscal_year"] == fiscal_year]
-        if candidates:
-            event_date = date.fromisoformat(report_date)
-            nearest = min(candidates, key=lambda row: abs(
-                (date.fromisoformat(row["report_date"]) - event_date).days
-            ))
-            logger.debug(
-                "ignoring Longbridge %s disclosure event %s.%s %s near FY%s Q%s",
+
+    if period_type in _DISCLOSURE_QUARTERS:
+        quarter = _DISCLOSURE_QUARTERS[period_type]
+        fiscal_year = _fiscal_year_for(market, quarter, report_date)
+        rows = canonical_periods.get((symbol, market), [])
+        for row in rows:
+            if row["fiscal_year"] != fiscal_year or row["fiscal_quarter"] != quarter:
+                continue
+            distance = _day_distance(row["report_date"], report_date)
+            if distance is not None and distance <= DISCLOSURE_SAME_PERIOD_DAYS:
+                logger.debug(
+                    "ignoring Longbridge %s disclosure event %s.%s %s: FY%s Q%s%s "
+                    "release already recorded on %s",
+                    period_type, symbol, market, report_date, fiscal_year, quarter,
+                    "" if distance == 0 else f" ({distance}d away)",
+                    row["report_date"],
+                )
+                return None, None, True
+        if fiscal_year is None:
+            logger.warning(
+                "Longbridge %s event has no derivable fiscal year: %s.%s %s; "
+                "keeping date without fiscal identity",
                 period_type, symbol, market, report_date,
-                nearest["fiscal_year"], nearest["fiscal_quarter"],
             )
-            return None, None, True
-        logger.warning(
-            "Longbridge %s event has no canonical qf/3q match: %s.%s %s FY%s period=%s; "
-            "keeping date without fiscal identity",
-            period_type, symbol, market, report_date, fiscal_year, fiscal_quarter,
-        )
-        return None, None, False
+            return None, None, False
+        if not fiscal.fiscal_label_consistent(
+            symbol, market, fiscal_year, quarter, report_date, rows
+        ):
+            logger.warning(
+                "rejecting inconsistent Longbridge %s fiscal label %s.%s %s FY%s Q%s",
+                period_type, symbol, market, report_date, fiscal_year, quarter,
+            )
+            return None, None, False
+        return fiscal_year, quarter, False
 
     if period_type and period_type not in _VALID_PERIOD_TYPES:
         logger.warning(
