@@ -1,20 +1,25 @@
 #!/usr/bin/env python3
-"""Read-only acceptance check for Issue #50 (production, run after the merge).
+"""Read-only acceptance check for Issue #50 (run inside the fincal container).
 
 Five checks, each printed with the evidence it is based on:
 
 1. duplicate confirmed fiscal periods == 0;
 2. the partial unique index ``idx_earnings_fiscal_identity`` exists;
-3. no estimate snapshot was lost and none is orphaned;
-4. ``GET /api/earnings`` returns one row per fiscal period, and the row for a
-   period that had a release + a disclosure carries the *release's* figures
-   (DEA FY2025 Q4 must show revenue 87,725,750 and not the 334,384,600 annual
-   total);
-5. ``GET /api/ical`` emits exactly as many events as the API emits rows for the
-   same window (the three outlets disagreed before the fix).
+3. no estimate snapshot was lost and none is orphaned (compared against the
+   pre-merge baseline passed as argv[1], a JSON file with ``snapshots``);
+4. ``GET /api/earnings`` (real HTTP, layer cache included) returns at most one
+   row per fiscal period, and a period that had a release plus a disclosure keeps
+   the *release's* figures.  DEA/CPSH are not in the endpoint's default
+   popular+watchlist symbol set, so their rows are asserted through the same
+   ``app.earnings.fetch_earnings_from_db`` the endpoint calls, together with
+   evidence that the merged annual twin is preserved in the reconciliation
+   backup table;
+5. ``GET /api/ical/<token>`` emits exactly as many events as the API emits
+   distinct periods for the same window (the outlets disagreed before the fix).
 
-Usage (from a checkout with DB access, e.g. /opt/fincal):
-    DB_HOST=localhost python scripts/issue50_acceptance_check.py
+Usage inside the container (the container publishes no host port, so the probe
+must run in it):
+    PYTHONPATH=/app python /tmp/issue50_acceptance_check.py /tmp/before.json
 """
 from __future__ import annotations
 
@@ -25,7 +30,9 @@ import urllib.request
 from collections import Counter
 from datetime import date
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+APP_DIR = os.getenv("FINCAL_APP_DIR", "/app")
+sys.path.insert(0, APP_DIR)
+sys.path.insert(0, os.path.join(APP_DIR, "scripts"))
 
 from app.db import db_cursor  # noqa: E402
 
@@ -36,9 +43,15 @@ HEADERS = {
     "X-User-Name": "probe",
     "X-User-Role": "admin",
 }
+WINDOW = ("2026-02-01", "2026-03-10")
+#: symbol -> (release date, release revenue_estimate, annual revenue the twin held)
+RELEASE_FIGURES = {
+    "DEA": ("2026-02-21", 87725750.0, 334384600.0),
+    "CPSH": ("2026-03-02", 7890000.0, 32280000.0),
+}
 
 
-def api_get(path: str):
+def api_get(path: str) -> str:
     request = urllib.request.Request(BASE + path, headers=HEADERS)
     with urllib.request.urlopen(request, timeout=60) as response:
         return response.read().decode()
@@ -81,32 +94,59 @@ def check_snapshots(before: dict) -> bool:
             LEFT JOIN earnings e ON e.id = s.earning_id WHERE e.id IS NULL
         """)
         orphans = (cur.fetchone() or {}).get("orphans", -1)
-    ok = orphans == 0 and total >= before.get("snapshots", 0)
-    print(f"3. estimate snapshots: {total} (before merge {before.get('snapshots')}), orphans: {orphans}")
+    baseline = before.get("snapshots")
+    ok = orphans == 0 and baseline is not None and total >= baseline
+    print(f"3. estimate snapshots: {total} (before merge {baseline}), orphans: {orphans}")
     return ok
 
 
 def check_api_rows() -> bool:
-    start, end = "2026-02-01", "2026-03-10"
+    start, end = WINDOW
     rows = api_earnings(start, end)
     periods = Counter((r["symbol"], r["market"], r.get("fiscal_year"), r.get("fiscal_quarter"))
                       for r in rows if r.get("fiscal_year") and r.get("fiscal_quarter"))
     repeated = {key: count for key, count in periods.items() if count > 1}
-    print(f"4. /api/earnings {start}..{end}: {len(rows)} rows, duplicated periods: {repeated or 'none'}")
-    dea = [r for r in rows if r["symbol"] == "DEA" and r.get("fiscal_quarter") == 4]
-    cpsh = [r for r in rows if r["symbol"] == "CPSH" and r.get("fiscal_quarter") == 4]
-    for label, subset in (("DEA FY2025 Q4", dea), ("CPSH FY2025 Q4", cpsh)):
-        for row in subset:
-            print(f"   {label}: id={row.get('id')} date={row.get('report_date')} "
-                  f"type={row.get('report_type')} rev_est={row.get('revenue_estimate')} "
-                  f"rev_act={row.get('revenue_actual')}")
-    dea_ok = len(dea) == 1 and float(dea[0].get("revenue_estimate") or 0) < 100_000_000
-    cpsh_ok = len(cpsh) == 1 and float(cpsh[0].get("revenue_estimate") or 0) < 20_000_000
-    return not repeated and dea_ok and cpsh_ok
+    print(f"4a. /api/earnings {start}..{end}: {len(rows)} rows, "
+          f"{len(periods)} distinct periods, duplicated: {repeated or 'none'}")
+
+    from app.earnings import fetch_earnings_from_db  # noqa: E402
+
+    # The container image ships the app package only (no scripts/), so the merge
+    # tool's constant is repeated here: keep it in sync with
+    # scripts/reconcile_fiscal_rows.py::BACKUP_TABLE.
+    backup_table = "earnings_fiscal_reconcile_backup"
+
+    period_ok = True
+    for symbol, (release_date, release_revenue, annual_revenue) in RELEASE_FIGURES.items():
+        with db_cursor() as cur:
+            cur.execute(
+                "SELECT id, report_date, report_type, revenue_estimate FROM earnings"
+                " WHERE symbol = %s AND fiscal_year = 2025 AND fiscal_quarter = 4"
+                " AND is_predicted = FALSE ORDER BY report_date",
+                (symbol,),
+            )
+            stored = [dict(row) for row in cur.fetchall()]
+            cur.execute(
+                f"SELECT count(*) AS kept FROM {backup_table} WHERE group_key = %s",
+                (f"{symbol}.US:FY2025Q4",),
+            )
+            backed_up = (cur.fetchone() or {}).get("kept", 0)
+        rendered = fetch_earnings_from_db(symbols=[symbol], markets=["US"], start=start, end=end)
+        shown = [r for r in rendered if r["symbol"] == symbol]
+        ok = (len(stored) == 1
+              and len(shown) == 1
+              and str(shown[0]["report_date"]) == release_date
+              and float(shown[0]["revenue_estimate"] or 0) == release_revenue)
+        period_ok = period_ok and ok and backed_up >= 1
+        print(f"4b. {symbol} FY2025 Q4: stored rows {len(stored)} "
+              f"{[(r['id'], str(r['report_date']), r['report_type'], float(r['revenue_estimate'] or 0)) for r in stored]}, "
+              f"rendered {len(shown)} {[(r['id'], str(r['report_date']), float(r['revenue_estimate'] or 0)) for r in shown]}, "
+              f"release figures kept: {ok}, merged annual twin (revenue {annual_revenue}) backed up: {backed_up}")
+    return not repeated and period_ok
 
 
 def check_ical_agrees() -> bool:
-    start, end = "2026-02-01", "2026-03-10"
+    start, end = WINDOW
     rows = api_earnings(start, end)
     api_periods = len({(r["symbol"], r["market"], r.get("fiscal_year"), r.get("fiscal_quarter"))
                        for r in rows})
@@ -123,8 +163,9 @@ def check_ical_agrees() -> bool:
 
 
 def main() -> int:
-    before_path = sys.argv[1] if len(sys.argv) > 1 else None
-    before = json.load(open(before_path)) if before_path and os.path.exists(before_path) else {}
+    before = {}
+    if len(sys.argv) > 1 and os.path.exists(sys.argv[1]):
+        before = json.load(open(sys.argv[1]))
     results = [
         check_duplicate_periods(),
         check_index(),
