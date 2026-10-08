@@ -23,9 +23,12 @@ from dataclasses import asdict, dataclass
 from datetime import date
 from typing import Iterable
 
+import psycopg2
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.db import db_cursor  # noqa: E402
+from app.fiscal import authority_key  # noqa: E402
 from sync_earnings import (  # noqa: E402
     _VALID_PERIOD_TYPES,
     _raw_fiscal_period,
@@ -67,6 +70,22 @@ class Proposal:
         result = asdict(self)
         result["target_ids"] = list(self.target_ids)
         return result
+
+
+@dataclass(frozen=True)
+class ApplyOutcome:
+    applied: int
+    skipped: tuple[dict, ...]
+
+
+SAVEPOINT = "fiscal_label_row"
+
+
+def _skip_detail(proposal: Proposal, reason: str, **extra) -> dict:
+    detail = proposal.as_dict()
+    detail["reason"] = reason
+    detail.update(extra)
+    return detail
 
 
 def _iso(value) -> str:
@@ -238,7 +257,22 @@ def invariant_count(cur) -> int:
     return int(cur.fetchone()["total"])
 
 
-def apply_proposals(cur, proposals: list[Proposal]) -> tuple[int, int]:
+def duplicate_group_count(cur) -> int:
+    cur.execute(
+        """SELECT count(*) AS total FROM (
+                SELECT symbol, market, fiscal_year, fiscal_quarter
+                  FROM earnings
+                 WHERE is_predicted=FALSE
+                   AND fiscal_year IS NOT NULL
+                   AND fiscal_quarter IS NOT NULL
+                 GROUP BY symbol, market, fiscal_year, fiscal_quarter
+                HAVING count(*) > 1
+            ) groups"""
+    )
+    return int(cur.fetchone()["total"])
+
+
+def _create_backup_table(cur) -> None:
     cur.execute(
         f"""CREATE TABLE IF NOT EXISTS {BACKUP_TABLE} (
             id BIGSERIAL PRIMARY KEY,
@@ -250,29 +284,113 @@ def apply_proposals(cur, proposals: list[Proposal]) -> tuple[int, int]:
             applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )"""
     )
-    applied = 0
-    skipped = 0
+
+
+def ensure_backup_table() -> None:
+    """Commit the audit table before the row transaction starts."""
+    with db_cursor() as cur:
+        _create_backup_table(cur)
+
+
+def _target_key(proposal: Proposal) -> tuple[str, str, int, int]:
+    return (
+        proposal.symbol,
+        proposal.market,
+        proposal.after_fiscal_year,
+        proposal.after_fiscal_quarter,
+    )
+
+
+def _current_row(cur, earning_id: int):
+    cur.execute(
+        "SELECT to_jsonb(e) AS row_data FROM earnings e WHERE e.id=%s FOR UPDATE",
+        (earning_id,),
+    )
+    result = cur.fetchone()
+    return None if result is None else result["row_data"]
+
+
+def apply_proposals(cur, proposals: list[Proposal]) -> ApplyOutcome:
+    """Apply only safe proposals, preserving one attempted row per outcome.
+
+    Occupied targets are deliberately left for Issue #50's merge workflow.  A
+    savepoint contains a late unique-index race without rolling back earlier
+    repairs or their audit rows.
+    """
+    _create_backup_table(cur)
+    skipped: list[dict] = []
+    current_rows: dict[int, dict] = {}
+    eligible: list[Proposal] = []
+
     for proposal in proposals:
-        cur.execute("SELECT to_jsonb(e) AS row_data FROM earnings e WHERE e.id=%s FOR UPDATE", (proposal.source_id,))
-        current = cur.fetchone()
-        if not current:
-            skipped += 1
+        current = _current_row(cur, proposal.source_id)
+        if current is None:
+            skipped.append(_skip_detail(proposal, "source_missing"))
             continue
+        current_rows[proposal.source_id] = current
         cur.execute(
-            f"""INSERT INTO {BACKUP_TABLE}
-                (earning_id, before_data, after_fiscal_year, after_fiscal_quarter, reason)
-                VALUES (%s,%s::jsonb,%s,%s,%s)""",
-            (proposal.source_id, json.dumps(current["row_data"], default=str), proposal.after_fiscal_year,
-             proposal.after_fiscal_quarter, proposal.reason),
+            """SELECT id FROM earnings
+                WHERE symbol=%s AND market=%s AND fiscal_year=%s AND fiscal_quarter=%s
+                  AND is_predicted=FALSE AND id<>%s
+                ORDER BY id FOR UPDATE""",
+            (proposal.symbol, proposal.market, proposal.after_fiscal_year,
+             proposal.after_fiscal_quarter, proposal.source_id),
         )
-        cur.execute(
-            """UPDATE earnings
-                  SET fiscal_year=%s, fiscal_quarter=%s, updated_at=NOW()
-                WHERE id=%s""",
-            (proposal.after_fiscal_year, proposal.after_fiscal_quarter, proposal.source_id),
-        )
-        applied += cur.rowcount
-    return applied, skipped
+        holder_ids = tuple(int(row["id"]) for row in cur.fetchall())
+        if holder_ids:
+            skipped.append(_skip_detail(
+                proposal, "target_occupied", holder_ids=list(holder_ids),
+            ))
+            continue
+        eligible.append(proposal)
+
+    winners: dict[tuple[str, str, int, int], Proposal] = {}
+    for proposal in eligible:
+        key = _target_key(proposal)
+        previous = winners.get(key)
+        if previous is None:
+            winners[key] = proposal
+            continue
+        candidate_key = (authority_key(current_rows[proposal.source_id]), proposal.source_id)
+        previous_key = (authority_key(current_rows[previous.source_id]), previous.source_id)
+        if candidate_key < previous_key:
+            skipped.append(_skip_detail(
+                previous, "batch_target_conflict", winner_id=proposal.source_id,
+            ))
+            winners[key] = proposal
+        else:
+            skipped.append(_skip_detail(
+                proposal, "batch_target_conflict", winner_id=previous.source_id,
+            ))
+
+    applied = 0
+    for proposal in sorted(winners.values(), key=lambda item: item.source_id):
+        cur.execute(f"SAVEPOINT {SAVEPOINT}")
+        try:
+            current = current_rows[proposal.source_id]
+            cur.execute(
+                f"""INSERT INTO {BACKUP_TABLE}
+                    (earning_id, before_data, after_fiscal_year, after_fiscal_quarter, reason)
+                    VALUES (%s,%s::jsonb,%s,%s,%s)""",
+                (proposal.source_id, json.dumps(current, default=str),
+                 proposal.after_fiscal_year, proposal.after_fiscal_quarter, proposal.reason),
+            )
+            cur.execute(
+                """UPDATE earnings
+                      SET fiscal_year=%s, fiscal_quarter=%s, updated_at=NOW()
+                    WHERE id=%s""",
+                (proposal.after_fiscal_year, proposal.after_fiscal_quarter, proposal.source_id),
+            )
+            if cur.rowcount != 1:
+                raise RuntimeError(f"earning row {proposal.source_id} disappeared during apply")
+            applied += 1
+        except psycopg2.errors.UniqueViolation:
+            cur.execute(f"ROLLBACK TO SAVEPOINT {SAVEPOINT}")
+            skipped.append(_skip_detail(proposal, "unique_violation"))
+        finally:
+            cur.execute(f"RELEASE SAVEPOINT {SAVEPOINT}")
+
+    return ApplyOutcome(applied=applied, skipped=tuple(skipped))
 
 
 def main() -> int:
@@ -285,15 +403,19 @@ def main() -> int:
     for market in ("US", "HK"):
         pages.extend(fetch_calendar(market, "2025-01-01", "2027-12-31"))
     releases = release_events(pages)
+    if args.apply:
+        ensure_backup_table()
     with db_cursor() as cur:
         rows = load_rows(cur)
         proposals = attach_targets(cur, build_proposals(rows, releases))
         before_inconsistent = invariant_count(cur)
+        before_duplicate_groups = duplicate_group_count(cur)
         report = {
             "release_events": len(releases),
             "proposals": len(proposals),
             "target_conflicts": sum(bool(item.target_ids) for item in proposals),
             "before_inconsistent": before_inconsistent,
+            "before_duplicate_groups": before_duplicate_groups,
             "rows": [item.as_dict() for item in proposals],
         }
         if not args.apply:
@@ -302,15 +424,30 @@ def main() -> int:
             else:
                 print(json.dumps({key: value for key, value in report.items() if key != "rows"}, ensure_ascii=False, indent=2))
             return 0
-        applied, skipped = apply_proposals(cur, proposals)
+        outcome = apply_proposals(cur, proposals)
+        if outcome.applied + len(outcome.skipped) != len(proposals):
+            raise RuntimeError("apply outcome does not account for every proposal")
     with db_cursor() as cur:
         after_inconsistent = invariant_count(cur)
-    report.update({"applied": applied, "skipped": skipped, "after_inconsistent": after_inconsistent})
+        after_duplicate_groups = duplicate_group_count(cur)
+    duplicate_groups_not_reduced = bool(proposals) and after_duplicate_groups >= before_duplicate_groups
+    report.update({
+        "applied": outcome.applied,
+        "skipped": len(outcome.skipped),
+        "skipped_rows": list(outcome.skipped),
+        "after_inconsistent": after_inconsistent,
+        "after_duplicate_groups": after_duplicate_groups,
+        "duplicate_groups_not_reduced": duplicate_groups_not_reduced,
+    })
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:
-        print(json.dumps({key: value for key, value in report.items() if key != "rows"}, ensure_ascii=False, indent=2))
-    return 0 if skipped == 0 else 2
+        print(json.dumps({key: value for key, value in report.items() if key not in {"rows", "skipped_rows"}}, ensure_ascii=False, indent=2))
+    return 2 if (
+        outcome.skipped
+        or after_inconsistent > before_inconsistent
+        or duplicate_groups_not_reduced
+    ) else 0
 
 
 if __name__ == "__main__":
