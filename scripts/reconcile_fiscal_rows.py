@@ -389,6 +389,9 @@ def main() -> int:
     parser.add_argument("--json", action="store_true", help="emit the plan as JSON")
     parser.add_argument("--limit", type=int, default=0, help="print at most N decisions (0 = all)")
     args = parser.parse_args()
+    # ``--json`` is consumed by other tooling: human-readable lines go to stderr
+    # in that mode so stdout stays one parseable document.
+    note = (lambda *a, **k: print(*a, file=sys.stderr, **k)) if args.json else print
 
     with db_cursor() as cur:
         duplicates = count_duplicate_groups(cur)
@@ -413,10 +416,10 @@ def main() -> int:
                 print(f"  … {len(plans) - args.limit} more decision(s) omitted (--limit)")
 
         if not args.apply:
-            print("\ndry-run (read-only): re-run with --apply to merge.  The survivor is "
-                  "the row app.fiscal.authority_key already shows, so a period's "
-                  "quarterly release wins over the half-year/annual disclosure of the "
-                  "same period and the calendar's displayed values do not change.")
+            note("\ndry-run (read-only): re-run with --apply to merge.  The survivor is "
+                 "the row app.fiscal.authority_key already shows, so a period's "
+                 "quarterly release wins over the half-year/annual disclosure of the "
+                 "same period and the calendar's displayed values do not change.")
             return 0
 
         applied_rows = 0
@@ -433,19 +436,19 @@ def main() -> int:
         after_orphans = count_orphan_snapshots(cur)
     index_ready = ensure_fiscal_identity_index()
 
-    print(f"\napplied: deleted {applied_rows} duplicate row(s) from {len(plans)} period(s)")
+    note(f"\napplied: deleted {applied_rows} duplicate row(s) from {len(plans)} period(s)")
     if collisions:
-        print(f"snapshot collisions resolved by microsecond offset: {len(shifts)}")
+        note(f"snapshot collisions resolved by microsecond offset: {len(shifts)}")
         for shift in shifts:
-            print(f"  snapshot {shift['snapshot_id']} (from earning {shift['from_earning']}): "
-                  f"{shift['from']} → {shift['to']} (+{shift['shift_microseconds']}µs)")
-    print(f"duplicate periods remaining: {remaining} (was {duplicates})")
-    print(f"earnings_estimate_snapshots: {after_snapshots} (was {snapshots})")
-    print(f"orphan snapshots: {after_orphans} (was {orphans})")
-    print(f"fiscal identity unique index ready: {index_ready}")
+            note(f"  snapshot {shift['snapshot_id']} (from earning {shift['from_earning']}): "
+                 f"{shift['from']} → {shift['to']} (+{shift['shift_microseconds']}µs)")
+    note(f"duplicate periods remaining: {remaining} (was {duplicates})")
+    note(f"earnings_estimate_snapshots: {after_snapshots} (was {snapshots})")
+    note(f"orphan snapshots: {after_orphans} (was {orphans})")
+    note(f"fiscal identity unique index ready: {index_ready}")
     if after_snapshots < snapshots:
-        print("WARNING: snapshot rows were lost — inspect "
-              f"{BACKUP_TABLE} and earnings_estimate_snapshots")
+        note("WARNING: snapshot rows were lost — inspect "
+             f"{BACKUP_TABLE} and earnings_estimate_snapshots")
         return 1
     return 0
 

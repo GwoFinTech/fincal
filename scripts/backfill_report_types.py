@@ -180,10 +180,14 @@ def main() -> int:
                         help="pad the provider fetch window around the row range (default 30)")
     args = parser.parse_args()
 
+    # ``--json`` is consumed by other tooling: every human-readable line goes to
+    # stderr in that mode so stdout stays one parseable document.
+    note = (lambda *a, **k: print(*a, file=sys.stderr, **k)) if args.json else print
+
     with db_cursor() as cur:
         rows = load_rows(cur, args.start, args.end)
     if not rows:
-        print("no confirmed rows carry a fiscal identity — nothing to backfill")
+        note("no confirmed rows carry a fiscal identity — nothing to backfill")
         return 0
 
     dates = sorted(row["report_date"] for row in rows)
@@ -213,14 +217,14 @@ def main() -> int:
             print(f"  … {len(changes) - 20} more")
 
     if not args.apply:
-        print("\ndry-run (read-only): re-run with --apply to write the changes.")
+        note("\ndry-run (read-only): re-run with --apply to write the changes.")
         return 0
 
     with db_cursor() as cur:
         apply_changes(cur, changes)
         cur.execute(f"SELECT count(*) AS total FROM {BACKUP_TABLE}")
         backed_up = (cur.fetchone() or {}).get("total", 0)
-    print(f"\napplied: {len(changes)} row(s) updated, backup rows: {backed_up}")
+    note(f"\napplied: {len(changes)} row(s) updated, backup rows: {backed_up}")
     return 0
 
 
