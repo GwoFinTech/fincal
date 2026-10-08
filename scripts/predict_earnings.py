@@ -526,12 +526,13 @@ def mark_confirmed():
     with db_cursor() as cur:
         # Existing rows created before provenance support still need an explicit state.
         cur.execute("UPDATE earnings SET date_source = 'algorithm', date_status = 'predicted' WHERE is_predicted = TRUE")
-        # 1) Rows that have actuals are no longer predicted
-        cur.execute("UPDATE earnings SET is_predicted = FALSE, date_status = 'reported' WHERE is_predicted = TRUE AND eps_actual IS NOT NULL")
-        n1 = cur.rowcount
 
-        # 2) Delete predicted rows that overlap with a confirmed row
-        #    on the same (symbol, market, fiscal_year, fiscal_quarter)
+        # 1) Delete predicted rows that overlap with a confirmed row
+        #    on the same (symbol, market, fiscal_year, fiscal_quarter).
+        #    This runs *before* the promote below: a fiscal period holds at most
+        #    one confirmed row (the identity index from Issue #50), so promoting a
+        #    prediction for a period a provider row already recorded would raise
+        #    UniqueViolation and abort the run.
         cur.execute(
             """DELETE FROM earnings WHERE is_predicted = TRUE AND id IN (
                 SELECT p.id FROM earnings p
@@ -541,6 +542,21 @@ def mark_confirmed():
             )"""
         )
         n2 = cur.rowcount
+
+        # 2) Rows that have actuals are no longer predicted — unless their period
+        #    is already confirmed by another row (step 1 removed those).
+        cur.execute(
+            """UPDATE earnings SET is_predicted = FALSE, date_status = 'reported'
+            WHERE is_predicted = TRUE AND eps_actual IS NOT NULL
+              AND NOT EXISTS (
+                SELECT 1 FROM earnings c
+                WHERE c.is_predicted = FALSE
+                  AND c.symbol = earnings.symbol AND c.market = earnings.market
+                  AND c.fiscal_year = earnings.fiscal_year
+                  AND c.fiscal_quarter = earnings.fiscal_quarter
+            )"""
+        )
+        n1 = cur.rowcount
 
     if n1 or n2:
         logger.info(f"Confirmed {n1} rows with actuals, removed {n2} stale predictions")

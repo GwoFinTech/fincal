@@ -660,7 +660,13 @@ class ReconcilePlanTests(TestCase):
         self.assertIn("earnings_estimate_snapshots total : 76626", report)
 
     def test_apply_backs_up_before_deleting_and_repoints_snapshots(self):
-        cursor = _FakeCursor()
+        # The re-point reads the group's snapshots first (the survivor's marker
+        # decides whether a moved snapshot needs a microsecond offset), so the
+        # fake cursor replays that result set before the writes are recorded.
+        cursor = _FakeCursor(results=[[
+            {"id": 7001, "earning_id": 98493, "source": "longbridge",
+             "captured_at": datetime(2026, 8, 6, 1, 0, tzinfo=timezone.utc)},
+        ]])
         plan = reconcile.plan_group(("UUUU", "US", 2026, 2), _uuuu_rows(), {})
         reconcile.apply_plan(cursor, plan)
         statements = cursor.sql_calls()
@@ -670,6 +676,22 @@ class ReconcilePlanTests(TestCase):
         self.assertLess(backup, repoint)
         self.assertLess(repoint, delete)
         self.assertEqual(cursor.executed[delete][1][0], [98493])
+
+    def test_apply_offsets_a_snapshot_instead_of_refusing_the_group(self):
+        """A collision must not block the merge nor lose the older revision."""
+        survivor_ts = datetime(2026, 8, 6, 1, 0, tzinfo=timezone.utc)
+        cursor = _FakeCursor(results=[[
+            {"id": 7001, "earning_id": 15346, "source": "longbridge", "captured_at": survivor_ts},
+            {"id": 7002, "earning_id": 98493, "source": "longbridge", "captured_at": survivor_ts},
+        ]])
+        plan = reconcile.plan_group(("UUUU", "US", 2026, 2), _uuuu_rows(), {})
+        shifts = reconcile.apply_plan(cursor, plan)
+        self.assertEqual(len(shifts), 1)
+        self.assertEqual(shifts[0]["snapshot_id"], 7002)
+        self.assertEqual(shifts[0]["shift_microseconds"], 1)
+        offsets = [call for call in cursor.executed if "captured_at = %s" in call[0]]
+        self.assertEqual(len(offsets), 1)
+        self.assertEqual(offsets[0][1][1], survivor_ts.replace(microsecond=1))
 
 
 # ── guarded fiscal-identity index ───────────────────────────────────────────

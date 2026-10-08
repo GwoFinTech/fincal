@@ -26,6 +26,23 @@ Reading ``period`` for ``saf``/``af`` is what labelled 394 production rows
 before Q3").  The quarter of a disclosure therefore comes from its sequence
 (``saf`` → Q2, ``af`` → Q4) and its fiscal year from the event's own date,
 never from the disclosure's ``period``/``fiscal_year`` fields.
+
+One row per fiscal period (Issue #50 follow-up)
+-----------------------------------------------
+The persistent identity of a row is the fiscal period, so a release and a
+disclosure of the *same* period cannot both be rows.  The release owns the
+period (its figures are the quarter's), which is recorded as the row's
+``report_type``: ``qf``/``3q`` → ``Q``, ``saf`` → ``H``, ``af`` → ``A``
+(:data:`app.fiscal.PERIOD_TYPE_REPORT_TYPES`).  Consequently:
+
+* a disclosure whose period already has a release event is not written
+  (:func:`fiscal_period_for_event` returns ``skip``) — regardless of how many
+  days separate the two events;
+* a disclosure event that is a period's *only* event still is that period's row
+  (``report_type`` = ``H``/``A``), subject to the usual ordering guard;
+* a release arriving later takes the period over from the disclosure row
+  (:func:`app.fiscal.reschedule_confirmed_rows`, ``kind='takeover'``), and an
+  incoming disclosure never re-dates a stored release row.
 """
 import subprocess
 import json
@@ -63,6 +80,11 @@ class FlushStats:
     rows: int = 0
     moves: int = 0
     skipped: int = 0
+    #: Incoming half-year/annual disclosures dropped because the period's release
+    #: event already owns it (Issue #50 follow-up).
+    dropped_disclosures: int = 0
+    #: Periods where an incoming release replaced a stored disclosure row.
+    takeovers: int = 0
 
 
 @dataclass
@@ -80,6 +102,8 @@ class SyncStats:
     rescheduled: int = 0
     skipped: int = 0
     failed_batches: int = 0
+    dropped_disclosures: int = 0
+    takeovers: int = 0
 
     def quality(self) -> SyncQuality:
         return SyncQuality(
@@ -210,10 +234,11 @@ _DISCLOSURE_QUARTERS = {"saf": 2, "af": 4}
 _DISCLOSURE_PERIOD_TYPES = frozenset(_DISCLOSURE_QUARTERS)
 _VALID_PERIOD_TYPES = {"qf", "3q"}
 
-#: A disclosure event this close to the release event of the quarter it
-#: discloses is the same announcement: the release already recorded the period,
-#: so writing the disclosure too would only duplicate the row.
-DISCLOSURE_SAME_PERIOD_DAYS = 14
+#: The release event of a period is the period's row: a disclosure event whose
+#: period already has a release event in the calendar window is not written,
+#: however far apart the two dates are (Issue #50 follow-up).  Distance used to
+#: gate this (14 days), which left the annual report of a period whose release
+#: sat further away as a second row for the same identity.
 
 
 def _parse_int(value) -> int | None:
@@ -260,14 +285,6 @@ def _raw_fiscal_period(ext: dict, report_date: str, market: str) -> tuple[int | 
     return fiscal_year, fiscal_quarter, period_type
 
 
-def _day_distance(one: str | None, other: str | None) -> int | None:
-    """Absolute distance in days between two ISO dates, or None."""
-    try:
-        return abs((date.fromisoformat(str(one)) - date.fromisoformat(str(other))).days)
-    except (TypeError, ValueError):
-        return None
-
-
 def build_fiscal_period_index(pages: list[dict]) -> dict[tuple[str, str], list[dict]]:
     """Index canonical qf/3q events for mapping disclosure-only events.
 
@@ -309,9 +326,9 @@ def fiscal_period_for_event(symbol: str, market: str, report_date: str, ext: dic
     fiscal year from the event date, so the row lands on the period the release
     event already uses.
 
-    ``skip`` is returned when that period already has its release event within
-    :data:`DISCLOSURE_SAME_PERIOD_DAYS` days — the disclosure repeats a period
-    that is on the calendar, and writing it would duplicate the row.  When the
+    ``skip`` is returned when that period already has its release event in the
+    calendar window — the disclosure repeats a period that is already on the
+    calendar and writing it would duplicate the row (Issue #50).  When the
     period has no release event at all (an ``af`` annual report with no ``qf``
     counterpart, e.g. HSBC's annual result), the disclosure *is* that period's
     event and keeps the identity, subject to the same ordering guard as any
@@ -326,16 +343,13 @@ def fiscal_period_for_event(symbol: str, market: str, report_date: str, ext: dic
         for row in rows:
             if row["fiscal_year"] != fiscal_year or row["fiscal_quarter"] != quarter:
                 continue
-            distance = _day_distance(row["report_date"], report_date)
-            if distance is not None and distance <= DISCLOSURE_SAME_PERIOD_DAYS:
-                logger.debug(
-                    "ignoring Longbridge %s disclosure event %s.%s %s: FY%s Q%s%s "
-                    "release already recorded on %s",
-                    period_type, symbol, market, report_date, fiscal_year, quarter,
-                    "" if distance == 0 else f" ({distance}d away)",
-                    row["report_date"],
-                )
-                return None, None, True
+            logger.debug(
+                "ignoring Longbridge %s disclosure event %s.%s %s: FY%s Q%s "
+                "release already recorded on %s",
+                period_type, symbol, market, report_date, fiscal_year, quarter,
+                row["report_date"],
+            )
+            return None, None, True
         if fiscal_year is None:
             logger.warning(
                 "Longbridge %s event has no derivable fiscal year: %s.%s %s; "
@@ -415,14 +429,34 @@ def flush_batch(cur, rows: list[tuple]) -> FlushStats:
     actual on the same row keeps Futu's own attribution.
     """
     rows = dedupe_batch(rows)
+    collapsed_out: list = []
     rows = fiscal.collapse_rows_by_period(
         rows,
         identity_of=lambda r: fiscal.fiscal_key_from_parts(r[0], r[1], r[5], r[6]),
         date_of=lambda r: r[3],
+        rank_of=lambda r: 1 if fiscal.is_disclosure(r[4]) else 0,
+        dropped=collapsed_out,
+    )
+    # Count what the collapse removed for the same reason the pass below drops
+    # rows: a half-year/annual disclosure of a period whose release is in this
+    # very response is not a row of its own.
+    kept_release_periods = {
+        (kept[0], kept[1], kept[5], kept[6])
+        for kept in rows if not fiscal.is_disclosure(kept[4])
+    }
+    collapse_drops = sum(
+        1 for row in collapsed_out
+        if fiscal.is_disclosure(row[4]) and (row[0], row[1], row[5], row[6]) in kept_release_periods
     )
     if not rows:
         return FlushStats()
     outcome = fiscal.reschedule_confirmed_rows(cur, rows)
+    # Issue #50 follow-up: one row per fiscal period — a disclosure event whose
+    # period is owned by a release row (stored, or in this same batch) is dropped
+    # by the pass above, so write exactly the rows it left.
+    rows = outcome.rows
+    if not rows:
+        return FlushStats(dropped_disclosures=len(outcome.dropped) + collapse_drops)
     for move in outcome.moves:
         logger.info(
             "rescheduled %s.%s FY%s Q%s: %s → %s (row %s, Issue #50)",
@@ -472,7 +506,9 @@ def flush_batch(cur, rows: list[tuple]) -> FlushStats:
         SELECT e.id, 'longbridge', e.eps_estimate, e.revenue_estimate, '{"endpoint":"finance-calendar"}'::jsonb
         FROM earnings e JOIN (VALUES %s) AS v(symbol,market,report_date) ON (e.symbol,e.market,e.report_date)=(v.symbol,v.market,(v.report_date)::date)
         WHERE e.eps_estimate IS NOT NULL OR e.revenue_estimate IS NOT NULL""", keys)
-    return FlushStats(rows=len(rows), moves=len(outcome.moves), skipped=len(outcome.skipped))
+    return FlushStats(rows=len(rows), moves=len(outcome.moves), skipped=len(outcome.skipped),
+                      dropped_disclosures=len(outcome.dropped) + collapse_drops,
+                      takeovers=sum(1 for move in outcome.moves if move.get("kind") == "takeover"))
 
 
 def _flush_batch(run_stats: SyncStats, batch: list[tuple], label: str) -> None:
@@ -500,9 +536,12 @@ def _flush_batch(run_stats: SyncStats, batch: list[tuple], label: str) -> None:
     run_stats.written += flushed.rows
     run_stats.rescheduled += flushed.moves
     run_stats.skipped += flushed.skipped
+    run_stats.dropped_disclosures += flushed.dropped_disclosures
+    run_stats.takeovers += flushed.takeovers
     logger.info(
-        "  Flushed %d records (written: %d, fetched: %d, skipped: %d)",
+        "  Flushed %d records (written: %d, fetched: %d, skipped: %d, disclosures dropped: %d, takeovers: %d)",
         flushed.rows, run_stats.written, run_stats.fetched, run_stats.skipped,
+        run_stats.dropped_disclosures, run_stats.takeovers,
     )
 
 
@@ -571,9 +610,13 @@ def sync_earnings(run_id: int, stats: SyncStats | None = None) -> SyncStats:
                 )
                 if skip_event:
                     continue
+                # Issue #50 follow-up: record which event sequence the row came
+                # from, so a period's release row is distinguishable from a
+                # half-year/annual disclosure of the same period.
+                report_type = fiscal.report_type_for_period_type(ext.get("period_type"))
 
                 batch.append((
-                    symbol, mkt, company_name, report_date, "Q",
+                    symbol, mkt, company_name, report_date, report_type,
                     fiscal_year, fiscal_quarter,
                     kv.get("eps_estimate"), kv.get("eps_actual"),
                     kv.get("revenue_estimate"), kv.get("revenue_actual"),

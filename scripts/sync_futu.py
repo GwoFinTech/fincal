@@ -546,7 +546,13 @@ def flush_date_batch(batch: list[tuple]) -> int:
     if not batch:
         return 0
     with db_cursor() as cur:
-        outcome = fiscal.reschedule_confirmed_rows(cur, batch)
+        # A Futu row carries a date and actuals, not a period sequence: let it
+        # inherit the report type its period already stores (instead of inserting
+        # a second row for one period, Issue #50) and leave the stored row's
+        # report type/values alone (`takeover=False`, no figures in this layout).
+        outcome = fiscal.reschedule_confirmed_rows(
+            cur, batch, value_fields=(), takeover=False, align_report_type=True)
+        batch = outcome.rows
         for move in outcome.moves:
             logger.info(
                 "rescheduled %s.%s FY%s Q%s: %s → %s (row %s, Issue #50)",

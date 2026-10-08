@@ -11,10 +11,18 @@ index (``app/db.py::ensure_fiscal_identity_index``).
 What this script does
 ---------------------
 For every confirmed duplicate group it keeps the row the read paths already show
-(``app.fiscal.authority_key`` — confirmed first, then rows carrying actuals,
-newest report date, newest ``updated_at``, highest id) and removes the others
-**after** re-pointing their estimate snapshots to the survivor, so no history is
-lost (``ON DELETE CASCADE`` would otherwise silently drop it).
+(``app.fiscal.authority_key`` — confirmed first, then a quarterly *release*
+before a half-year/annual *disclosure* of the same period, then rows carrying
+actuals, newest report date, newest ``updated_at``, highest id) and removes the
+others **after** re-pointing their estimate snapshots to the survivor, so no
+history is lost (``ON DELETE CASCADE`` would otherwise silently drop it).
+
+Because the survivor is the row the API/iCal already render, running ``--apply``
+does not change what users see; it removes the hidden twin rows and lets the
+fiscal-identity unique index be created.  Snapshots whose
+``(earning_id, source, captured_at)`` key would collide after the move (both rows
+were written by one sync run, with different estimates) are offset by the
+smallest free microsecond instead of being refused or dropped.
 
 What it deliberately does *not* do
 ----------------------------------
@@ -45,7 +53,7 @@ import logging
 import os
 import sys
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -94,7 +102,7 @@ class GroupPlan:
             return ""
         return (
             "kept row {sid} ({sdate}, {ssource}) over {dids} ({ddates}, {dsources}) by authority order "
-            "confirmed>actuals>report_date>updated_at>id".format(
+            "confirmed>release>actuals>report_date>updated_at>id".format(
                 sid=self.survivor["id"],
                 sdate=_date_str(self.survivor.get("report_date")),
                 ssource=self.survivor.get("date_source") or "unknown",
@@ -112,7 +120,9 @@ class GroupPlan:
             "fiscal_quarter": self.key[3],
             "survivor_id": self.survivor["id"],
             "survivor_report_date": _date_str(self.survivor.get("report_date")),
+            "survivor_report_type": self.survivor.get("report_type") or "",
             "dropped_ids": [row["id"] for row in self.dropped],
+            "dropped_report_types": [row.get("report_type") or "" for row in self.dropped],
             "snapshots_to_move": self.snapshots_to_move,
             "snapshot_collisions": self.snapshot_collision,
             "value_conflicts": self.value_conflicts,
@@ -236,11 +246,88 @@ def count_orphan_snapshots(cur) -> int:
     return row["total"] if row else 0
 
 
-def apply_plan(cur, plan: GroupPlan) -> None:
+def _group_snapshots(cur, earning_ids: list[int]) -> list[dict]:
+    """Every snapshot of the given rows, with the columns the re-point needs."""
+    if not earning_ids:
+        return []
+    cur.execute(
+        "SELECT id, earning_id, source, captured_at FROM earnings_estimate_snapshots"
+        " WHERE earning_id = ANY(%s) ORDER BY earning_id, captured_at, id",
+        (earning_ids,),
+    )
+    return [dict(row) for row in cur.fetchall()]
+
+
+def _repoint_snapshots(cur, plan: GroupPlan) -> list[dict]:
+    """Re-point the dropped rows' snapshots onto the survivor, losslessly.
+
+    ``earnings_estimate_snapshots`` is unique on ``(earning_id, source,
+    captured_at)``.  Two rows of one period are usually written by the same sync
+    run, so their snapshots share an identical ``(source, captured_at)`` marker
+    while carrying *different* estimates — re-pointing them as-is would therefore
+    raise ``UniqueViolation``, and dropping either side would lose a revision the
+    snapshot exists to record.
+
+    Colliding snapshots are nudged by whole microseconds instead: the count and
+    the values survive, only the audit timestamp of the moved copy is offset by
+    the smallest amount that frees the key.  Each shift is returned for the
+    report and written to the backup table with the deleted row.
+    """
+    dropped_ids = [row["id"] for row in plan.dropped]
+    if not dropped_ids:
+        return []
+    survivor_id = plan.survivor["id"]
+    snapshots = _group_snapshots(cur, [survivor_id] + dropped_ids)
+    taken = {(snap["source"], snap["captured_at"]) for snap in snapshots
+             if snap["earning_id"] == survivor_id}
+    colliding = [snap for snap in snapshots
+                 if snap["earning_id"] != survivor_id and (snap["source"], snap["captured_at"]) in taken]
+    plain_ids = [snap["id"] for snap in snapshots
+                 if snap["earning_id"] != survivor_id and snap not in colliding]
+    if plain_ids:
+        cur.execute(
+            "UPDATE earnings_estimate_snapshots SET earning_id = %s WHERE id = ANY(%s)",
+            (survivor_id, plain_ids),
+        )
+    shifts: list[dict] = []
+    for snap in colliding:
+        marker = (snap["source"], snap["captured_at"])
+        shift_us = _free_microsecond(marker, taken)
+        if shift_us is None:  # pragma: no cover - 1000 tries is not reachable in practice
+            raise RuntimeError(
+                f"no free snapshot timestamp for {marker[0]}@{marker[1]} (row {snap['id']})"
+            )
+        new_ts = snap["captured_at"] + timedelta(microseconds=shift_us)
+        cur.execute(
+            "UPDATE earnings_estimate_snapshots SET earning_id = %s, captured_at = %s WHERE id = %s",
+            (survivor_id, new_ts, snap["id"]),
+        )
+        taken.add((snap["source"], new_ts))
+        shifts.append({
+            "snapshot_id": snap["id"],
+            "from_earning": snap["earning_id"],
+            "source": snap["source"],
+            "from": snap["captured_at"].isoformat(),
+            "to": new_ts.isoformat(),
+            "shift_microseconds": shift_us,
+        })
+    return shifts
+
+
+def _free_microsecond(marker: tuple, taken: set) -> int | None:
+    """Smallest positive microsecond offset that frees ``(source, captured_at)``."""
+    source, captured_at = marker
+    for shift in range(1, 1001):
+        if (source, captured_at + timedelta(microseconds=shift)) not in taken:
+            return shift
+    return None
+
+
+def apply_plan(cur, plan: GroupPlan) -> list[dict]:
     """Back up, re-point snapshots, then delete the non-survivor rows of a group."""
     dropped_ids = [row["id"] for row in plan.dropped]
     if not dropped_ids:
-        return
+        return []
     cur.execute(
         f"""CREATE TABLE IF NOT EXISTS {BACKUP_TABLE} (
             id BIGSERIAL PRIMARY KEY,
@@ -259,14 +346,12 @@ def apply_plan(cur, plan: GroupPlan) -> None:
          plan.reason, dropped_ids),
     )
     # Re-point before deleting: earnings_estimate_snapshots cascades on delete.
-    cur.execute(
-        "UPDATE earnings_estimate_snapshots SET earning_id = %s WHERE earning_id = ANY(%s)",
-        (plan.survivor["id"], dropped_ids),
-    )
+    shifts = _repoint_snapshots(cur, plan)
     cur.execute(
         "DELETE FROM earnings WHERE id = ANY(%s) AND is_predicted = FALSE AND id <> %s",
         (dropped_ids, plan.survivor["id"]),
     )
+    return shifts
 
 
 def render(plans: list[GroupPlan], duplicates: int, snapshots: int, orphans: int,
@@ -287,6 +372,8 @@ def render(plans: list[GroupPlan], duplicates: int, snapshots: int, orphans: int
     for plan in (plans[:limit] if limit else plans):
         lines.append(
             f"  {plan.key[0]}.{plan.key[1]} FY{plan.key[2]} Q{plan.key[3]}: {plan.reason}"
+            f" | keep type={plan.survivor.get('report_type') or '-'}"
+            f" drop types={','.join(row.get('report_type') or '-' for row in plan.dropped)}"
             f" | snapshots→{plan.snapshots_to_move}"
             + (" | SNAPSHOT COLLISION" if plan.snapshot_collision else "")
             + (" | VALUE CONFLICT: " + "; ".join(plan.value_conflicts) if plan.value_conflicts else "")
@@ -308,13 +395,14 @@ def main() -> int:
         plans = load_plans(cur, args.symbol)
         snapshots = count_snapshots(cur)
         orphans = count_orphan_snapshots(cur)
-        blocking = [plan for plan in plans if plan.snapshot_collision]
+        collisions = sum(len(plan.snapshot_collision) for plan in plans)
 
         if args.json:
             print(json.dumps({
                 "duplicate_periods": duplicates,
                 "rows_to_delete": sum(len(p.dropped) for p in plans),
                 "snapshots_to_move": sum(p.snapshots_to_move for p in plans),
+                "snapshot_collisions": collisions,
                 "snapshots_total": snapshots,
                 "orphan_snapshots": orphans,
                 "plans": [p.as_dict() for p in plans],
@@ -325,19 +413,16 @@ def main() -> int:
                 print(f"  … {len(plans) - args.limit} more decision(s) omitted (--limit)")
 
         if not args.apply:
-            print("\ndry-run (read-only): re-run with --apply to merge, once the value "
-                  "arbitration in Issue #50 is decided.")
+            print("\ndry-run (read-only): re-run with --apply to merge.  The survivor is "
+                  "the row app.fiscal.authority_key already shows, so a period's "
+                  "quarterly release wins over the half-year/annual disclosure of the "
+                  "same period and the calendar's displayed values do not change.")
             return 0
 
-        if blocking:
-            print(f"\nrefusing to apply: {len(blocking)} group(s) would collide on "
-                  f"earnings_estimate_snapshots(earning_id, source, captured_at); "
-                  f"resolve those first.")
-            return 2
-
         applied_rows = 0
+        shifts: list[dict] = []
         for plan in plans:
-            apply_plan(cur, plan)
+            shifts.extend(apply_plan(cur, plan))
             applied_rows += len(plan.dropped)
 
     # Separate transaction: report the result from committed state.
@@ -349,6 +434,11 @@ def main() -> int:
     index_ready = ensure_fiscal_identity_index()
 
     print(f"\napplied: deleted {applied_rows} duplicate row(s) from {len(plans)} period(s)")
+    if collisions:
+        print(f"snapshot collisions resolved by microsecond offset: {len(shifts)}")
+        for shift in shifts:
+            print(f"  snapshot {shift['snapshot_id']} (from earning {shift['from_earning']}): "
+                  f"{shift['from']} → {shift['to']} (+{shift['shift_microseconds']}µs)")
     print(f"duplicate periods remaining: {remaining} (was {duplicates})")
     print(f"earnings_estimate_snapshots: {after_snapshots} (was {snapshots})")
     print(f"orphan snapshots: {after_orphans} (was {orphans})")

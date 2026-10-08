@@ -93,8 +93,13 @@ def test_disclosure_ignores_its_own_fiscal_year_when_matching_the_release():
     assert result == (None, None, True)
 
 
-def test_a_release_months_away_is_not_the_same_announcement():
-    """The disclosure keeps its own identity instead of matching a distant row."""
+def test_a_period_has_one_row_even_when_the_release_is_months_away():
+    """The release owns its period: distance no longer keeps a second row alive.
+
+    The 14-day window used to let the annual report of a period whose release sat
+    further away become a second row for the same identity (production: DEA
+    ``qf`` 2026-02-21 + ``af`` 2026-02-23, both ``FY2025 Q4``; 200 such groups).
+    """
     canonical = {("TEST.HK", "HK"): [
         {"symbol": "TEST.HK", "market": "HK", "fiscal_year": 2026,
          "fiscal_quarter": 2, "report_date": "2026-04-01"},
@@ -104,7 +109,15 @@ def test_a_release_months_away_is_not_the_same_announcement():
         {"period": "4", "period_type": "saf", "fiscal_year": "2026"},
         canonical,
     )
-    assert result == (2026, 2, False)
+    assert result == (None, None, True)
+
+
+def test_report_type_records_which_event_sequence_a_row_came_from():
+    assert sync_earnings.fiscal.report_type_for_period_type("qf") == "Q"
+    assert sync_earnings.fiscal.report_type_for_period_type("3q") == "Q"
+    assert sync_earnings.fiscal.report_type_for_period_type("saf") == "H"
+    assert sync_earnings.fiscal.report_type_for_period_type("af") == "A"
+    assert sync_earnings.fiscal.report_type_for_period_type(None) == "Q"
 
 
 def test_disclosure_label_is_rejected_when_it_breaks_fiscal_order():
