@@ -146,20 +146,76 @@ def check_api_rows() -> bool:
 
 
 def check_ical_agrees() -> bool:
-    start, end = WINDOW
-    rows = api_earnings(start, end)
-    api_periods = len({(r["symbol"], r["market"], r.get("fiscal_year"), r.get("fiscal_quarter"))
-                       for r in rows})
+    """One VEVENT per fiscal period, and the date agrees with the API's row.
+
+    The iCal feed keys its VEVENTs by fiscal identity (UID
+    ``fincal-<symbol>-<market>-FY<fy>-Q<fq>@…``), so a feed that emits one event
+    per UID has exactly one event per period.  Dates are compared to the API's
+    row for the periods both outlets cover, tolerating the one-day shift a UTC
+    timestamp can produce for a local release date.
+    """
+    import re
+
     with db_cursor() as cur:
         cur.execute("SELECT ical_token FROM users WHERE ical_token IS NOT NULL ORDER BY id LIMIT 1")
         row = cur.fetchone()
     if not row:
         print("5. iCal: no subscription token in the database — cannot compare")
         return False
-    text = api_get(f"/api/ical/{row['ical_token']}?start={start}&end={end}")
+
+    text = api_get(f"/ical/{row['ical_token']}?scope=all&predicted=1")
     events = text.count("BEGIN:VEVENT")
-    print(f"5. iCal events: {events}, distinct API periods: {api_periods}")
-    return events == api_periods
+    uids: list[str] = []
+    dates: dict[str, str] = {}
+    current = None
+    for line in text.splitlines():
+        if line.startswith("UID:"):
+            current = line.split(":", 1)[1].strip()
+            uids.append(current)
+        elif line.startswith("DTSTART") and current:
+            values = line.split(":", 1)[1].strip()
+            dates.setdefault(current, values)
+    duplicate_uids = {uid: uids.count(uid) for uid in set(uids) if uids.count(uid) > 1}
+    print(f"5a. iCal events: {events}, distinct UIDs: {len(set(uids))}, "
+          f"duplicated periods: {duplicate_uids or 'none'}")
+
+    api_rows = []
+    # The feed covers its own horizon (today-forward), so compare over the range
+    # the feed itself spans instead of a fixed window.
+    feed_dates = sorted(value[:8] for value in dates.values() if value[:8].isdigit())
+    if feed_dates:
+        api_rows = api_earnings(f"{feed_dates[0][:4]}-{feed_dates[0][4:6]}-{feed_dates[0][6:8]}",
+                                f"{feed_dates[-1][:4]}-{feed_dates[-1][4:6]}-{feed_dates[-1][6:8]}")
+    api_map = {(r["symbol"], r["market"], r.get("fiscal_year"), r.get("fiscal_quarter")):
+               str(r.get("report_date")) for r in api_rows}
+    pattern = re.compile(r"^fincal-(.+)-(US|HK)-FY(\d+)-Q(\d+)@")
+    compared = agreeing = 0
+    mismatches: list[str] = []
+    for uid, start in dates.items():
+        match = pattern.match(uid)
+        if not match:
+            continue
+        key = (match.group(1), match.group(2), int(match.group(3)), int(match.group(4)))
+        api_date = api_map.get(key)
+        if not api_date:
+            continue
+        compared += 1
+        # DTSTART is either a UTC stamp (20260221T133000Z) or a date value
+        # (20260221); both start with YYYYMMDD.
+        digits = start[:8]
+        try:
+            ical_date = date(int(digits[0:4]), int(digits[4:6]), int(digits[6:8]))
+        except (ValueError, IndexError):
+            mismatches.append(f"{uid}: unparsable DTSTART {start}")
+            continue
+        api_parsed = date.fromisoformat(api_date)
+        if abs((ical_date - api_parsed).days) <= 1:
+            agreeing += 1
+        else:
+            mismatches.append(f"{uid}: iCal {ical_date} vs API {api_parsed}")
+    print(f"5b. periods in both outlets: {compared}, agreeing dates: {agreeing}, "
+          f"mismatches: {mismatches[:3] or 'none'}")
+    return events == len(set(uids)) and not duplicate_uids and compared > 0 and agreeing == compared
 
 
 def main() -> int:
