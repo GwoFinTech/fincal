@@ -3,12 +3,12 @@
 Issue #7: layer cache for earnings and popular stocks.
 OpenAPI: all endpoints have response_model for schema generation.
 """
-import json
+import logging
 from fastapi import APIRouter, Depends, HTTPException
 from datetime import date, timedelta
 from ..auth import get_current_user, ensure_user
 from .. import db, config
-from ..symbol import normalize, sort_key, from_lb_counter_id, market_mismatch
+from ..symbol import normalize, sort_key, market_mismatch
 from ..layer_cache import LayerCache
 from ..errors import AppError, NotFoundError, ForbiddenError
 from ..schemas import (
@@ -18,6 +18,8 @@ from ..schemas import (
 )
 
 router = APIRouter(prefix="/api", tags=["api"])
+
+logger = logging.getLogger(__name__)
 
 # Per-endpoint caches. The default symbol universe lives in app.universe (Issue
 # #58) with its own TTL, so /api/popular no longer wraps it in a second,
@@ -330,30 +332,30 @@ def search_stocks(cur, q: str, limit: int = 20) -> list[dict]:
 
 @router.get("/search", response_model=list[SearchItem])
 def api_search_stocks(q: str, user=Depends(get_current_user)):
-    """Search for stocks to add to watchlist."""
+    """Search the earnings universe for stocks to add to the watchlist.
+
+    One source only: the `earnings` table (Issue #71).  The endpoint used to
+    fall back to `longbridge stock-search` when the table had no match, but no
+    such subcommand exists in the Longbridge CLI — the installed one exposes
+    `finance-calendar`, `static`, `consensus`, `forecast-eps` and
+    `institution-rating`, none of which search by keyword.  The branch could
+    therefore never succeed (inside the service image the binary is not even
+    present) and its failure was swallowed by a bare ``except: pass``, so "the
+    fallback failed" and "the universe really has no match" were
+    indistinguishable from the outside.  Removing it keeps the endpoint honest
+    about where its answers come from; `tests/test_search_dedupe.py` now checks
+    every ``longbridge <subcommand>`` the code calls against the real CLI, so a
+    command name can no longer drift out of existence unnoticed.
+
+    A miss is logged instead of silently returning ``[]``, which is what made
+    the old dead branch invisible: `logger.info` carries the query (and its
+    length), never the caller.
+    """
     with db.db_cursor() as cur:
         results = search_stocks(cur, q)
 
     if not results:
-        try:
-            import subprocess
-            cmd = ["longbridge", "stock-search", "--q", q, "--count", "10", "--format", "json"]
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-            if proc.returncode == 0:
-                data = json.loads(proc.stdout)
-                # The CLI provider is the second source for the same list, so it
-                # must not re-introduce a symbol a previous item (or a DB row)
-                # already answered with (Issue #69).
-                seen = {(r["symbol"], r["market"]) for r in results}
-                for item in data.get("list", []):
-                    cid = item.get("counter_id", "")
-                    name = item.get("name", "")
-                    symbol, market = from_lb_counter_id(cid)
-                    if symbol and market and (symbol, market) not in seen:
-                        seen.add((symbol, market))
-                        results.append({"symbol": symbol, "market": market, "company_name": name})
-        except Exception:
-            pass
+        logger.info("search: no universe match for q=%r (len=%d)", q, len(q or ""))
 
     return results
 

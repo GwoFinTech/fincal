@@ -209,7 +209,7 @@ See [docs/watchlist-source.md](docs/watchlist-source.md) for configuration and h
 | `GET` | `/api/watchlist` | Yes | User's watchlist |
 | `POST` | `/api/watchlist` | Yes | Add to watchlist |
 | `DELETE` | `/api/watchlist` | Yes | Remove from watchlist |
-| `GET` | `/api/search` | Yes | Search stocks |
+| `GET` | `/api/search` | Yes | Search stocks (the earnings universe; one row per symbol) |
 | `GET` | `/api/export` | Yes | Export as CSV/JSON |
 | `GET` | `/api/popular` | Yes | Default popular stocks |
 | `GET` | `/ical/{token}` | No | iCal subscription feed |

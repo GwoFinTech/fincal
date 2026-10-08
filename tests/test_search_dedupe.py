@@ -15,11 +15,14 @@ Covered here:
   shows for that symbol (the newest *provider* row, never an algorithm row's copied
   name, with the `stock_names` cache as the fallback), and the relevance ladder;
 * LIKE metacharacters in the query are escaped rather than treated as wildcards;
-* the Longbridge CLI fallback cannot re-introduce a symbol already listed;
+* one source only (Issue #71): the endpoint reads the universe and shells out to
+  nothing, a miss is logged instead of swallowed, and every `longbridge` subcommand
+  the code names is validated against the installed CLI;
 * an executable check against the local PostgreSQL: two spellings of one test symbol
   come back as a single row carrying the newest name.  It runs inside a transaction
   that is always rolled back, so no row is ever committed.
 """
+import re
 import sys
 from pathlib import Path
 from unittest import mock
@@ -134,7 +137,7 @@ def test_the_metacharacter_escapes_reach_the_statement():
     assert cur.executed[1][1]["like"] == "%\\_%"
 
 
-# ── The CLI fallback ────────────────────────────────────────────────
+# ── One source: the earnings universe (Issue #71) ───────────────────
 
 
 class _FakeConn:
@@ -145,31 +148,125 @@ class _FakeConn:
         return False
 
 
-def _cli_result(items):
-    import json
+class _RowsConn:
+    """Same, but the statement answers with the rows a real cursor would."""
 
-    class _Proc:
-        returncode = 0
-        stdout = json.dumps({"list": items})
+    def __init__(self, rows):
+        self.rows = rows
 
-    return _Proc()
+    def __enter__(self):
+        return _RecordingCursor(rows=self.rows)
+
+    def __exit__(self, *a):
+        return False
 
 
-def test_cli_fallback_dedupes_by_symbol():
-    """The second source answers the same list, so it cannot add a duplicate."""
+def test_search_never_shells_out_to_a_provider_cli():
+    """The table is the only source (Issue #71).
+
+    `api_search_stocks` used to append rows from `longbridge stock-search` when the
+    universe had no match.  No such subcommand exists in the Longbridge CLI, so the
+    branch returned exit code 2 (or raised `FileNotFoundError` in the service image,
+    which carries no CLI at all) and a bare `except: pass` swallowed it — the second
+    source never answered anything in any environment.  Shelling out here again would
+    be that dead branch coming back, so the call is made to fail loudly.
+    """
     from app.routers import api
 
-    items = [
-        {"counter_id": "ST/HK/700", "name": "腾讯控股"},
-        {"counter_id": "ST/HK/0700", "name": "TENCENT"},
-        {"counter_id": "ST/HK/80700", "name": "腾讯控股-R"},
-    ]
     with mock.patch.object(api.db, "db_cursor", lambda: _FakeConn()), \
-            mock.patch("subprocess.run", return_value=_cli_result(items)):
-        rows = api.api_search_stocks("0700", user={"id": 1})
+            mock.patch("subprocess.run", side_effect=AssertionError(
+                "GET /api/search must not shell out to a provider CLI")):
+        assert api.api_search_stocks("0700", user={"id": 1}) == []
 
-    assert [r["symbol"] for r in rows] == ["0700.HK", "80700.HK"]
-    assert len({(r["symbol"], r["market"]) for r in rows}) == len(rows)
+
+def test_search_returns_the_universe_rows_untouched():
+    """The DB answer *is* the response: nothing is appended to it."""
+    from app.routers import api
+
+    rows = [{"symbol": "0700.HK", "market": "HK", "company_name": "腾讯控股"}]
+    with mock.patch.object(api.db, "db_cursor", lambda: _RowsConn(rows)), \
+            mock.patch("subprocess.run", side_effect=AssertionError("must not shell out")):
+        assert api.api_search_stocks("0700", user={"id": 1}) == rows
+
+
+def test_a_miss_is_logged_rather_than_swallowed(caplog):
+    """An empty answer has to be diagnosable somewhere.
+
+    "the fallback failed" and "the universe really has no match" were
+    indistinguishable from outside the process; the miss now leaves a record that
+    names the query, so the next search complaint starts from the log.
+    """
+    import logging
+
+    from app.routers import api
+
+    with caplog.at_level(logging.INFO, logger="app.routers.api"), \
+            mock.patch.object(api.db, "db_cursor", lambda: _FakeConn()):
+        assert api.api_search_stocks("ZZNOPE", user={"id": 1}) == []
+
+    assert any("ZZNOPE" in r.getMessage() for r in caplog.records), caplog.text
+
+
+# ── The CLI contract: subcommands in the code must exist in the CLI ──
+
+#: `["longbridge", "<subcommand>", …]` — the literal argv shape.  The `[` matters:
+#: `start_run("longbridge", "longbridge", …)` names a *stage*, not a subcommand.
+_LITERAL_CALL = re.compile(r"""\[\s*["']longbridge["']\s*,\s*["']([\w-]+)["']""")
+#: The commands `sync_consensus` hands to `provider_json`, which are not adjacent
+#: to the literal (the argv is built inside that helper).
+_DYNAMIC_CALL = re.compile(r"""provider_json\(\s*["']([\w-]+)["']""")
+#: One line of `longbridge --help`: the name, then at least two spaces, then text.
+_HELP_COMMAND = re.compile(r"^\s{2,8}([a-z][a-z0-9-]*)\s{2,}\S", re.MULTILINE)
+
+
+def _longbridge_subcommands_in_source() -> dict[str, list[str]]:
+    """Every ``longbridge <subcommand>`` the production code asks for, by file."""
+    found: dict[str, list[str]] = {}
+    sources = sorted((ROOT / "app").rglob("*.py")) + sorted((ROOT / "scripts").rglob("*.py"))
+    for path in sources:
+        text = path.read_text(encoding="utf-8")
+        for match in list(_LITERAL_CALL.finditer(text)) + list(_DYNAMIC_CALL.finditer(text)):
+            name = match.group(1)
+            if name.startswith("-"):     # a flag such as `--version`, not a subcommand
+                continue
+            found.setdefault(name, []).append(str(path.relative_to(ROOT)))
+    return found
+
+
+def _longbridge_help() -> str:
+    import subprocess
+
+    try:
+        proc = subprocess.run(["longbridge", "--help"], capture_output=True,
+                              text=True, timeout=15)
+    except (FileNotFoundError, OSError):     # pragma: no cover - depends on the host
+        pytest.skip("the longbridge CLI is not installed on this host")
+    if proc.returncode != 0:                 # pragma: no cover - depends on the host
+        pytest.skip(f"longbridge --help exited {proc.returncode}")
+    return proc.stdout + proc.stderr
+
+
+def test_the_scan_sees_every_caller_shape():
+    """A regex that stopped matching must not pass as "no subcommands" (Issue #71)."""
+    found = _longbridge_subcommands_in_source()
+    assert {"static", "finance-calendar"} <= set(found), found      # literal argv
+    assert {"consensus", "forecast-eps", "institution-rating"} <= set(found), found  # provider_json
+
+
+def test_every_longbridge_subcommand_the_code_calls_exists_in_the_cli():
+    """The command names are validated against the CLI that has to answer them.
+
+    This is the check whose absence let `stock-search` live in `api_search_stocks`
+    for four months: `scripts/sync_consensus.py` already stores
+    ``{"checked_command": "longbridge --help"}`` as evidence for "this endpoint is
+    unavailable", and the same evidence decides whether a call the code makes can
+    ever succeed.
+    """
+    found = _longbridge_subcommands_in_source()
+    known = set(_HELP_COMMAND.findall(_longbridge_help()))
+    assert known, "could not parse any subcommand out of `longbridge --help`"
+    missing = {name: where for name, where in found.items() if name not in known}
+    assert not missing, f"the CLI has no such subcommand: {missing}"
 
 
 # ── Executed against the local database (skipped when unreachable) ──
