@@ -206,6 +206,12 @@ def recover_stale_runs(timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS) -> int:
     - heartbeat_at is older than timeout_seconds (or NULL)
     - started_at is older than timeout_seconds
 
+    Unlike :func:`reap_timeout_runs`, the global ``timeout_seconds`` is kept on
+    purpose here (Issue #33): this is the recovery an operator can also trigger
+    by hand (``POST /api/admin/sync-runs/recover``), and judging "the process
+    that owned this run is gone" by a grace period of its own must not become
+    impossible for a run that declared an unusually long timeout.
+
     Returns the number of runs marked as interrupted.
     """
     cutoff = _utcnow() - timedelta(seconds=timeout_seconds)
@@ -228,12 +234,22 @@ def recover_stale_runs(timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS) -> int:
 
 
 def reap_timeout_runs(timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS) -> int:
-    """Background reaper: mark timed-out running tasks.
+    """Background reaper: mark timed-out running tasks as interrupted.
 
-    Should be called periodically (e.g. every 5 minutes).
+    Called periodically by ``app/timeout_reaper.py``, which the application
+    lifespan starts (Issue #33).  A run is judged by **its own**
+    ``timeout_seconds`` — the value :func:`start_run` wrote for that run — and
+    not by a global cutoff: a stage configured with a longer or shorter budget
+    was previously forever judged against 3600s, so the per-run column was
+    written but never read ("configuration illusion").  ``timeout_seconds``
+    here is only the fallback for a row whose column is missing or zero.
+
+    A row that never wrote a heartbeat is aged from ``started_at`` (the column
+    is always set by :func:`start_run`), so a legacy row cannot sit in
+    ``running`` forever.
+
     Returns the number of runs reaped.
     """
-    cutoff = _utcnow() - timedelta(seconds=timeout_seconds)
     with db.db_cursor() as cur:
         cur.execute(
             """UPDATE sync_runs
@@ -242,8 +258,9 @@ def reap_timeout_runs(timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS) -> int:
                    error_code = 'timeout_reaper',
                    details = details || '{"recovered_by": "reaper"}'::jsonb
                WHERE status = 'running'
-                 AND heartbeat_at < %s""",
-            (cutoff,),
+                 AND COALESCE(heartbeat_at, started_at)
+                     < NOW() - make_interval(secs => COALESCE(NULLIF(timeout_seconds, 0), %s))""",
+            (timeout_seconds,),
         )
         count = cur.rowcount
         if count:

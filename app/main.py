@@ -23,7 +23,15 @@ async def lifespan(app: FastAPI):
     # Recover stale sync runs from previous process (issue #3)
     from .sync_audit import recover_stale_runs
     recover_stale_runs()
-    yield
+    # Enforce each run's own timeout while this process is up (issue #33): the
+    # reaper existed but had no caller, so a run left behind by a dead process
+    # stayed 'running' until the next container start.
+    from .timeout_reaper import start_timeout_reaper, stop_timeout_reaper
+    start_timeout_reaper()
+    try:
+        yield
+    finally:
+        stop_timeout_reaper()
 
 
 app = FastAPI(title="FinCal", lifespan=lifespan)

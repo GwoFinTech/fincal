@@ -268,6 +268,28 @@ whole process and strands a `running` audit row that would block every later
 sync. The audited run is also wrapped in a `finally` that forces a terminal
 state on any exit path.
 
+### Sync-run timeout reaper (Issue #33)
+
+`sync_runs.timeout_seconds` is written for every run by
+`sync_audit.start_run()`, but nothing read it and `reap_timeout_runs()` had no
+caller in the repository — so a run whose owning process died (a stage killed by
+the cron wrapper's `timeout`, a container restarted mid-run, a provider call
+that never returned) stayed `status='running'` until the container started
+again. Until then `/api/admin/sync-runs` and the admin panel rendered a job that
+was not running, and the per-run timeout column was a configuration illusion.
+
+- The application lifespan now starts one daemon thread
+  (`app/timeout_reaper.py`) that runs a reaping pass every
+  `SYNC_RUN_REAPER_INTERVAL_SECONDS` (default `300`) and stops on shutdown.
+- A run is interrupted once **its own** `timeout_seconds` has elapsed since its
+  last heartbeat (aged from `started_at` when a run never wrote one), so a stage
+  with a longer or shorter budget is no longer judged against a fixed hour.
+- Startup recovery (`recover_stale_runs()`, also reachable through
+  `POST /api/admin/sync-runs/recover`) keeps its global grace period on purpose:
+  that path must stay able to reclaim a run that declared an unusually long
+  timeout. Neither path restarts the stage — the next scheduled run re-runs it.
+- `SYNC_RUN_REAPER_ENABLED=false` turns the periodic reaper off.
+
 ### Sync freshness monitoring (Issue #53)
 
 Dependency probes alone cannot tell "the dependencies are up" from "the pipeline

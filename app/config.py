@@ -145,3 +145,18 @@ SYNC_STAGE_STALE_AFTER_HOURS = float(os.getenv("SYNC_STAGE_STALE_AFTER_HOURS", "
 # window is empty ~6 of 7 days for a weekly pipeline; 14 days covers at least
 # one full cycle. The legacy `sync_runs_24h` field is kept for compatibility.
 SYNC_RUNS_WINDOW_HOURS = int(os.getenv("SYNC_RUNS_WINDOW_HOURS", "336"))
+
+# Sync-run timeout reaper (Issue #33). `sync_runs.timeout_seconds` is written per
+# run by start_run() but nothing ever read it, and the periodic reaper meant to
+# enforce it had no caller — so a run whose owning process died (stage killed by
+# the cron wrapper's `timeout`, container restarted mid-run) stayed `running`
+# until the container started again, and the admin panel showed a job that was
+# not running. The application lifespan now starts one daemon thread that
+# reaps runs past their own `timeout_seconds`; disable it with
+# SYNC_RUN_REAPER_ENABLED=false (startup/manual recovery is unaffected).
+SYNC_RUN_REAPER_ENABLED = os.getenv("SYNC_RUN_REAPER_ENABLED", "true").strip().lower() not in (
+    "0", "false", "no", "off",
+)
+# Reaping pass interval. A run is interrupted within its own timeout plus this
+# interval; startup recovery already covers the previous process's runs.
+SYNC_RUN_REAPER_INTERVAL_SECONDS = float(os.getenv("SYNC_RUN_REAPER_INTERVAL_SECONDS", "300"))
