@@ -9,6 +9,7 @@ import hashlib
 import logging
 import psycopg2
 import psycopg2.extras
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Iterator
@@ -119,7 +120,12 @@ def finish_run(
     overwritten back to ``success``/``failed`` (Issue #28).
 
     Returns ``True`` if the row transitioned, ``False`` if the run was already
-    in a terminal state and was left untouched.
+    in a terminal state and was left untouched — in which case it also logs a
+    WARNING (Issue #78): the row was moved by someone else (an admin cancel, the
+    timeout reaper) and this run's real terminal state — ``success`` with its
+    ``record_count``, or ``failed`` with its ``error_code`` — is being dropped.
+    That silent drop is what made a successful-but-overlong stage look like a
+    failed one to ``app/freshness.py`` (it only counts ``status='success'``).
     """
     with db.db_cursor() as cur:
         cur.execute(
@@ -130,7 +136,14 @@ def finish_run(
             (status, record_count, db.psycopg2.extras.Json(details or {}),
              error_code, _utcnow(), _utcnow(), run_id),
         )
-        return cur.rowcount > 0
+        transitioned = cur.rowcount > 0
+    if not transitioned:
+        logger.warning(
+            "sync run %s was not transitioned to %s: it is no longer 'running' "
+            "(cancelled by an admin, or reaped after its own timeout) — this "
+            "terminal state was discarded", run_id, status,
+        )
+    return transitioned
 
 
 # ── Cancellation awareness (Issue #28) ──────────────────────────────
@@ -174,6 +187,40 @@ def heartbeat(run_id: int, *, phase: str | None = None,
             params.append(total)
         params.append(run_id)
         cur.execute(f"UPDATE sync_runs SET {', '.join(sets)} WHERE id=%s", params)
+
+
+#: Minimum spacing between the progress heartbeats of a stage's inner loop.
+HEARTBEAT_MIN_INTERVAL_SECONDS = 60.0
+
+
+class HeartbeatThrottle:
+    """Write a stage's progress heartbeat at most once per ``interval_seconds``.
+
+    The reaper ages a run from ``COALESCE(heartbeat_at, started_at)`` against the
+    row's *own* ``timeout_seconds`` (Issues #33/#78).  Two failure modes follow:
+    a stage that never writes a heartbeat is reaped at its budget even while it
+    is still working (only ``sync_futu`` wrote one), and a stage that writes one
+    per symbol adds a row write per symbol.  :meth:`maybe` writes the first beat
+    and then at most one per interval, so a long stage stays visibly alive
+    without measurable write amplification (≥60s, never per symbol).
+    """
+
+    def __init__(self, interval_seconds: float = HEARTBEAT_MIN_INTERVAL_SECONDS, *,
+                 clock=None):
+        self.interval_seconds = float(interval_seconds)
+        self._clock = clock or time.monotonic
+        self._last: dict[int, float] = {}
+
+    def maybe(self, run_id: int, *, phase: str | None = None,
+              current: int | None = None, total: int | None = None) -> bool:
+        """Heartbeat ``run_id`` when the interval elapsed; return whether it wrote."""
+        now = self._clock()
+        last = self._last.get(run_id)
+        if last is not None and (now - last) < self.interval_seconds:
+            return False
+        self._last[run_id] = now
+        heartbeat(run_id, phase=phase, current=current, total=total)
+        return True
 
 
 # ── Checkpoint (for resume) ────────────────────────────────────────

@@ -49,6 +49,7 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 
 from app.db import db_cursor, init_db  # noqa: E402
+from app.config import stage_timeout  # noqa: E402
 from app.provenance import RETRACTED_ACTUAL_SOURCE  # noqa: E402
 from app.sync_audit import (  # noqa: E402
     LOCK_FUTU_EARNINGS,
@@ -224,7 +225,8 @@ def refill(symbols: list[str]):
         print("  OpenD unavailable — refill skipped; retracted rows stay replaceable")
         return None
     run_id = start_run(REFILL_STAGE, "futu", symbol_count=len(symbols),
-                       idempotency_key=REFILL_KEY)
+                       idempotency_key=REFILL_KEY,
+                       timeout_seconds=stage_timeout(REFILL_STAGE))
     if run_id is None:
         ctx.close()
         print("  a refill run is already in progress — skipped")

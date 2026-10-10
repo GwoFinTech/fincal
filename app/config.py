@@ -160,3 +160,46 @@ SYNC_RUN_REAPER_ENABLED = os.getenv("SYNC_RUN_REAPER_ENABLED", "true").strip().l
 # Reaping pass interval. A run is interrupted within its own timeout plus this
 # interval; startup recovery already covers the previous process's runs.
 SYNC_RUN_REAPER_INTERVAL_SECONDS = float(os.getenv("SYNC_RUN_REAPER_INTERVAL_SECONDS", "300"))
+
+# Per-stage wall-clock budget of the weekly pipeline (Issue #78).
+#
+# `scripts/sync_all.sh` wraps every stage in `timeout <budget>`, and the reaper
+# judges a run by `sync_runs.timeout_seconds` — so the stage script must write
+# *that same number* into its own audit row. Before this, only the reader half
+# existed: `start_run()` always wrote its 3600s default while the real budget
+# lived in the shell, so a stage killed by cron kept a `running` row until the
+# 3600s cutoff (predictions are budgeted 600s → ~55 minutes of ghost job, during
+# which a manual re-run returned "already running, skipping" and refreshed
+# nothing), and a budget raised above 3600 made the reaper interrupt a *live* run
+# and silently discard its real terminal state.
+#
+# This table is the value `sync_all.sh` mirrors (its `FINCAL_STAGE_TIMEOUT_*`
+# defaults); `tests/test_issue78_stage_timeouts.py` runs the contract —
+# changing either side alone fails the suite.
+STAGE_TIMEOUT_SECONDS = {
+    "longbridge": 900,
+    "futu": 1500,
+    "stock_names": 900,
+    "consensus": 2400,
+    "prediction": 600,
+    # Not a pipeline stage: the on-demand EPS field refill re-reads the same
+    # Futu interface as the `futu` stage, with the same budget.
+    "futu_eps_field_fix": 1500,
+}
+
+
+def stage_timeout(stage: str) -> int:
+    """Wall-clock budget, in seconds, that the pipeline enforces for ``stage``.
+
+    Reads ``FINCAL_STAGE_TIMEOUT_<STAGE>`` — the very variable
+    ``scripts/sync_all.sh`` reads — so a stage's ``sync_runs`` row always
+    declares the budget the stage really runs under (Issue #78).
+    """
+    try:
+        default = STAGE_TIMEOUT_SECONDS[stage]
+    except KeyError:
+        raise KeyError(
+            f"unknown sync stage {stage!r}; register it in "
+            "app.config.STAGE_TIMEOUT_SECONDS"
+        ) from None
+    return int(os.getenv(f"FINCAL_STAGE_TIMEOUT_{stage.upper()}", str(default)))

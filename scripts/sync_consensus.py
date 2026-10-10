@@ -11,10 +11,11 @@ from decimal import Decimal, InvalidOperation
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from app.config import stage_timeout
 from app.db import db_cursor, init_db
 from app.symbol import normalize
 from app.phase3 import rating_row
-from app.sync_audit import finish_run, start_run
+from app.sync_audit import finish_run, start_run, HeartbeatThrottle
 from app.watchlist import get_source
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -153,10 +154,22 @@ def persist(consensus, forecasts, ratings, symbols):
                 page_size=200)
 
 
-def sync():
+def sync(run_id: int | None = None):
+    """Fetch consensus / forecast-EPS / rating rows for the whole watchlist.
+
+    ``run_id`` (when given) receives a throttled progress heartbeat: the stage is
+    budgeted 2400s, so its audit row must age from real progress instead of from
+    its start time (Issue #78).
+    """
     consensus, forecasts, ratings, failures, symbols = [], [], [], [], []
+    beats = HeartbeatThrottle()
+    processed = 0
     for market, market_symbols in get_source().get_symbols_by_market().items():
         for symbol in market_symbols:
+            processed += 1
+            if run_id is not None:
+                beats.maybe(run_id, phase=f"consensus-{market.lower()}",
+                            current=processed)
             symbols.append((normalize(symbol, market), market))
             try:
                 consensus.extend(consensus_rows(symbol, market, provider_json("consensus", symbol, market, pace_seconds=3)))
@@ -174,12 +187,13 @@ if __name__ == "__main__":
     source = get_source()
     symbol_count = sum(len(symbols) for symbols in source.get_symbols_by_market().values())
     run = start_run("consensus", "longbridge", symbol_count=symbol_count,
-                     idempotency_key="longbridge:consensus:full")
+                     idempotency_key="longbridge:consensus:full",
+                     timeout_seconds=stage_timeout("consensus"))
     if run is None:
         log.info("consensus sync already running, skipping")
         sys.exit(0)
     try:
-        consensus_count, forecast_count, rating_count, failed = sync()
+        consensus_count, forecast_count, rating_count, failed = sync(run)
         finish_run(
             run,
             status="failed" if failed else "success",

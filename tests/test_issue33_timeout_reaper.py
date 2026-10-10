@@ -32,6 +32,11 @@ sys.path.insert(0, str(ROOT))
 from app import config, db, sync_audit, timeout_reaper
 from app.sync_audit import reap_timeout_runs
 
+# The stage budgets the pipeline really enforces (Issue #78): a row is only
+# reclaimable once its *declared* budget — the one `start_run()` now writes from
+# the same variable `sync_all.sh` uses — has elapsed.
+stage_timeout = config.stage_timeout
+
 
 # ── SQL contract ───────────────────────────────────────────────────────────
 
@@ -103,15 +108,27 @@ class ReaperCutoffTests(TestCase):
             "set FINCAL_TEST_DB=1 with a reachable fincal DB (the reaper's own "
             "UPDATE runs against a temp table inside a rolled-back transaction)")
 class PerRunTimeoutTests(TestCase):
-    """A long-budget run must survive while a short-budget one is reaped."""
+    """A long-budget run must survive while a short-budget one is reaped.
+
+    The budgets are the declared per-stage ones (Issue #78), so this class also
+    fails if a stage's declared budget stops being a usable cutoff.
+    """
 
     ROWS = (
         # label, heartbeat age, started age, timeout_seconds, expected reaped
-        ("expired_vs_own_timeout", "10 seconds", "10 seconds", 5, True),
-        ("long_budget_still_healthy", "10 seconds", "10 seconds", 86400, False),
-        ("expired_vs_short_budget", "2 hours", "2 hours", 60, True),
-        ("no_heartbeat_expired", None, "2 hours", 60, True),
-        ("no_heartbeat_fresh", None, "0 seconds", 60, False),
+        # `prediction` is budgeted 600s in the pipeline: a row whose heartbeat
+        # stopped at its start is reclaimable once 700s have passed.
+        ("expired_vs_own_timeout", "700 seconds", "700 seconds",
+         stage_timeout("prediction"), True),
+        # `consensus` gets the widest budget (2400s) and — like every stage since
+        # Issue #78 — keeps heartbeating while it works: a live run must not be
+        # reaped at its budget.
+        ("long_budget_still_healthy", "1 minute", "1 minute",
+         stage_timeout("consensus"), False),
+        ("expired_vs_short_budget", "2 hours", "2 hours",
+         stage_timeout("stock_names"), True),
+        ("no_heartbeat_expired", None, "2 hours", stage_timeout("stock_names"), True),
+        ("no_heartbeat_fresh", None, "0 seconds", stage_timeout("stock_names"), False),
         ("zero_timeout_falls_back", "2 hours", "2 hours", 0, True),
     )
 

@@ -772,13 +772,15 @@ def merge_symbol_onto_canonical(cur, dirty_sym: str, market: str, canonical_sym:
 
 if __name__ == "__main__":
     from app.db import init_db
-    from app.sync_audit import start_run, finish_run
+    from app.config import stage_timeout
+    from app.sync_audit import start_run, finish_run, HeartbeatThrottle
     init_db()
     all_symbols = []
     for mkt, syms in get_source().get_symbols_by_market().items():
         for s in syms:
             all_symbols.append((s, mkt))
-    run_id = start_run("prediction", "algorithm", symbol_count=len(all_symbols))
+    run_id = start_run("prediction", "algorithm", symbol_count=len(all_symbols),
+                       timeout_seconds=stage_timeout("prediction"))
     stats = PredictionStats()
     try:
         merge_duplicate_symbols()
@@ -790,7 +792,13 @@ if __name__ == "__main__":
 
         logger.info("Predicting future earnings dates...")
         total = 0
+        # Issue #78: the walk is the long part of this 600s-budgeted stage, so
+        # keep its audit row fresh (one write per minute, never per symbol).
+        beats = HeartbeatThrottle()
         for i, (symbol, market) in enumerate(all_symbols):
+            if run_id is not None:
+                beats.maybe(run_id, phase="predict",
+                            current=i, total=len(all_symbols))
             count = predict_for_symbol(symbol, market, stats)
             total += count
             if (i + 1) % 10 == 0:

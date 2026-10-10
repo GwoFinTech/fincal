@@ -56,7 +56,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.db import db_cursor
 from app.symbol import from_lb_counter_id, normalize
-from app.sync_audit import check_cancelled, SyncCancelledError
+from app.config import stage_timeout
+from app.sync_audit import check_cancelled, SyncCancelledError, HeartbeatThrottle
 from app.sync_quality import SyncQuality
 from app import fiscal
 from app.provenance import UNKNOWN_ATTRIBUTION, normalize_currency
@@ -577,6 +578,11 @@ def sync_earnings(run_id: int, stats: SyncStats | None = None) -> SyncStats:
 
     run_stats = stats if stats is not None else SyncStats()
 
+    # Issue #78: the audit row must age from real progress, not from its start
+    # time — the reaper judges it by `timeout_seconds` (900s here).  Throttled to
+    # one write per minute, not one per page.
+    beats = HeartbeatThrottle()
+
     for market in ["US", "HK"]:
         check_cancelled(run_id)
         logger.info(f"=== Fetching {market} earnings [{start} → {end}] ===")
@@ -587,6 +593,8 @@ def sync_earnings(run_id: int, stats: SyncStats | None = None) -> SyncStats:
         batch = []
         for page in pages:
             check_cancelled(run_id)
+            beats.maybe(run_id, phase=f"calendar-{market.lower()}",
+                        current=run_stats.fetched)
             for info in page.get("infos", []):
                 symbol, mkt = from_lb_counter_id(info.get("counter_id", ""))
                 if not symbol:
@@ -654,7 +662,7 @@ def sync_earnings(run_id: int, stats: SyncStats | None = None) -> SyncStats:
 if __name__ == "__main__":
     from app.db import init_db
     from app.sync_audit import (
-        start_run, finish_run, heartbeat, advisory_lock,
+        start_run, finish_run, advisory_lock,
         SyncCancelledError, LOCK_LONGBRIDGE_EARNINGS,
     )
     init_db()
@@ -664,6 +672,7 @@ if __name__ == "__main__":
             sys.exit(0)
         run_id = start_run("longbridge", "longbridge",
                            idempotency_key="longbridge:earnings:full",
+                           timeout_seconds=stage_timeout("longbridge"),
                            symbol_count=0)
         if run_id is None:
             logger.info("longbridge earnings sync already running, skipping")

@@ -105,6 +105,13 @@ The entrypoint runs the pipeline and then the freshness gate:
    stage keeps its per-stage log under `/tmp/fincal-sync.*/`, and the run ends
    with a `stage summary` table.
 
+   The budgets are *exported* and read again by the stage scripts
+   (`app.config.stage_timeout()` → `start_run(timeout_seconds=…)`), so the
+   stage's own audit row declares the budget it really ran under (Issue #78).
+   The shell defaults and `app/config.py::STAGE_TIMEOUT_SECONDS` are the same
+   table, and `tests/test_issue78_stage_timeouts.py` fails when one side is
+   changed alone.
+
 2. `scripts/check_sync_freshness.py` — the hard gate, run **after** the stages
    so a first catch-up run is judged on the data it just wrote. Its non-zero
    exit (a stage that stopped running, or a derived table that is stale) plus
@@ -284,6 +291,21 @@ was not running, and the per-run timeout column was a configuration illusion.
 - A run is interrupted once **its own** `timeout_seconds` has elapsed since its
   last heartbeat (aged from `started_at` when a run never wrote one), so a stage
   with a longer or shorter budget is no longer judged against a fixed hour.
+- That column is only meaningful if the stage actually declares its budget: every
+  stage script now writes `timeout_seconds=FINCAL_STAGE_TIMEOUT_<STAGE>` — the
+  same variable `sync_all.sh` enforces with `timeout` (Issue #78) — and its inner
+  loop heartbeats progress at most once a minute, so a *working* stage is not
+  reaped at its budget while a *dead* one becomes terminal within its own budget
+  plus one reaper interval. Before this, every run was written with the 3600s
+  default: a 600s-budgeted prediction stage that cron killed kept a ghost
+  `running` row for ~55 minutes (during which a manual re-run answered "already
+  running, skipping" and refreshed nothing), and a stage whose real budget
+  exceeded 3600s was interrupted *while alive*, silently discarding its terminal
+  state.
+- `finish_run()` logs a WARNING when the row it was asked to close is no longer
+  `running` (cancelled by an admin, or already reaped): the run's real terminal
+  state — `success` with its record count, or `failed` with its error code — is
+  being dropped, which is exactly what `app/freshness.py` reads.
 - Startup recovery (`recover_stale_runs()`, also reachable through
   `POST /api/admin/sync-runs/recover`) keeps its global grace period on purpose:
   that path must stay able to reclaim a run that declared an unusually long

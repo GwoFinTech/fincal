@@ -30,11 +30,28 @@ export DB_HOST=localhost
 # Per-stage wall-clock budget in seconds.  `consensus` is the slowest stage
 # (133 symbols × 3 Longbridge CLI calls with pacing), so it gets the widest
 # budget; a timeout only leaves partial upserts, which are idempotent.
+#
+# These are the shell mirror of app/config.py::STAGE_TIMEOUT_SECONDS — the
+# canonical table — and tests/test_issue78_stage_timeouts.py fails when either
+# side is changed alone.
 TIMEOUT_LONGBRIDGE="${FINCAL_STAGE_TIMEOUT_LONGBRIDGE:-900}"
 TIMEOUT_FUTU="${FINCAL_STAGE_TIMEOUT_FUTU:-1500}"
 TIMEOUT_STOCK_NAMES="${FINCAL_STAGE_TIMEOUT_STOCK_NAMES:-900}"
 TIMEOUT_CONSENSUS="${FINCAL_STAGE_TIMEOUT_CONSENSUS:-2400}"
 TIMEOUT_PREDICTION="${FINCAL_STAGE_TIMEOUT_PREDICTION:-600}"
+
+# Export the budgets resolved above so each stage script declares the *same*
+# number in its own `sync_runs` row (app.config.stage_timeout → start_run's
+# `timeout_seconds`, Issue #78).  The reaper judges a run by that column: a row
+# written with the 3600s default while the stage was really budgeted 600s left a
+# ghost `running` job for ~55 minutes, and a stage kept running past 3600s had
+# its real terminal state discarded.  Budgets without `export` reached only
+# `timeout`, never the stage process.
+export FINCAL_STAGE_TIMEOUT_LONGBRIDGE="${TIMEOUT_LONGBRIDGE}"
+export FINCAL_STAGE_TIMEOUT_FUTU="${TIMEOUT_FUTU}"
+export FINCAL_STAGE_TIMEOUT_STOCK_NAMES="${TIMEOUT_STOCK_NAMES}"
+export FINCAL_STAGE_TIMEOUT_CONSENSUS="${TIMEOUT_CONSENSUS}"
+export FINCAL_STAGE_TIMEOUT_PREDICTION="${TIMEOUT_PREDICTION}"
 
 LOG_DIR="$(mktemp -d "/tmp/fincal-sync.XXXXXX")"
 STAGE_STATUS=()

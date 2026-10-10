@@ -26,7 +26,7 @@ from app.provenance import (
     normalize_currency,
 )
 from app.symbol import normalize, to_futu_code
-from app.sync_audit import check_cancelled
+from app.sync_audit import check_cancelled, HeartbeatThrottle
 from app.watchlist import get_source
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -599,9 +599,15 @@ def sync_earnings_dates(ctx, run_id: int, symbols: list[str]) -> FutuStageStats:
     limiter = get_rate_limiter()
     batch = []
     cutoff = date.today() - timedelta(days=365)
+    # Issue #78: the stage is budgeted 1500s and its row must reflect real
+    # progress, so the reaper ages it from a live heartbeat rather than from its
+    # start (throttled to one write per minute, not one per symbol).
+    beats = HeartbeatThrottle()
 
     for source_symbol in symbols:
         check_cancelled(run_id)
+        beats.maybe(run_id, phase="dates",
+                    current=stats.symbols_attempted, total=len(symbols))
         stats.symbols_attempted += 1
         symbol, market = canonical_earnings_symbol(source_symbol)
         futu_code = to_futu_code(source_symbol)
@@ -671,9 +677,14 @@ def sync_actuals(ctx, run_id: int, symbols: list[str]) -> FutuStageStats:
     """
     stats = FutuStageStats()
     limiter = get_rate_limiter()
+    # Issue #78: heartbeat the actuals loop as well (the phase-level heartbeat in
+    # run_sync() is written once, before the loop starts).
+    beats = HeartbeatThrottle()
 
     for source_symbol in symbols:
         check_cancelled(run_id)
+        beats.maybe(run_id, phase="actuals",
+                    current=stats.symbols_attempted, total=len(symbols))
         stats.symbols_attempted += 1
         symbol, market = canonical_earnings_symbol(source_symbol)
         futu_code = to_futu_code(source_symbol)
@@ -795,12 +806,14 @@ def run_sync(ctx) -> int | None:
 
     symbols, skipped = get_source().get_futu_symbols_with_skipped()
     run_id = start_run("futu", "futu", symbol_count=len(symbols),
-                       idempotency_key="futu:earnings:full")
+                       idempotency_key="futu:earnings:full",
+                       timeout_seconds=config.stage_timeout("futu"))
     if run_id is None:
         logger.info("futu sync already running, skipping")
         return None
     date_stats = FutuStageStats()
     actual_stats = FutuStageStats()
+    terminal = False
     try:
         try:
             heartbeat(run_id, phase="dates", current=0, total=len(symbols))
@@ -809,29 +822,32 @@ def run_sync(ctx) -> int | None:
             actual_stats = sync_actuals(ctx, run_id, symbols)
         except SyncCancelledError:
             # Admin cancelled this run; keep the terminal 'cancelled' state.
-            finish_run(run_id, status="cancelled", error_code="cancelled_by_admin")
+            terminal = finish_run(run_id, status="cancelled",
+                                  error_code="cancelled_by_admin")
             logger.warning("futu sync cancelled by admin; stopping")
             raise
         except Exception:
-            finish_run(run_id, status="failed", error_code="futu_sync_failed")
+            terminal = finish_run(run_id, status="failed", error_code="futu_sync_failed")
             raise
         else:
             status, error_code = futu_audit_outcome(date_stats, actual_stats)
-            finish_run(
+            terminal = finish_run(
                 run_id, status=status, record_count=date_stats.total,
                 details=futu_audit_details(date_stats, actual_stats, skipped),
                 error_code=error_code,
             )
         return run_id
     finally:
-        # Belt and braces: ``finish_run`` only transitions rows that are still
-        # 'running', so this is a no-op after a normal terminal transition and
-        # guarantees no path can leave the row blocking the next sync.
-        try:
-            finish_run(run_id, status="interrupted",
-                       error_code="futu_sync_interrupted")
-        except Exception:
-            logger.exception("could not force terminal state for run %s", run_id)
+        # Belt and braces, but only for a path that could not record its own
+        # terminal state: ``finish_run`` on a run that already left 'running' is
+        # a no-op that now warns (Issue #78), and forcing "interrupted" over an
+        # already-recorded success would be a false alarm.
+        if not terminal:
+            try:
+                finish_run(run_id, status="interrupted",
+                           error_code="futu_sync_interrupted")
+            except Exception:
+                logger.exception("could not force terminal state for run %s", run_id)
 
 
 if __name__ == "__main__":
@@ -849,7 +865,8 @@ if __name__ == "__main__":
 
         ctx = create_futu_context()
         if ctx is None:
-            run_id = start_run("futu", "futu", idempotency_key="futu:earnings:full")
+            run_id = start_run("futu", "futu", idempotency_key="futu:earnings:full",
+                               timeout_seconds=config.stage_timeout("futu"))
             if run_id is not None:
                 finish_run(run_id, status="skipped", error_code="opend_unavailable")
             sys.exit(0)  # Non-fatal — skip Futu sync

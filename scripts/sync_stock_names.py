@@ -17,8 +17,11 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.company_name import resolve_company_name_result  # noqa: E402
+from app.config import stage_timeout  # noqa: E402
 from app.db import db_cursor, init_db  # noqa: E402
-from app.sync_audit import finish_run, heartbeat, start_run  # noqa: E402
+from app.sync_audit import (  # noqa: E402
+    HeartbeatThrottle, finish_run, heartbeat, start_run,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("sync_stock_names")
@@ -54,7 +57,7 @@ def cache_name(symbol: str, market: str, name: str, source: str) -> None:
         )
 
 
-def main() -> tuple[int, list[tuple[str, str]]]:
+def main(run_id: int | None = None) -> tuple[int, list[tuple[str, str]]]:
     """Resolve every company name that is still missing.
 
     Returns ``(filled, unresolved)`` where ``unresolved`` holds
@@ -62,15 +65,22 @@ def main() -> tuple[int, list[tuple[str, str]]]:
     targets but resolved none of them must not be recorded as a success
     (Issue #67), which is why the failure list leaves this function instead of
     only being logged.
+
+    ``run_id`` (when given) receives a throttled progress heartbeat — each target
+    is a network round trip, so the stage can run for minutes against its 900s
+    budget and its audit row must age from real progress (Issue #78).
     """
     init_db()
     targets = missing_name_targets()
     logger.info("targets without company name: %d", len(targets))
 
+    beats = HeartbeatThrottle()
     filled = 0
     failed: list[tuple[str, str]] = []
     for i, t in enumerate(targets):
         symbol, market = t["symbol"], t["market"]
+        if run_id is not None:
+            beats.maybe(run_id, phase="names", current=i, total=len(targets))
         result = resolve_company_name_result(symbol, market)
         if result.ok:
             cache_name(symbol, market, result.name, result.source)
@@ -94,14 +104,15 @@ def run() -> int:
     """
     init_db()
     run_id = start_run("stock_names", "kurumi+longbridge+futu",
-                       idempotency_key="stock_names:full")
+                       idempotency_key="stock_names:full",
+                       timeout_seconds=stage_timeout("stock_names"))
     if run_id is None:
         logger.info("stock name sync already running, skipping")
         return 0
 
     unresolved: list[tuple[str, str]] = []
     try:
-        filled, unresolved = main()
+        filled, unresolved = main(run_id)
         finish_run(
             run_id,
             status="failed" if unresolved else "success",
