@@ -1,6 +1,12 @@
 services:
   fincal:
-    build: .
+    build:
+      context: .
+      # The commit is injected at build time so the container can attest it
+      # (Issue #79). `docker compose build` from deploy.sh exports GIT_COMMIT;
+      # a plain build falls back to "dev" and still succeeds.
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-dev}
     container_name: fincal
     restart: unless-stopped
     env_file: .env

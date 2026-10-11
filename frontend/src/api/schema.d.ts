@@ -165,7 +165,24 @@ export interface paths {
         };
         /**
          * Api Search Stocks
-         * @description Search for stocks to add to watchlist.
+         * @description Search the earnings universe for stocks to add to the watchlist.
+         *
+         *     One source only: the `earnings` table (Issue #71).  The endpoint used to
+         *     fall back to `longbridge stock-search` when the table had no match, but no
+         *     such subcommand exists in the Longbridge CLI — the installed one exposes
+         *     `finance-calendar`, `static`, `consensus`, `forecast-eps` and
+         *     `institution-rating`, none of which search by keyword.  The branch could
+         *     therefore never succeed (inside the service image the binary is not even
+         *     present) and its failure was swallowed by a bare ``except: pass``, so "the
+         *     fallback failed" and "the universe really has no match" were
+         *     indistinguishable from the outside.  Removing it keeps the endpoint honest
+         *     about where its answers come from; `tests/test_search_dedupe.py` now checks
+         *     every ``longbridge <subcommand>`` the code calls against the real CLI, so a
+         *     command name can no longer drift out of existence unnoticed.
+         *
+         *     A miss is logged instead of silently returning ``[]``, which is what made
+         *     the old dead branch invisible: `logger.info` carries the query (and its
+         *     length), never the caller.
          */
         get: operations["api_search_stocks_api_search_get"];
         put?: never;
@@ -583,13 +600,24 @@ export interface components {
         };
         /**
          * DependencyProbe
-         * @description One external dependency probe inside ``HealthResponse.checks`` (Issue #70).
+         * @description One external dependency probe inside ``HealthResponse.checks`` (Issue #70, #79).
          *
          *     Its own shape so a probe verdict cannot be coerced into the freshness check
          *     (`SyncFreshnessCheck`) just because it carries an ``error_code``: a Kurumi
          *     outage or a missing/self-referencing `KURUMI_API_URL` reports
          *     ``dependency_not_configured`` / ``kurumi_unreachable`` here with no
          *     freshness fields attached.
+         *
+         *     ``status`` is one of:
+         *
+         *     * ``healthy`` / ``degraded`` / ``not_ready`` — the probe's subject was
+         *       reached, and the verdict counts towards the aggregate
+         *       ``HealthResponse.status``;
+         *     * ``not_applicable`` (Issue #79) — the subject cannot exist where the probe
+         *       runs (a host-side pipeline tool such as the Longbridge CLI, which the
+         *       service image does not ship: ``error_code=`` ``tool_not_in_image``). The
+         *       entry stays visible here, but it is excluded from the aggregate, because a
+         *       tool this process never calls cannot make the service unhealthy.
          */
         DependencyProbe: {
             /** Status */
@@ -652,14 +680,7 @@ export interface components {
         };
         /**
          * EarningItem
-         * @description One calendar row, as the read path returns it.
-         *
-         *     The field set is an exact mirror of what ``app.earnings.fetch_earnings_from_db``
-         *     produces (the ``earnings`` columns, the ``consensus_*`` aliases and
-         *     ``comparison_unavailable_reason``): a field the read SQL returns but this model
-         *     omits is *silently dropped* by FastAPI, so the same row would be visible in
-         *     ``/api/export`` and invisible in ``/api/earnings`` (Issues #44, #47, #73).
-         *     ``tests/test_response_contracts.py`` asserts the two sets are equal.
+         * @description One earnings-calendar row.
          */
         EarningItem: {
             /** Id */

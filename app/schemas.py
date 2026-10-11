@@ -265,13 +265,24 @@ class SourceCheck(BaseModel):
     error: str | None = None
 
 class DependencyProbe(BaseModel):
-    """One external dependency probe inside ``HealthResponse.checks`` (Issue #70).
+    """One external dependency probe inside ``HealthResponse.checks`` (Issue #70, #79).
 
     Its own shape so a probe verdict cannot be coerced into the freshness check
     (`SyncFreshnessCheck`) just because it carries an ``error_code``: a Kurumi
     outage or a missing/self-referencing `KURUMI_API_URL` reports
     ``dependency_not_configured`` / ``kurumi_unreachable`` here with no
     freshness fields attached.
+
+    ``status`` is one of:
+
+    * ``healthy`` / ``degraded`` / ``not_ready`` — the probe's subject was
+      reached, and the verdict counts towards the aggregate
+      ``HealthResponse.status``;
+    * ``not_applicable`` (Issue #79) — the subject cannot exist where the probe
+      runs (a host-side pipeline tool such as the Longbridge CLI, which the
+      service image does not ship: ``error_code=`` ``tool_not_in_image``). The
+      entry stays visible here, but it is excluded from the aggregate, because a
+      tool this process never calls cannot make the service unhealthy.
     """
     status: str
     error_code: str | None = None

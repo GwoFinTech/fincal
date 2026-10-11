@@ -370,7 +370,7 @@ DB_HOST=localhost uv run python scripts/check_sync_freshness.py
 Timestamps are compared and printed in UTC regardless of the database session
 timezone, so the ages are stable.
 
-### Dependency probes (Issue #70)
+### Dependency probes (Issue #70, #79)
 
 `/api/admin/health`'s `checks.kurumi` asks the endpoint the client actually
 reads — `{KURUMI_API_URL}/api/stock/{symbol}/overview`, built by the same helper
@@ -383,6 +383,38 @@ upstream (refused, timed out or 404) is `degraded` with
 `error_code=kurumi_unreachable`. `scripts/deploy.sh` prints the same verdict
 from inside the container and raises `ACTION REQUIRED (Issue #70)` when
 `KURUMI_API_URL` is unset there or points at FinCal itself.
+
+**Service dependencies vs host tooling (Issue #79).** The probes are split by who
+owns the subject. PostgreSQL, Kurumi, Futu OpenD and sync freshness are things
+*this process* uses, so their verdicts decide the aggregate `status`. The
+Longbridge CLI is not: the pipeline runs it on the **host**
+(`scripts/sync_*.py` under cron) while the image ships only `app/` plus the web
+dependencies, so `checks.longbridge` reports
+`{"status": "not_applicable", "error_code": "tool_not_in_image"}` inside a
+container. That entry stays visible in `checks`, but `not_applicable` does **not
+vote** on the aggregate — probing a host tool as a dependency answered a constant
+`degraded` for ~7 weeks, which made `degraded` the permanent state and drowned
+out real outages. A tool that *is* present keeps voting: a non-zero exit is
+`degraded` with `tool_nonzero_exit`, an unrunnable one `degraded` with
+`tool_probe_failed`.
+
+**Version self-attestation (Issue #79).** `checks.version` is the commit the
+image was built from: `Dockerfile` declares `ARG GIT_COMMIT` /
+`ENV FINCAL_GIT_COMMIT`, `docker-compose.yml` passes `${GIT_COMMIT:-dev}` as a
+build arg, and `scripts/deploy.sh` exports the commit it is deploying. Without
+the injection the field answered `"dev"` on every deployment, because only
+`app/` is copied into the image and the `VERSION` file the deploy writes next to
+the source tree never gets there. `scripts/deploy.sh` ends with
+`scripts/check_service_health.py`, which asks the container for its own
+`/api/admin/health` and exits non-zero when:
+
+* `version` differs from the commit just deployed (host `/opt/fincal/VERSION`);
+* a host-tool check is voting on the aggregate again (it must be
+  `not_applicable`);
+* the aggregate does not follow from the *applicable* probes only.
+
+Run it by hand with `python3 scripts/check_service_health.py`; it is read-only
+(one GET, no writes).
 
 ## Tech Stack
 

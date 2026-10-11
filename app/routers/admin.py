@@ -15,8 +15,51 @@ from ..schemas import (
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
+#: Probe verdict for a subject that cannot exist where the probe runs (Issue #79).
+#: Reported inside ``checks`` like any other probe, but excluded from the
+#: aggregate ``status``: it expresses "not this process's business", not a fault.
+NOT_APPLICABLE = "not_applicable"
+#: Language-independent reason for the above: the service image ships no such tool.
+ERROR_TOOL_NOT_IN_IMAGE = "tool_not_in_image"
+#: The tool exists but the probe itself blew up (timeout, permission, …).
+ERROR_TOOL_PROBE_FAILED = "tool_probe_failed"
+#: The tool exists and ran, but exited non-zero.
+ERROR_TOOL_EXIT_CODE = "tool_nonzero_exit"
 
-# Moved to app/schemas.py
+
+def probe_host_tool(name: str) -> dict:
+    """Probe a host-side pipeline CLI as a capability, not a dependency (#79).
+
+    FinCal's sync pipeline runs the Longbridge CLI from the *host*
+    (``scripts/sync_*.py`` under cron, see ``README``) while the service image
+    ships only the web app (``Dockerfile`` copies ``app/`` and the web
+    dependencies). Asking the container for the binary therefore answered a
+    constant ``degraded``, which pinned the aggregate health status there even
+    when every dependency the service actually uses was healthy — a real Kurumi
+    or PostgreSQL outage became indistinguishable from that permanent noise.
+
+    The verdict distinguishes "not installed here" from "installed but failing":
+
+    * ``{"status": "not_applicable", "error_code": "tool_not_in_image"}`` — not
+      on this host's ``PATH``, so the probe cannot express a service fault. The
+      entry stays visible in ``checks`` (and is asserted by
+      ``scripts/check_service_health.py``), it just does not vote;
+    * ``{"status": "healthy"}`` / ``{"status": "degraded", "error_code": …}`` —
+      the tool is present, so its verdict counts towards the aggregate.
+    """
+    import shutil
+    import subprocess
+
+    binary = shutil.which(name)
+    if binary is None:
+        return {"status": NOT_APPLICABLE, "error_code": ERROR_TOOL_NOT_IN_IMAGE}
+    try:
+        proc = subprocess.run([binary, "--version"], capture_output=True, timeout=5)
+    except Exception:
+        return {"status": "degraded", "error_code": ERROR_TOOL_PROBE_FAILED}
+    if proc.returncode != 0:
+        return {"status": "degraded", "error_code": ERROR_TOOL_EXIT_CODE}
+    return {"status": "healthy"}
 
 
 def admin_user(user=Depends(get_current_user)):
@@ -239,13 +282,13 @@ def health_check():
     except Exception:
         checks["futu"] = {"status": "degraded"}
 
-    # Longbridge CLI
-    try:
-        import subprocess
-        p = subprocess.run(["longbridge", "--version"], capture_output=True, timeout=5)
-        checks["longbridge"] = {"status": "healthy" if p.returncode == 0 else "degraded"}
-    except Exception:
-        checks["longbridge"] = {"status": "degraded"}
+    # Longbridge CLI — a *host-side pipeline tool*, not a service dependency
+    # (Issue #79). The image ships no such binary (Dockerfile copies app/ plus
+    # the web dependencies), so probing it as a dependency answered a constant
+    # `degraded` and pinned the aggregate status there. Report it as a
+    # capability probe instead: `not_applicable` with a language-independent
+    # code, visible in `checks` but not voting on the aggregate.
+    checks["longbridge"] = probe_host_tool("longbridge")
 
     # Sync stage / derived data freshness (Issue #53). Aggregate only: this
     # endpoint has no application-level auth, so it must not leak per-stage
@@ -260,7 +303,11 @@ def health_check():
             "error": type(exc).__name__,
         }
 
-    statuses = [c["status"] for c in checks.values()]
+    # Issue #79: a probe that reports ``not_applicable`` stays visible in
+    # ``checks`` but does not vote. A host-side tool the image does not ship is
+    # not a service fault, and letting it vote made ``degraded`` the permanent
+    # state — i.e. a real outage could no longer be told apart from the noise.
+    statuses = [c["status"] for c in checks.values() if c["status"] != NOT_APPLICABLE]
     if all(s == "healthy" for s in statuses):
         overall = "healthy"
     elif any(s == "not_ready" for s in statuses):

@@ -10,6 +10,7 @@ Covers:
 """
 import sys
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -203,3 +204,26 @@ def test_version_returns_string():
     v = get_version()
     assert isinstance(v, str)
     assert len(v) > 0
+
+
+def test_version_prefers_the_commit_injected_at_build_time():
+    """Issue #79: the image ships no VERSION file, so the commit must be injected.
+
+    Only ``app/`` is copied into the image, so ``VERSION`` (written next to the
+    source tree by ``scripts/deploy.sh``) never reaches the container — reading
+    only the file pinned ``/api/admin/health``'s ``version`` at ``"dev"`` on
+    every deployment.
+    """
+    import os
+    from app.version import COMMIT_ENV, get_version
+    with mock.patch.dict(os.environ, {COMMIT_ENV: "ebca105"}):
+        assert get_version() == "ebca105"
+
+
+def test_version_falls_back_to_dev_when_nothing_declares_it():
+    import os
+    from app import version
+    with mock.patch.dict(os.environ, {}, clear=False), \
+            mock.patch.object(version, "_VERSION_FILE", "/nonexistent/VERSION"):
+        os.environ.pop(version.COMMIT_ENV, None)
+        assert version.get_version() == "dev"

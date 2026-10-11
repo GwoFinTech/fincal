@@ -114,6 +114,10 @@ fi
 
 echo "=== Building ==="
 cd "$DST"
+# The commit is injected into the image (Issue #79) so the container can attest
+# what it is: `Dockerfile` copies only `app/`, so the VERSION file written below
+# never reaches it and `app/version.py` used to answer "dev" on every deploy.
+export GIT_COMMIT="$COMMIT"
 docker compose build --no-cache 2>&1 | tail -3
 
 echo "=== Starting ==="
@@ -168,5 +172,13 @@ if ! printf '%s' "$KURUMI_VERDICT" | grep -q '"status": "healthy"'; then
     echo "  and a real Kurumi outage would still be reported as such (no false healthy)."
     echo "  verify with: docker exec fincal python -c \"from app.company_name import probe_kurumi; print(probe_kurumi())\""
 fi
+
+echo "=== Service self-report gate (Issue #79) ==="
+# Two readings nothing used to check: the deployed commit (the image had no
+# VERSION file, so /api/admin/health reported "dev") and the aggregate status
+# (the longbridge probe was a host-side tool the image does not ship, so
+# `degraded` was permanent and a real outage could not be told apart from it).
+# The gate re-derives the aggregate from the probes and exits 1 on a mismatch.
+python3 "$DST/scripts/check_service_health.py" --container fincal --expected-version "$COMMIT" || exit 1
 
 echo "=== Done — fincal $COMMIT deployed and ready ==="
