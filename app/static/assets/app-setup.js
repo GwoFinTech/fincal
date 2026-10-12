@@ -663,6 +663,10 @@
         ...fmt,
         // Shared
         showToast, login,
+        // The calendar's 「只看自选」 checkbox calls this from the template
+        // (Issue #80): an internal function is invisible to the runtime-compiled
+        // template, and `@change` then silently attaches no listener at all.
+        loadEarnings,
       };
     }
   }).mount('#app');

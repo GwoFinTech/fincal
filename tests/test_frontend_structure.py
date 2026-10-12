@@ -4,12 +4,18 @@ After Issue #13 refactor, JS logic is in assets/app-setup.js.
 Tests check both index.html (template) and app-setup.js (logic).
 """
 import re
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 INDEX_HTML = ROOT / "app" / "static" / "index.html"
 APP_JS = ROOT / "app" / "static" / "assets" / "app-setup.js"
 PREDICT_EARNINGS = ROOT / "scripts" / "predict_earnings.py"
+
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import frontend_contract  # noqa: E402  (sibling module: the binding contract)
 
 
 def _read_all():
@@ -89,6 +95,11 @@ def test_controls_use_shadcn_compatible_primitives():
 def test_watchlist_only_reloads_and_guards_calendar_rows():
     html, js = _read_all()
     assert 'v-model="watchlistOnly" @change="loadEarnings"' in html
+    # ... and the binding actually resolves: an internal function the template
+    # cannot see attaches no listener at all (Issue #80 — see
+    # tests/test_issue80_frontend_bindings.py for the mount-level proof).
+    assert "loadEarnings" in frontend_contract.exposed_setup_keys(js)
+    assert frontend_contract.dangling_bindings(html, frontend_contract.exposed_setup_keys(js)) == set()
     assert "watchlistOnly.value" in js and "data.filter" in js
     assert "watchlist.value.some(w => w.symbol === e.symbol && w.market === e.market)" in js
     assert "calendarCells.value.find(cell => cell.isToday)" in js
