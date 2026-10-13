@@ -350,6 +350,18 @@ class FutuStageStats:
     ``total`` keeps its historical per-stage meaning (dates: rows upserted,
     actuals: symbols processed) because existing ``sync_runs.details``
     consumers read it; the remaining fields are the Issue #49 classification.
+
+    Issue #81 added the write-side counters so the run's ``details`` can tell an
+    operator what the database accepted from the batch:
+
+    * ``written_rows`` — date rows the upsert actually stored (``total`` counts
+      the rows *fetched*, which is what it always did);
+    * ``skipped_rows`` — rows a unique violation rejected even after the per-row
+      retry (a data conflict, reported instead of aborting the stage);
+    * ``cleared_predictions`` — stale predictions removed so the provider's date
+      could land on the period's confirmed row;
+    * ``reschedule_skipped`` — periods whose provider date another fiscal period
+      already owns (the #52 case).
     """
 
     total: int = 0
@@ -361,6 +373,10 @@ class FutuStageStats:
     retries: int = 0
     consecutive_rate_limited: int = 0
     rate_limited: bool = False  # circuit breaker tripped
+    written_rows: int = 0
+    skipped_rows: int = 0
+    cleared_predictions: int = 0
+    reschedule_skipped: int = 0
 
     def count_symbol(self, outcome: str) -> None:
         """Count one symbol-level outcome (``ok`` outcomes count nothing)."""
@@ -504,7 +520,14 @@ def futu_audit_details(date_stats: FutuStageStats, actual_stats: FutuStageStats,
                        skipped_symbols: list[str]) -> dict:
     """Build ``sync_runs.details``: the historical keys plus the Issue #49
     failure classification, so an operator can tell a rate limit from an
-    unsupported instrument from a real symbol failure without probing OpenD."""
+    unsupported instrument from a real symbol failure without probing OpenD.
+
+    Issue #81 added what the *write* did (``written_rows``/``skipped_rows``/
+    ``cleared_predictions``/``reschedule_skipped``): the failed 2026-10-12 run
+    recorded ``details={}`` and ``record_count=0``, so the batch it had already
+    fetched was invisible, and a conflict that degrades to a skip would otherwise
+    leave no trace at all.
+    """
     return {
         # Historical keys — unchanged so existing consumers keep working.
         "actual_symbols": actual_stats.total,
@@ -518,10 +541,15 @@ def futu_audit_details(date_stats: FutuStageStats, actual_stats: FutuStageStats,
         "rate_limit_retries": date_stats.retries + actual_stats.retries,
         "rate_limited": bool(date_stats.rate_limited or actual_stats.rate_limited),
         "skipped_symbols": len(skipped_symbols),
+        # Issue #81 write-side counters.
+        "date_rows_written": date_stats.written_rows,
+        "date_rows_skipped": date_stats.skipped_rows,
+        "date_predictions_cleared": date_stats.cleared_predictions,
+        "date_reschedule_skipped": date_stats.reschedule_skipped,
     }
 
 
-def flush_date_batch(batch: list[tuple]) -> int:
+def flush_date_batch(batch: list[tuple], stats: "FutuStageStats | None" = None) -> int:
     """Upsert fetched Futu dates, one row per fiscal period (Issue #50).
 
     The ``earnings`` unique key is ``(symbol, market, report_date, report_type)``
@@ -532,10 +560,24 @@ def flush_date_batch(batch: list[tuple]) -> int:
     * a single response carrying one period at two dates is collapsed to the
       newest date (adjacent calendar windows overlap);
     * the period's existing confirmed row is re-dated onto the incoming date
-      instead of gaining a twin.
+      instead of gaining a twin — including when the incoming date is held by that
+      very period's own, now stale, prediction (Issue #81).
 
     Both live in ``app/fiscal.py`` so the Longbridge sync behaves identically.
+
+    Issue #81 blast radius: the batch used to be one ``execute_values`` call, so a
+    single period's conflict rolled back every row of the batch *and* the stage
+    raised — 2026-10-12 lost all 188 dates plus the whole actuals stage of the
+    week.  The write is now one savepoint per symbol, and a symbol that still
+    fails is retried row by row: a conflict costs exactly the rows it affects and
+    is reported in ``stats.skipped_rows`` (surfaced in ``sync_runs.details``), so
+    the stage finishes and ``sync_actuals`` still runs.  Only unique violations —
+    data conflicts — are absorbed that way; any other database error still
+    propagates, so a broken connection cannot be mistaken for a quiet skip.
+
+    Returns the number of rows written.
     """
+    from psycopg2 import errors as pg_errors
     from psycopg2.extras import execute_values
 
     batch = fiscal.collapse_rows_by_period(
@@ -545,6 +587,7 @@ def flush_date_batch(batch: list[tuple]) -> int:
     )
     if not batch:
         return 0
+    flush_stats = stats if stats is not None else FutuStageStats()
     with db_cursor() as cur:
         # A Futu row carries a date and actuals, not a period sequence: let it
         # inherit the report type its period already stores (instead of inserting
@@ -559,43 +602,116 @@ def flush_date_batch(batch: list[tuple]) -> int:
                 move["symbol"], move["market"], move["fiscal_year"], move["fiscal_quarter"],
                 move["from"], move["to"], move["id"],
             )
-        execute_values(
-            cur,
-            """INSERT INTO earnings (symbol, market, company_name, report_date, report_type,
-               fiscal_year, fiscal_quarter, before_after, date_source, date_status)
-            VALUES %s
-            ON CONFLICT (symbol, market, report_date, report_type)
-            DO UPDATE SET
-                fiscal_year = CASE WHEN earnings.fiscal_year IS NULL THEN EXCLUDED.fiscal_year ELSE earnings.fiscal_year END,
-                fiscal_quarter = CASE WHEN earnings.fiscal_quarter IS NULL THEN EXCLUDED.fiscal_quarter ELSE earnings.fiscal_quarter END,
-                before_after = COALESCE(EXCLUDED.before_after, earnings.before_after),
-                is_predicted = FALSE,
-                company_name = CASE WHEN earnings.company_name = '' THEN EXCLUDED.company_name ELSE earnings.company_name END,
-                date_source = 'futu',
-                date_status = CASE WHEN earnings.eps_actual IS NOT NULL OR earnings.revenue_actual IS NOT NULL THEN 'reported' ELSE 'scheduled' END,
-                updated_at = NOW()
-            """,
-            batch,
-            page_size=200,
-        )
+        flush_stats.cleared_predictions += len(outcome.predictions_cleared)
+        flush_stats.reschedule_skipped += len(outcome.skipped)
+        written = 0
+        if batch:
+            written = _upsert_date_rows(cur, batch, flush_stats, execute_values, pg_errors)
     if outcome.skipped:
-        # A provider date that another fiscal period already owns: the incoming
-        # row is merged by ON CONFLICT, no row is re-dated (Issue #52).
+        # A provider date that another fiscal period already owns: no row is
+        # re-dated for that period (Issue #52).
         logger.warning(
             "futu: %d reschedule(s) skipped (target date owned by another row)",
             len(outcome.skipped),
         )
-    logger.info(f"Flushed {len(batch)} earnings dates")
-    return len(batch)
+    if flush_stats.skipped_rows:
+        logger.warning(
+            "futu: %d date row(s) skipped after the per-row retry (Issue #81)",
+            flush_stats.skipped_rows,
+        )
+    flush_stats.written_rows += written
+    logger.info(f"Flushed {written} earnings dates")
+    return written
 
 
-def sync_earnings_dates(ctx, run_id: int, symbols: list[str]) -> FutuStageStats:
+#: Savepoint names for the per-symbol date upsert (Issue #81).
+_DATE_SYMBOL_SAVEPOINT = "fincal_futu_symbol"
+_DATE_ROW_SAVEPOINT = "fincal_futu_row"
+
+#: The date upsert.  ``is_predicted`` is *not* a bare ``FALSE``: a provider row
+#: may only confirm a row that carries its own fiscal identity
+#: (``fiscal.CONFIRM_IDENTITY_PROMOTION``, Issue #81).
+_DATE_UPSERT_SQL = f"""INSERT INTO earnings (symbol, market, company_name, report_date, report_type,
+   fiscal_year, fiscal_quarter, before_after, date_source, date_status)
+VALUES %s
+ON CONFLICT (symbol, market, report_date, report_type)
+DO UPDATE SET
+    fiscal_year = CASE WHEN earnings.fiscal_year IS NULL THEN EXCLUDED.fiscal_year ELSE earnings.fiscal_year END,
+    fiscal_quarter = CASE WHEN earnings.fiscal_quarter IS NULL THEN EXCLUDED.fiscal_quarter ELSE earnings.fiscal_quarter END,
+    before_after = COALESCE(EXCLUDED.before_after, earnings.before_after),
+    {fiscal.CONFIRM_IDENTITY_PROMOTION},
+    company_name = CASE WHEN earnings.company_name = '' THEN EXCLUDED.company_name ELSE earnings.company_name END,
+    date_source = 'futu',
+    date_status = CASE WHEN earnings.eps_actual IS NOT NULL OR earnings.revenue_actual IS NOT NULL THEN 'reported' ELSE 'scheduled' END,
+    updated_at = NOW()
+"""
+
+
+def _upsert_date_rows(cur, batch: list[tuple], stats: FutuStageStats,
+                      execute_values, pg_errors) -> int:
+    """Write ``batch`` one symbol at a time, containing a conflict to its rows.
+
+    See :func:`flush_date_batch` for why: one conflict must not cost the batch,
+    the stage, or the week's actuals.  A symbol whose statement fails on a unique
+    violation is retried per row, and only the rows that still fail are counted as
+    skipped (``stats.skipped_rows``); any other database error propagates
+    unchanged.
+    """
+    groups: dict[tuple, list[tuple]] = {}
+    for row in batch:
+        groups.setdefault((row[0], row[1]), []).append(row)
+
+    written = 0
+    for (symbol, market), rows in groups.items():
+        cur.execute(f"SAVEPOINT {_DATE_SYMBOL_SAVEPOINT}")
+        try:
+            execute_values(cur, _DATE_UPSERT_SQL, rows, page_size=len(rows))
+        except pg_errors.UniqueViolation as exc:
+            cur.execute(f"ROLLBACK TO SAVEPOINT {_DATE_SYMBOL_SAVEPOINT}")
+            logger.warning(
+                "futu: %s.%s date batch rejected (%d row(s)), retrying per row: %s",
+                symbol, market, len(rows), exc,
+            )
+            written += _upsert_date_rows_individually(cur, rows, stats, execute_values, pg_errors)
+        else:
+            written += len(rows)
+        cur.execute(f"RELEASE SAVEPOINT {_DATE_SYMBOL_SAVEPOINT}")
+    return written
+
+
+def _upsert_date_rows_individually(cur, rows: list[tuple], stats: FutuStageStats,
+                                   execute_values, pg_errors) -> int:
+    """Retry each rejected row under its own savepoint, counting the survivors."""
+    written = 0
+    for row in rows:
+        cur.execute(f"SAVEPOINT {_DATE_ROW_SAVEPOINT}")
+        try:
+            execute_values(cur, _DATE_UPSERT_SQL, [row], page_size=1)
+        except pg_errors.UniqueViolation as exc:
+            cur.execute(f"ROLLBACK TO SAVEPOINT {_DATE_ROW_SAVEPOINT}")
+            stats.skipped_rows += 1
+            logger.warning(
+                "futu: date row not written %s.%s %s FY%s Q%s: %s (Issue #81)",
+                row[0], row[1], row[3], row[5], row[6], exc,
+            )
+        else:
+            written += 1
+        cur.execute(f"RELEASE SAVEPOINT {_DATE_ROW_SAVEPOINT}")
+    return written
+
+
+def sync_earnings_dates(ctx, run_id: int, symbols: list[str],
+                        stats: FutuStageStats | None = None) -> FutuStageStats:
     """Fetch earnings calendar dates from Futu, single shared context.
 
     ``symbols`` are the Futu-routable watchlist codes resolved once by the
     caller; OpenD pacing and failure classification live in :func:`futu_call`.
+
+    ``stats`` may be supplied by the caller so a stage that ends in an exception
+    still reports what it had counted (Issue #81: the failed 2026-10-12 run
+    recorded ``details={}``/``record_count=0``).
     """
-    stats = FutuStageStats()
+    stats = stats if stats is not None else FutuStageStats()
     limiter = get_rate_limiter()
     batch = []
     cutoff = date.today() - timedelta(days=365)
@@ -654,7 +770,7 @@ def sync_earnings_dates(ctx, run_id: int, symbols: list[str]) -> FutuStageStats:
 
     # Batch upsert all earnings dates
     if batch:
-        flush_date_batch(batch)
+        flush_date_batch(batch, stats)
 
     logger.info(
         "Futu earnings dates: %s records; %s symbol failures "
@@ -665,7 +781,8 @@ def sync_earnings_dates(ctx, run_id: int, symbols: list[str]) -> FutuStageStats:
     return stats
 
 
-def sync_actuals(ctx, run_id: int, symbols: list[str]) -> FutuStageStats:
+def sync_actuals(ctx, run_id: int, symbols: list[str],
+                 stats: FutuStageStats | None = None) -> FutuStageStats:
     """Fetch actual EPS (fid=8047/8048) and revenue (fid=8002) from the income statement.
 
     Both figures live in ``statement_type=1``, so one OpenD call per symbol now
@@ -674,8 +791,9 @@ def sync_actuals(ctx, run_id: int, symbols: list[str]) -> FutuStageStats:
     counted once, using the most severe outcome, so ``failed_symbols`` keeps its
     historical per-symbol meaning (Issue #49) — including a statement field whose
     label no longer matches the column it would be written to.
+    ``stats`` may be supplied by the caller (see :func:`sync_earnings_dates`).
     """
-    stats = FutuStageStats()
+    stats = stats if stats is not None else FutuStageStats()
     limiter = get_rate_limiter()
     # Issue #78: heartbeat the actuals loop as well (the phase-level heartbeat in
     # run_sync() is written once, before the loop starts).
@@ -814,12 +932,14 @@ def run_sync(ctx) -> int | None:
     date_stats = FutuStageStats()
     actual_stats = FutuStageStats()
     terminal = False
+    stage = "dates"
     try:
         try:
             heartbeat(run_id, phase="dates", current=0, total=len(symbols))
-            date_stats = sync_earnings_dates(ctx, run_id, symbols)
+            date_stats = sync_earnings_dates(ctx, run_id, symbols, date_stats)
+            stage = "actuals"
             heartbeat(run_id, phase="actuals", current=0, total=len(symbols))
-            actual_stats = sync_actuals(ctx, run_id, symbols)
+            actual_stats = sync_actuals(ctx, run_id, symbols, actual_stats)
         except SyncCancelledError:
             # Admin cancelled this run; keep the terminal 'cancelled' state.
             terminal = finish_run(run_id, status="cancelled",
@@ -827,7 +947,18 @@ def run_sync(ctx) -> int | None:
             logger.warning("futu sync cancelled by admin; stopping")
             raise
         except Exception:
-            terminal = finish_run(run_id, status="failed", error_code="futu_sync_failed")
+            # Issue #81: report what the stage had already done.  The failed
+            # 2026-10-12 run recorded ``details={}`` and ``record_count=0`` for a
+            # batch it had fully fetched, so its 188 dates, its per-symbol
+            # classification and the stage it died in were all invisible.
+            terminal = finish_run(
+                run_id, status="failed", error_code="futu_sync_failed",
+                record_count=date_stats.total,
+                details={
+                    **futu_audit_details(date_stats, actual_stats, skipped),
+                    "failure_stage": stage,
+                },
+            )
             raise
         else:
             status, error_code = futu_audit_outcome(date_stats, actual_stats)

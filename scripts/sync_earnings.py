@@ -424,6 +424,13 @@ def flush_batch(cur, rows: list[tuple]) -> FlushStats:
     candidate of a *different* period overwrite it would re-create exactly the
     duplicate-period disease #50 removed.
 
+    Issue #81: a period's own stale prediction holding the provider's date is
+    removed by the pass above so the confirmed row can move onto it (the
+    Longbridge path carried the same ``is_predicted = FALSE`` promotion as the
+    Futu path that aborted production); the upsert below now promotes a
+    conflicting row only while it carries the incoming row's identity
+    (``CONFIRM_IDENTITY_PROMOTION``).
+
     Issue #61: the batch also carries the event's declared currency so each
     written value can say which unit of money it is in.  The actual side is
     labelled only when this event supplied the actual value; a Futu-written
@@ -467,7 +474,7 @@ def flush_batch(cur, rows: list[tuple]) -> FlushStats:
     from psycopg2.extras import execute_values
     execute_values(
         cur,
-        """INSERT INTO earnings (symbol, market, company_name, report_date, report_type,
+        f"""INSERT INTO earnings (symbol, market, company_name, report_date, report_type,
            fiscal_year, fiscal_quarter,
            eps_estimate, eps_actual, revenue_estimate, revenue_actual, before_after,
            estimate_currency, actual_currency, estimate_basis, actual_basis)
@@ -488,7 +495,7 @@ def flush_batch(cur, rows: list[tuple]) -> FlushStats:
                                    THEN EXCLUDED.actual_currency ELSE earnings.actual_currency END,
             actual_basis = CASE WHEN EXCLUDED.eps_actual IS NOT NULL OR EXCLUDED.revenue_actual IS NOT NULL
                                 THEN EXCLUDED.actual_basis ELSE earnings.actual_basis END,
-            is_predicted = FALSE,
+            {fiscal.CONFIRM_IDENTITY_PROMOTION},
             updated_at = NOW()
         """,
         rows,

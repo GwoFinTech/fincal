@@ -417,12 +417,14 @@ class FutuRunTerminalStateTests(TestCase):
         src = MagicMock()
         src.get_futu_symbols_with_skipped.return_value = (["AAPL.US"], [])
 
-        def dates(ctx_, run_id, symbols):
+        # Issue #81: the stages receive the run's own stats object so a stage that
+        # dies mid-way still leaves its counters for the failed-run details.
+        def dates(ctx_, run_id, symbols, stats=None):
             if isinstance(dates_result, BaseException):
                 raise dates_result
             return dates_result
 
-        def actuals(ctx_, run_id, symbols):
+        def actuals(ctx_, run_id, symbols, stats=None):
             if isinstance(actuals_result, BaseException):
                 raise actuals_result
             return actuals_result

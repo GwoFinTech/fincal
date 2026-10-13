@@ -34,6 +34,24 @@ provider's new date, but the table's unique key is the *display* key
 period (or a predicted row) may already own.  Each move is therefore validated
 against that natural key and wrapped in a savepoint, so one unmovable row can
 never abort a whole sync run.
+
+Issue #81 completion (production incident 2026-10-12, run 113): #52 delegated the
+blocked case to the caller's ``ON CONFLICT`` merge, which does not hold.  The
+merge **promotes the conflicting row** (``is_predicted = FALSE``), so delegating
+a period's own *stale prediction* holding the provider's date promoted that
+prediction into a second confirmed row of the period — straight into
+``idx_earnings_fiscal_identity`` (the fiscal-identity partial unique index of
+#50) — and one period aborted the whole batch (``execute_values`` writes the
+batch as one statement, so all 188 Futu rows and the entire actuals stage of that
+week were lost).  Two write-path rules close it:
+
+* a period's own stale prediction that holds the provider's date is *removed*
+  while the period's confirmed row moves onto that date, so the batch row merges
+  into the confirmed row by natural key (see the ``target_occupied`` branch);
+* a provider upsert may only turn a conflicting row into a confirmed row while
+  that row carries the **incoming row's own** fiscal identity
+  (:data:`CONFIRM_IDENTITY_PROMOTION`), so no upsert can ever mint a second
+  confirmed identity for a period.
 """
 from __future__ import annotations
 
@@ -479,6 +497,23 @@ def _identity_query() -> str:
 #: Savepoint guarding a single reschedule UPDATE (Issue #52).
 _RESCHEDULE_SAVEPOINT = "fincal_reschedule"
 
+#: ``ON CONFLICT ... DO UPDATE`` fragment that lets a provider upsert confirm a
+#: conflicting **prediction** row — and only while that row carries the incoming
+#: row's own fiscal identity (Issue #81).
+#:
+#: Both provider write paths (``scripts/sync_futu.py``, ``scripts/sync_earnings.py``)
+#: used a bare ``is_predicted = FALSE``: whatever row happened to hold the natural
+#: key was promoted, including a prediction of a *different* fiscal period whose
+#: period already has a confirmed row elsewhere — a second confirmed identity,
+#: rejected by ``idx_earnings_fiscal_identity``.  Sharing the fragment keeps the
+#: two paths from drifting apart again (the incident report notes the Longbridge
+#: path carries the same pattern).
+CONFIRM_IDENTITY_PROMOTION = (
+    "is_predicted = CASE WHEN earnings.fiscal_year IS NOT DISTINCT FROM EXCLUDED.fiscal_year"
+    " AND earnings.fiscal_quarter IS NOT DISTINCT FROM EXCLUDED.fiscal_quarter"
+    " THEN FALSE ELSE earnings.is_predicted END"
+)
+
 
 @dataclass
 class RescheduleOutcome:
@@ -498,12 +533,46 @@ class RescheduleOutcome:
     pass removed because their fiscal period is already represented: the caller
     must insert ``rows``, not its own list, or one period gets two rows again
     (Issue #50 follow-up).
+
+    ``predictions_cleared`` are the periods whose own stale prediction held the
+    provider's date and was removed so the period's confirmed row could move onto
+    it (Issue #81) — the audit trail for the one step that deletes a row.
     """
 
     moves: list[dict] = field(default_factory=list)
     skipped: list[dict] = field(default_factory=list)
     rows: list = field(default_factory=list)
     dropped: list[dict] = field(default_factory=list)
+    predictions_cleared: list[dict] = field(default_factory=list)
+
+
+def _prediction_of_period(holder, key) -> bool:
+    """True when a natural-key occupant is the period's own stale prediction.
+
+    Both halves are required (Issue #81): the row must be a prediction *and* it
+    must carry the period's identity.  A prediction of another fiscal period is
+    that period's coming event — never this one's to delete (the Issue #54
+    lesson: do not delete by code shape).
+    """
+    if not holder.get("is_predicted"):
+        return False
+    return (holder.get("fiscal_year"), holder.get("fiscal_quarter")) == (key[2], key[3])
+
+
+def _delete_stale_prediction(cur, holder, key) -> bool:
+    """Remove one superseded prediction row; ``True`` when a row was deleted.
+
+    The ``WHERE`` clause repeats the whole identity — id *and* period *and*
+    ``is_predicted`` — so a row that changed under a concurrent writer is left
+    alone and the caller keeps its ``target_occupied`` skip instead of moving a
+    date onto an unexpected occupant.
+    """
+    cur.execute(
+        "DELETE FROM earnings WHERE id = %s AND is_predicted = TRUE"
+        " AND symbol = %s AND market = %s AND fiscal_year = %s AND fiscal_quarter = %s",
+        (holder["id"], key[0], key[1], key[2], key[3]),
+    )
+    return cur.rowcount > 0
 
 
 def _target_holder(cur, symbol, market, new_date, report_type) -> dict | None:
@@ -585,11 +654,23 @@ def reschedule_confirmed_rows(cur, rows, *, symbol=0, market=1, report_date=3,
     period grouping below is ``(symbol, market, fiscal_year, fiscal_quarter)``,
     so another quarter's row (or a prediction) may already sit on the provider's
     date — updating onto it raised ``UniqueViolation`` and killed the run
-    (Issue #52).  Such a period is reported in ``skipped`` and the caller's
-    ``ON CONFLICT`` merge handles the incoming row instead.  Every ``UPDATE``
-    additionally runs inside a savepoint, so a conflict that slips past the
-    check (a concurrent writer) degrades to one skipped period instead of a
-    failed batch.
+    (Issue #52).  Such a period is reported in ``skipped``.
+
+    Issue #81: that skip is only safe while the caller's ``ON CONFLICT`` merge
+    cannot mint a second confirmed identity for the period, and #52 assumed more
+    than holds.  A period's **own** stale prediction holding the provider's date
+    is therefore no longer delegated: it is removed (``predictions_cleared``) and
+    the period's confirmed row moves onto the provider's date after all, so the
+    batch row merges into the confirmed row by natural key.  Delegating instead
+    promoted the prediction (``is_predicted = FALSE``) next to the period's
+    confirmed row and hit ``idx_earnings_fiscal_identity`` — the 2026-10-12
+    Futu stage died on exactly this for ``1888.HK`` FY2026 Q2.  The provider
+    upserts additionally refuse to promote a row that does not carry the incoming
+    row's own identity (:data:`CONFIRM_IDENTITY_PROMOTION`).
+
+    Every ``UPDATE`` additionally runs inside a savepoint, so a conflict that
+    slips past the check (a concurrent writer) degrades to one skipped period
+    instead of a failed batch.
 
     Report-type direction (Issue #50 follow-up): a fiscal period is one row and
     its quarterly **release** owns it, so
@@ -731,10 +812,25 @@ def reschedule_confirmed_rows(cur, rows, *, symbol=0, market=1, report_date=3,
         cur.execute(f"SAVEPOINT {_RESCHEDULE_SAVEPOINT}")
         try:
             holder = _target_holder(cur, key[0], key[1], new_date, entry["report_type"])
+            if holder is not None and _prediction_of_period(holder, key):
+                # Issue #81 root cause: the provider's date is held by this very
+                # period's stale prediction (the predictor dates a period at the
+                # season's median month, which is exactly where a provider later
+                # announces it).  Removing it frees the natural key, so the row
+                # below moves onto the provider's date and the batch row merges
+                # into the *confirmed* row instead of the upsert promoting the
+                # prediction next to it and colliding on the identity index.
+                if _delete_stale_prediction(cur, holder, key):
+                    outcome.predictions_cleared.append({
+                        **record, "reason": "stale_prediction",
+                        "holder": {"id": holder["id"], "fiscal_year": holder["fiscal_year"],
+                                   "fiscal_quarter": holder["fiscal_quarter"]},
+                    })
+                    holder = None
             if holder is not None:
-                # The provider's date is owned by another period (or by a
-                # prediction).  Leave both rows and their fiscal labels alone;
-                # the caller's ON CONFLICT merge still lands the incoming values.
+                # The provider's date belongs to another period, confirmed or
+                # predicted.  Leave both rows and their fiscal labels alone; the
+                # caller writes the remaining batch around this period.
                 outcome.skipped.append({**record, "reason": "target_occupied", "holder": holder})
             elif takeover:
                 cur.execute(
@@ -772,6 +868,13 @@ def reschedule_confirmed_rows(cur, rows, *, symbol=0, market=1, report_date=3,
             "dropped %s disclosure %s.%s FY%s Q%s (%s): %s",
             drop["report_type"], drop["symbol"], drop["market"], drop["fiscal_year"],
             drop["fiscal_quarter"], drop["report_date"], drop["reason"],
+        )
+    for clear in outcome.predictions_cleared:
+        logger.info(
+            "reschedule cleared %s.%s FY%s Q%s stale prediction %s → %s (confirmed row %s, "
+            "prediction %s, Issue #81)",
+            clear["symbol"], clear["market"], clear["fiscal_year"], clear["fiscal_quarter"],
+            clear["from"], clear["to"], clear["id"], clear["holder"]["id"],
         )
     for skip in outcome.skipped:
         logger.warning(
