@@ -118,7 +118,8 @@ class _RecordingExecuteValues:
         self.calls = []
 
     def __call__(self, cur, sql, argslist, page_size=None, fetch=False):
-        self.calls.append({"sql": " ".join(str(sql).split()), "rows": list(argslist)})
+        self.calls.append({"sql": " ".join(str(sql).split()), "rows": list(argslist),
+                           "page_size": page_size})
 
 
 def _fake_db_cursor(cursor):
@@ -318,6 +319,107 @@ class DateBatchIsolationTests(TestCase):
         self.assertEqual(details["date_reschedule_skipped"], 3)
         self.assertEqual(details["date_symbols"], 188)      # historical key kept
         self.assertEqual(details["actual_symbols"], 137)
+
+
+class _PagingCursor(_FakeCursor):
+    """A fake cursor that reproduces psycopg2's *per-page* ``execute_values``.
+
+    The real ``execute_values`` issues one statement per page and leaves only the
+    last page's result in the cursor.  The stub below records the page it just
+    wrote and this cursor then answers ``fetchall`` with the confirmed rows of
+    *that* page — so a caller that asks for a whole 250-row batch in one paged
+    call can only ever see the last page, exactly like production.
+    """
+
+    def __init__(self, confirmed_rows, rowcount=1):
+        super().__init__(results=[], rowcount=rowcount)
+        self.confirmed_rows = conf_dict(confirmed_rows)
+        self.pages = []
+        self.pending = []
+
+    def serve_identity_page(self, page_rows, page_size):
+        """Answer ``fetchall`` with the confirmed rows of the page just written.
+
+        ``page_rows`` are the identity-lookup args (symbol, market, fiscal_year,
+        fiscal_quarter).
+        """
+        self.pages.append((len(page_rows), page_size))
+        effective = page_rows[-(len(page_rows) % (page_size or 100) or (page_size or 100)):]
+        wanted = {(row[0], row[1], row[2], row[3]) for row in effective}
+        self.pending = [row for key, row in self.confirmed_rows.items() if key in wanted]
+
+    def fetchall(self):
+        rows, self.pending = self.pending, []
+        return rows
+
+
+def conf_dict(rows):
+    return {(row["symbol"], row["market"], row["fiscal_year"], row["fiscal_quarter"]): row
+            for row in rows}
+
+
+class IdentityLookupCoverageTests(TestCase):
+    """The period→confirmed-row lookup must cover every page of the batch.
+
+    ``execute_values`` executes one statement per page, so a single call for a
+    424-row Futu batch left the cursor with only the last page's result: the
+    identity map held 24 of the batch's periods, the rest looked like periods with
+    no stored row, no move was issued for them, and their rows were inserted next
+    to the confirmed row the period already had — 13 rows rejected by
+    ``idx_earnings_fiscal_identity`` in the 2026-10-14 production run.
+    """
+
+    def _big_batch(self, first_date="2026-01-09"):
+        """250 futu rows: one period per symbol, so nothing is collapsed away."""
+        batch: list[tuple] = [_futu_row("SYM000.US", "US", first_date, 2026, 1)]
+        for index in range(1, 250):
+            batch.append(_futu_row(f"SYM{index:03d}.US", "US", "2026-09-01", 2026, 3))
+        return batch
+
+    def test_a_period_from_the_first_page_is_still_moved(self):
+        stored = [{"id": 900, "symbol": "SYM000.US", "market": "US", "fiscal_year": 2026,
+                  "fiscal_quarter": 1, "report_date": date(2026, 1, 5), "report_type": "Q",
+                  "is_predicted": False, "eps_actual": None, "revenue_actual": None,
+                  "updated_at": _ts(1)}]
+        cursor = _PagingCursor(stored)
+        stats = sync_futu.FutuStageStats()
+
+        def fake_execute_values(cur, sql, argslist, page_size=None, fetch=False):
+            if sql.startswith("SELECT e.id"):        # the identity lookup
+                cur.serve_identity_page(list(argslist), page_size)
+
+        with mock.patch("psycopg2.extras.execute_values", side_effect=fake_execute_values), \
+             mock.patch.object(sync_futu, "db_cursor", return_value=_fake_db_cursor(cursor)):
+            written = sync_futu.flush_date_batch(self._big_batch(), stats)
+
+        moves = [call for call in cursor.executed if "UPDATE earnings SET report_date" in call[0]]
+        self.assertEqual([call[1][1] for call in moves], [900],
+                         "the first page's period must be recognised and moved")
+        self.assertEqual(moves[0][1][0], date(2026, 1, 9))
+        self.assertEqual(stats.skipped_rows, 0)
+        self.assertEqual(written, 250)
+        # 250 entries are looked up in full: no page is silently dropped.
+        self.assertEqual([size for _, size in cursor.pages], [200, 50])
+        self.assertEqual(sum(count for count, _ in cursor.pages), 250)
+
+    def test_the_lookup_asks_for_exactly_the_page_it_passes(self):
+        """A page size below the arg list is what truncated the map."""
+        cursor = _PagingCursor([])
+        recorder = _RecordingExecuteValues()
+
+        def fake_execute_values(cur, sql, argslist, page_size=None, fetch=False):
+            recorder(cur, sql, argslist, page_size=page_size, fetch=fetch)
+            if sql.startswith("SELECT e.id"):
+                cur.serve_identity_page(list(argslist), page_size)
+
+        with mock.patch("psycopg2.extras.execute_values", side_effect=fake_execute_values), \
+             mock.patch.object(sync_futu, "db_cursor", return_value=_fake_db_cursor(cursor)):
+            sync_futu.flush_date_batch(self._big_batch(), sync_futu.FutuStageStats())
+
+        lookups = [call for call in recorder.calls if call["sql"].startswith("SELECT e.id")]
+        self.assertEqual(len(lookups), 2)
+        for call in lookups:
+            self.assertGreaterEqual(call["page_size"] or 0, len(call["rows"]))
 
 
 class RunAccountingTests(TestCase):

@@ -51,7 +51,14 @@ week were lost).  Two write-path rules close it:
 * a provider upsert may only turn a conflicting row into a confirmed row while
   that row carries the **incoming row's own** fiscal identity
   (:data:`CONFIRM_IDENTITY_PROMOTION`), so no upsert can ever mint a second
-  confirmed identity for a period.
+  confirmed identity for a period;
+* the period→confirmed-row lookup behind both rules reads *every* page of the
+  batch: ``execute_values`` leaves only its last page's result in the cursor, so
+  a 424-row Futu batch had an identity map of its last 24 periods, and the rows
+  of the other 4 pages were inserted next to the confirmed row their period
+  already had (13 rows rejected by the identity index in the 2026-10-14
+  production run).  A blind spot in this lookup is indistinguishable, to the
+  caller, from "this period has no stored row yet".
 """
 from __future__ import annotations
 
@@ -497,6 +504,12 @@ def _identity_query() -> str:
 #: Savepoint guarding a single reschedule UPDATE (Issue #52).
 _RESCHEDULE_SAVEPOINT = "fincal_reschedule"
 
+#: Entries per identity lookup of :func:`reschedule_confirmed_rows` (Issue #81).
+#: Bounds one ``VALUES`` list (the query must stay a sane size for a 10k-row
+#: batch) while still covering **every** entry: see the loop's comment for why the
+#: lookup cannot be a single paged call.
+_IDENTITY_LOOKUP_PAGE = 200
+
 #: ``ON CONFLICT ... DO UPDATE`` fragment that lets a provider upsert confirm a
 #: conflicting **prediction** row — and only while that row carries the incoming
 #: row's own fiscal identity (Issue #81).
@@ -746,14 +759,26 @@ def reschedule_confirmed_rows(cur, rows, *, symbol=0, market=1, report_date=3,
                 "holder": {"id": None, "report_type": entry["report_type"]},
             })
 
-    execute_values(cur, _identity_query(), [list(k) for k in entries])
+    # Read the periods' confirmed rows page by page.  ``execute_values`` runs one
+    # statement *per page* and leaves only the last page's result in the cursor,
+    # so a single call for a whole batch silently truncates the identity map to
+    # its last :data:`_IDENTITY_LOOKUP_PAGE` entries — a 424-row Futu batch kept
+    # only its last 24 periods, the other 4 pages looked like periods with no
+    # stored row at all, no move was issued for them, and their rows were
+    # *inserted* next to the confirmed row the period already had, straight into
+    # ``idx_earnings_fiscal_identity`` (13 such rows in the 2026-10-14 production
+    # run of Issue #81).
     existing: dict[tuple, list[dict]] = {}
-    for row in cur.fetchall():
-        row = dict(row)
-        key = fiscal_key(row)
-        if not key or row.get("report_date") is None:
-            continue
-        existing.setdefault(key, []).append(row)
+    keys = [list(k) for k in entries]
+    for start in range(0, len(keys), _IDENTITY_LOOKUP_PAGE):
+        page = keys[start:start + _IDENTITY_LOOKUP_PAGE]
+        execute_values(cur, _identity_query(), page, page_size=len(page))
+        for row in cur.fetchall():
+            row = dict(row)
+            key = fiscal_key(row)
+            if not key or row.get("report_date") is None:
+                continue
+            existing.setdefault(key, []).append(row)
 
     for key, entry in entries.items():
         group = existing.get(key) or []
