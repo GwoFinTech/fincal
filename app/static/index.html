@@ -212,6 +212,14 @@
 
     <!-- Dedicated self-selection page: search and mutating actions stay out of the calendar. -->
     <main v-if="appTab === 'watchlist'" class="max-w-[1600px] mx-auto px-4 py-5 pb-8">
+      <!-- Error surface for this page (Issue #82). It sits outside the
+           `v-if="user"` branch on purpose: a rejected write can be a 401, and
+           `apiFetch` clears `user` on 401 — the explanation must survive that,
+           otherwise the page would just look logged out with no reason given. -->
+      <div v-if="error || writeError" class="mb-3 px-3 py-2 rounded-lg text-[12px] flex items-center justify-between" style="background:var(--destructive-bg);border:1px solid rgba(239,68,68,0.3);color:#fca5a5;">
+        <span>{{ error || writeError }}</span>
+        <button @click="dismissErrors" style="color:#f87171;">&times;</button>
+      </div>
       <template v-if="user">
         <div class="flex flex-wrap items-end justify-between gap-3 mb-4"><div><h2 class="text-[20px] font-semibold">我的自选</h2><p class="text-[12px] mt-1" style="color:var(--text-muted);">追踪你关注的美股与港股财报日程。</p></div><span class="text-[12px]" style="color:var(--text-muted);">{{ watchlist.length }} 个标的</span></div>
         <div class="grid grid-cols-3 gap-2.5 mb-4"><div class="watchlist-stat"><div class="text-[11px] text-zinc-500">全部</div><div class="mt-1 text-[22px] font-semibold">{{ watchlist.length }}</div></div><div class="watchlist-stat"><div class="text-[11px] text-zinc-500">美股 · US</div><div class="mt-1 text-[22px] font-semibold text-blue-300">{{ usWatchlist.length }}</div></div><div class="watchlist-stat"><div class="text-[11px] text-zinc-500">港股 · HK</div><div class="mt-1 text-[22px] font-semibold text-pink-300">{{ hkWatchlist.length }}</div></div></div>
@@ -230,10 +238,11 @@
       <div v-if="loading" class="fixed z-50" style="top:64px;right:20px;display:flex;align-items:center;gap:8px;padding:8px 14px;border-radius:10px;background:var(--surface-raised);border:1px solid var(--border);color:var(--text-muted);font-size:12px;box-shadow:0 4px 16px rgba(0,0,0,.35);pointer-events:none;">
         <div class="spinner" style="width:14px;height:14px;"></div> 加载中...
       </div>
-      <!-- Error -->
-      <div v-if="error" class="mb-2 px-3 py-2 rounded-lg text-[12px] flex items-center justify-between" style="background:var(--destructive-bg);border:1px solid rgba(239,68,68,0.3);color:#fca5a5;">
-        <span>{{ error }}</span>
-        <button @click="error = null" style="color:#f87171;">&times;</button>
+      <!-- Error: read failures (`error`) and write failures (`writeError`, Issue
+           #82) share one banner so a rejected 自选 write is visible here too. -->
+      <div v-if="error || writeError" class="mb-2 px-3 py-2 rounded-lg text-[12px] flex items-center justify-between" style="background:var(--destructive-bg);border:1px solid rgba(239,68,68,0.3);color:#fca5a5;">
+        <span>{{ error || writeError }}</span>
+        <button @click="dismissErrors" style="color:#f87171;">&times;</button>
       </div>
 
       <!-- Calendar grid -->

@@ -41,7 +41,13 @@
     const user = ref(null);
     const appConfig = ref({ auth_login_url: '' });
     const loading = ref(false);
+    // Two separate surfaces (Issue #82): a *read* failure is transient — the next
+    // refresh may clear it — while a *write* failure must stay visible until the
+    // user acts on it. They used to share one ref, so the `loadEarnings()` that
+    // every write path calls right after the request wiped the explanation the
+    // failure had just written.
     const error = ref(null);
+    const writeError = ref(null);
     const toast = ref('');
 
     // Language-neutral error codes from `app/errors.py` → the one wording this
@@ -59,21 +65,41 @@
       return body || `HTTP ${status}`;
     }
 
+    // ``expectOk: true`` marks a *write* (Issue #82). A 401/404 answers with a
+    // visible, attributable ``writeError`` instead of a silent ``null``, the
+    // message never lands in the read surface, and the caller is handed the same
+    // ``null`` it already knows how to check — so the return shape stays
+    // compatible with the dozen read call sites.
     async function apiFetch(path, opts = {}) {
+      const { expectOk, ...init } = opts;
+      if (expectOk) writeError.value = null; // a new attempt supersedes the last failure
       try {
-        const res = await fetch(path, { ...opts, headers: { 'Content-Type': 'application/json', ...opts.headers } });
-        if (res.status === 401) { user.value = null; return null; }
-        if (res.status === 404) { return null; }
+        const res = await fetch(path, { ...init, headers: { 'Content-Type': 'application/json', ...init.headers } });
+        if (res.status === 401) {
+          user.value = null;
+          if (expectOk) writeError.value = '登录状态已失效（HTTP 401），本次改动未生效，请重新登录后重试';
+          return null;
+        }
+        if (res.status === 404) {
+          if (expectOk) writeError.value = '请求的接口不存在（HTTP 404），本次改动未生效';
+          return null;
+        }
         if (!res.ok) {
           const text = await res.text().catch(() => '');
           throw new Error(apiErrorText(text, res.status));
         }
         return res.json();
       } catch (e) {
-        error.value = e.message;
+        if (expectOk) writeError.value = '本次改动未生效：' + e.message;
+        else error.value = e.message;
         showToast('请求失败: ' + e.message);
         return null;
       }
+    }
+
+    function dismissErrors() {
+      error.value = null;
+      writeError.value = null;
     }
 
     function showToast(msg) {
@@ -94,7 +120,7 @@
       }
     }
 
-    return { user, appConfig, loading, error, toast, apiFetch, showToast, loadUser, login };
+    return { user, appConfig, loading, error, writeError, toast, apiFetch, showToast, dismissErrors, loadUser, login };
   }
 
   // ── useCalendar: calendar navigation + cell computation ─────────
@@ -254,8 +280,14 @@
       }, 300);
     }
 
+    // Both write paths check what came back before announcing success (Issue
+    // #82): `apiFetch` returns `null` for every rejected/failed write, and the
+    // failure toast it already shows must not be overwritten by a success toast
+    // for a change that never happened — nor by a refresh (`loadEarnings`
+    // clears the read error) racing the explanation into oblivion.
     async function addToWatchlist(symbol, market) {
-      await apiFetch(`/api/watchlist?symbol=${encodeURIComponent(symbol)}&market=${encodeURIComponent(market)}`, { method: 'POST' });
+      const added = await apiFetch(`/api/watchlist?symbol=${encodeURIComponent(symbol)}&market=${encodeURIComponent(market)}`, { method: 'POST', expectOk: true });
+      if (!added) return;
       await loadWatchlist();
       await loadEarnings();
       await loadNextEarnings();
@@ -265,7 +297,8 @@
     }
 
     async function removeFromWatchlist(symbol, market) {
-      await apiFetch(`/api/watchlist?symbol=${encodeURIComponent(symbol)}&market=${encodeURIComponent(market)}`, { method: 'DELETE' });
+      const removed = await apiFetch(`/api/watchlist?symbol=${encodeURIComponent(symbol)}&market=${encodeURIComponent(market)}`, { method: 'DELETE', expectOk: true });
+      if (!removed) return;
       await loadWatchlist();
       await loadEarnings();
       await loadNextEarnings();
@@ -562,7 +595,7 @@
     setup() {
       // 1. Core API layer
       const api = useApi();
-      const { user, appConfig, loading, error, toast, apiFetch, showToast, loadUser, login } = api;
+      const { user, appConfig, loading, error, writeError, toast, apiFetch, showToast, dismissErrors, loadUser, login } = api;
 
       // 2. Earnings data (shared between calendar and watchlist)
       const earnings = ref([]);
@@ -637,7 +670,7 @@
       // ── Public API ───────────────────────────────────────────
       return {
         // State
-        user, earnings, appTab, watchlistOnly, loading, error, toast, appConfig,
+        user, earnings, appTab, watchlistOnly, loading, error, writeError, toast, appConfig,
         // Calendar
         viewMode: cal.viewMode, currentDate: cal.currentDate,
         selectedEarning: cal.selectedEarning, decision: cal.decision, selectedDay: cal.selectedDay,
@@ -662,7 +695,7 @@
         // Formatters
         ...fmt,
         // Shared
-        showToast, login,
+        showToast, login, dismissErrors,
         // The calendar's 「只看自选」 checkbox calls this from the template
         // (Issue #80): an internal function is invisible to the runtime-compiled
         // template, and `@change` then silently attaches no listener at all.
