@@ -411,7 +411,18 @@ export interface paths {
         put?: never;
         /**
          * Retry Sync Run
-         * @description Create a retry run from a failed/interrupted/cancelled run (Issue #19).
+         * @description Record a retry request for a failed/interrupted/cancelled run (Issues #19, #77).
+         *
+         *     This service cannot execute a sync stage — the scheduled pipeline
+         *     (``scripts/cron_sync.sh``, the only entrypoint per the scheduling contract in
+         *     ``README``) owns every stage. The endpoint therefore does not fake a run: it
+         *     records the intent as a ``sync_runs`` row that is terminal from the start
+         *     (``status='skipped'``, ``phase='retry_requested'``) and answers **202** with
+         *     the pending request's id and the language-independent reason code
+         *     ``retry_requires_cron``. The next scheduled round runs that stage and
+         *     marks the request fulfilled (``app.sync_audit.start_run`` →
+         *     ``consume_retry_requests``), leaving the usual terminal state and
+         *     ``record_count`` on the fulfilling run.
          */
         post: operations["retry_sync_run_api_admin_sync_runs__run_id__retry_post"];
         delete?: never;
@@ -1188,14 +1199,27 @@ export interface components {
             /** Recovered */
             recovered: number;
         };
-        /** SyncRunRetryResult */
+        /**
+         * SyncRunRetryResult
+         * @description Outcome of a retry request (Issues #19, #77).
+         *
+         *     A retry is **not** started by this service: the scheduled pipeline
+         *     (``scripts/cron_sync.sh``) is the only allowed entrypoint, so the request is
+         *     recorded and executed by the next round that runs that stage.
+         */
         SyncRunRetryResult: {
             /** Status */
             status: string;
             /** Original Run Id */
             original_run_id: number;
-            /** New Run Id */
-            new_run_id: number;
+            /** Request Id */
+            request_id: number;
+            /** Stage */
+            stage: string;
+            /** Executed By */
+            executed_by: string;
+            /** Reason Code */
+            reason_code: string;
         };
         /** SyncRunSummary */
         SyncRunSummary: {
@@ -1950,7 +1974,7 @@ export interface operations {
         requestBody?: never;
         responses: {
             /** @description Successful Response */
-            200: {
+            202: {
                 headers: {
                     [name: string]: unknown;
                 };

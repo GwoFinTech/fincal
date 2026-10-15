@@ -38,6 +38,9 @@ class _Cursor:
         self.raise_at = raise_at
         self.executed = []
         self.closed = False
+        # A real psycopg2 cursor always exposes this; `start_run` reads it when
+        # it fulfils the retry requests of its stage (Issue #77).
+        self.rowcount = 0
 
     def execute(self, sql, params=None):
         self.executed.append((sql, params))
@@ -64,6 +67,18 @@ def _patch_db_cursor(cursor):
     return patch.object(sync_audit.db, "db_cursor", return_value=ctx)
 
 
+def _insert_statement(cursor):
+    """The `INSERT INTO sync_runs` statement (not just the last one).
+
+    Since Issue #77 `start_run` also fulfils the stage's pending retry requests
+    with a trailing `UPDATE`, so ``executed[-1]`` is no longer the INSERT.
+    """
+    for sql, params in cursor.executed:
+        if sql.strip().startswith("INSERT INTO sync_runs"):
+            return sql, params
+    raise AssertionError(f"no INSERT INTO sync_runs was executed: {cursor.executed}")
+
+
 # ── A running row with the same key ⇒ idempotent skip ────────────────
 
 def test_start_run_skips_while_same_key_running():
@@ -84,7 +99,7 @@ def test_start_run_reruns_after_terminal_state():
         rid = start_run("longbridge", "longbridge",
                         idempotency_key="longbridge:earnings:full")
     assert rid == 99, "terminal state must allow a fresh attempt (new run_id)"
-    insert_sql, insert_params = cursor.executed[-1]
+    insert_sql, insert_params = _insert_statement(cursor)
     assert insert_sql.strip().startswith("INSERT INTO sync_runs")
     # params: (stage, source, symbol_count, now, attempt, key, timeout_seconds)
     assert insert_params[4] == 2, "attempt must be incremented across attempts"
@@ -111,7 +126,7 @@ def test_start_run_without_key_uses_attempt_one():
     with _patch_db_cursor(cursor):
         rid = start_run("futu", "futu")
     assert rid == 7
-    insert_sql, insert_params = cursor.executed[-1]
+    insert_sql, insert_params = _insert_statement(cursor)
     assert insert_sql.strip().startswith("INSERT INTO sync_runs")
     assert insert_params[4] == 1, "no key ⇒ attempt defaults to 1"
 

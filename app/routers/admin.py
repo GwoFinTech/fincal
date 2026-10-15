@@ -333,15 +333,29 @@ def readiness_check():
         return JSONResponse(status_code=503, content={"status": "not_ready"})
 
 
-@router.post("/sync-runs/{run_id}/retry", response_model=SyncRunRetryResult)
+@router.post("/sync-runs/{run_id}/retry", response_model=SyncRunRetryResult,
+             status_code=202)
 def retry_sync_run(run_id: int, user=Depends(admin_user)):
-    """Create a retry run from a failed/interrupted/cancelled run (Issue #19)."""
-    from ..sync_audit import start_run
+    """Record a retry request for a failed/interrupted/cancelled run (Issues #19, #77).
+
+    This service cannot execute a sync stage — the scheduled pipeline
+    (``scripts/cron_sync.sh``, the only entrypoint per the scheduling contract in
+    ``README``) owns every stage. The endpoint therefore does not fake a run: it
+    records the intent as a ``sync_runs`` row that is terminal from the start
+    (``status='skipped'``, ``phase='retry_requested'``) and answers **202** with
+    the pending request's id and the language-independent reason code
+    ``retry_requires_cron``. The next scheduled round runs that stage and
+    marks the request fulfilled (``app.sync_audit.start_run`` →
+    ``consume_retry_requests``), leaving the usual terminal state and
+    ``record_count`` on the fulfilling run.
+    """
+    from ..freshness import SYNC_STAGES
+    from ..sync_audit import RETRY_EXECUTOR, RETRY_REASON_CODE, request_retry
     from ..audit import log_admin_action
 
     with db.db_cursor() as cur:
         cur.execute(
-            "SELECT stage, source, symbol_count, status, idempotency_key FROM sync_runs WHERE id=%s",
+            "SELECT stage, source, symbol_count, status FROM sync_runs WHERE id=%s",
             (run_id,),
         )
         original = cur.fetchone()
@@ -350,24 +364,32 @@ def retry_sync_run(run_id: int, user=Depends(admin_user)):
         if original["status"] not in ("failed", "interrupted", "cancelled"):
             raise ConflictError("run_not_retryable",
                                 f"cannot retry run in '{original['status']}' state")
+        if original["stage"] not in SYNC_STAGES:
+            # No scheduled round runs this stage, so a request could only sit
+            # unfulfilled forever — say so instead of promising an execution.
+            raise ConflictError(
+                "retry_stage_not_scheduled",
+                f"stage '{original['stage']}' is not part of the scheduled pipeline; "
+                f"run it by hand",
+            )
 
-    # Create new run with same stage/source but new idempotency key
-    new_key = original["idempotency_key"]
-    if new_key:
-        new_key = f"{new_key}:retry:{run_id}"
-
-    new_id = start_run(
-        original["stage"], original["source"],
+    request_id = request_retry(
+        run_id, original["stage"], original["source"],
         symbol_count=original["symbol_count"],
-        idempotency_key=new_key,
+        requested_by=str(user.get("email") or user.get("id")),
     )
-
-    if new_id is None:
-        raise ConflictError("retry_already_running", "a retry is already in progress")
+    if request_id is None:
+        raise ConflictError(
+            "retry_already_requested",
+            "a retry request for this run is already waiting for the next scheduled round",
+        )
 
     log_admin_action("retry_sync_run", actor_id=str(user.get("id")),
                      actor_email=user.get("email"),
                      target=f"sync_run:{run_id}",
-                     details={"new_run_id": new_id})
+                     details={"request_id": request_id, "stage": original["stage"],
+                              "reason_code": RETRY_REASON_CODE})
 
-    return {"status": "retry_created", "original_run_id": run_id, "new_run_id": new_id}
+    return {"status": "retry_scheduled", "original_run_id": run_id,
+            "request_id": request_id, "stage": original["stage"],
+            "executed_by": RETRY_EXECUTOR, "reason_code": RETRY_REASON_CODE}

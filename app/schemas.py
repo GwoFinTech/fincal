@@ -247,9 +247,18 @@ class SyncRunRecoverResult(BaseModel):
     recovered: int
 
 class SyncRunRetryResult(BaseModel):
+    """Outcome of a retry request (Issues #19, #77).
+
+    A retry is **not** started by this service: the scheduled pipeline
+    (``scripts/cron_sync.sh``) is the only allowed entrypoint, so the request is
+    recorded and executed by the next round that runs that stage.
+    """
     status: str
     original_run_id: int
-    new_run_id: int
+    request_id: int
+    stage: str
+    executed_by: str
+    reason_code: str
 
 class AuditLogEntry(BaseModel):
     id: int

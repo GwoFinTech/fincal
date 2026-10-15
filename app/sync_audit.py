@@ -57,6 +57,10 @@ def start_run(
 
     When ``idempotency_key`` is set, a new attempt is created only if no
     existing running entry exists for the same key.
+
+    A pending retry request for this ``stage`` is marked as fulfilled by the new
+    run (Issue #77): the request records an admin's intent, and only the
+    scheduled pipeline may execute it — see :func:`request_retry`.
     """
     now = _utcnow()
     try:
@@ -93,7 +97,6 @@ def start_run(
             run_id = cur.fetchone()["id"]
             logger.info("sync run started: id=%d stage=%s attempt=%d key=%s",
                          run_id, stage, attempt, idempotency_key)
-            return run_id
     except psycopg2.errors.UniqueViolation:
         # A concurrent attempt for the same key inserted a *running* row
         # between our running-check and our INSERT. The partial unique index
@@ -103,6 +106,172 @@ def start_run(
         # original #38 failure) create a fresh attempt instead of crashing.
         logger.warning("idempotent skip (concurrent running): key=%s", idempotency_key)
         return None
+
+    # A retry request recorded for this stage is being fulfilled by this very run
+    # (Issue #77). Done outside the INSERT's transaction: the request row is only
+    # consumed when the stage really started.
+    consume_retry_requests(stage, run_id)
+    return run_id
+
+
+# ── Retry requests (Issue #77) ─────────────────────────────────────
+#
+# `POST /api/admin/sync-runs/{id}/retry` was a *fake success*: it inserted a
+# `status='running'` row with key `<stage key>:retry:<id>` and nothing in the
+# repository ever consumed that key — the web process has no scheduler, no
+# worker and no subprocess entrypoint into the pipeline (`scripts/cron_sync.sh`
+# is the only one, Issue #57).  The row stayed `running` until a container
+# restart or the timeout reaper turned the "nothing happened" into
+# "ran and was interrupted", and while it existed every further retry of the
+# same run was rejected with `retry_already_running` — by its own ghost.
+#
+# A retry request is now an honest record: a `sync_runs` row that is *terminal
+# from the start* (`status='skipped'`, `phase='retry_requested'`, an
+# `idempotency_key` that never enters the *running* partial unique index, and
+# `details.retry_requested_for` naming the run an admin wanted repeated).  The
+# scheduled round that runs that stage fulfils it automatically
+# (:func:`consume_retry_requests`, called by :func:`start_run`), and the
+# fulfilling run carries the real terminal state and `record_count`.
+
+#: ``sync_runs.phase`` value marking a row as a retry *request*, not a run.
+RETRY_REQUEST_PHASE = "retry_requested"
+
+#: ``details`` key naming the run whose stage an admin asked to repeat.
+RETRY_REQUESTED_FOR = "retry_requested_for"
+
+#: ``details`` key naming the run that fulfilled a request.
+RETRY_SATISFIED_BY = "satisfied_by_run"
+
+#: Language-independent reason code returned to the caller (Issue #77).
+RETRY_REASON_CODE = "retry_requires_cron"
+
+#: The only executor of a retry request.
+RETRY_EXECUTOR = "scripts/cron_sync.sh"
+
+
+def retry_request_key(original_run_id: int) -> str:
+    """Idempotency key of a retry request for ``original_run_id``.
+
+    Deliberately *not* the stage's key plus a suffix: the key of a request must
+    never occupy the ``status='running'`` partial unique index, or the request
+    would block the next real attempt of that stage (the `:retry:<id>` key bug).
+    """
+    return f"retry-request:{int(original_run_id)}"
+
+
+def _stage_budget(stage: str) -> int:
+    """The stage's declared budget, so a request row is not born mislabelled."""
+    from .config import stage_timeout
+
+    try:
+        return stage_timeout(stage)
+    except KeyError:
+        return _DEFAULT_TIMEOUT_SECONDS
+
+
+def request_retry(
+    original_run_id: int,
+    stage: str,
+    source: str,
+    *,
+    symbol_count: int = 0,
+    requested_by: str | None = None,
+) -> int | None:
+    """Record a retry request for a failed/interrupted/cancelled run.
+
+    Returns the request row's id, or ``None`` when a request for the same
+    original run is still waiting for the scheduled round (the caller turns that
+    into `retry_already_requested`).  A request that was already fulfilled by a
+    run does not block a new one: asking again after the stage really re-ran is
+    a legitimate request.
+    """
+    key = retry_request_key(original_run_id)
+    now = _utcnow()
+    with db.db_cursor() as cur:
+        cur.execute(
+            """SELECT id, details FROM sync_runs
+               WHERE idempotency_key=%s AND status='skipped' AND phase=%s
+               ORDER BY id DESC LIMIT 1""",
+            (key, RETRY_REQUEST_PHASE),
+        )
+        existing = cur.fetchone()
+        if existing is not None and RETRY_SATISFIED_BY not in (existing["details"] or {}):
+            logger.warning(
+                "retry request for run %s is already pending (request_id=%s)",
+                original_run_id, existing["id"],
+            )
+            return None
+
+        cur.execute(
+            "SELECT COALESCE(MAX(attempt), 0) + 1 AS next FROM sync_runs WHERE idempotency_key=%s",
+            (key,),
+        )
+        attempt = cur.fetchone()["next"]
+        details = {
+            RETRY_REQUESTED_FOR: str(original_run_id),
+            "requested_by": requested_by,
+            "requested_at": now.isoformat(),
+            "reason_code": RETRY_REASON_CODE,
+            "executed_by": RETRY_EXECUTOR,
+        }
+        cur.execute(
+            """INSERT INTO sync_runs
+               (stage, status, source, symbol_count, heartbeat_at, attempt,
+                idempotency_key, timeout_seconds, phase, details, finished_at)
+               VALUES (%s, 'skipped', %s, %s, %s, %s, %s, %s, %s, %s, %s)
+               RETURNING id""",
+            (stage, source, symbol_count, now, attempt, key, _stage_budget(stage),
+             RETRY_REQUEST_PHASE, psycopg2.extras.Json(details), now),
+        )
+        request_id = cur.fetchone()["id"]
+        logger.info(
+            "retry requested: request_id=%d for run=%d stage=%s (executed by %s)",
+            request_id, original_run_id, stage, RETRY_EXECUTOR,
+        )
+        return request_id
+
+
+def consume_retry_requests(stage: str, run_id: int) -> int:
+    """Mark the pending retry requests of ``stage`` as fulfilled by ``run_id``.
+
+    Called by :func:`start_run`: a request says "this stage must run again", so
+    the run that starts afterwards is the fulfilment.  Only requests of *that*
+    stage are consumed, and a request is consumed once (the
+    ``NOT (details ? 'satisfied_by_run')`` guard makes a second round idempotent).
+    """
+    with db.db_cursor() as cur:
+        cur.execute(
+            """UPDATE sync_runs
+               SET finished_at = NOW(),
+                   details = details || %s::jsonb
+               WHERE stage=%s AND status='skipped' AND phase=%s
+                 AND NOT (details ? %s)""",
+            (psycopg2.extras.Json({
+                RETRY_SATISFIED_BY: run_id,
+                "satisfied_at": _utcnow().isoformat(),
+            }), stage, RETRY_REQUEST_PHASE, RETRY_SATISFIED_BY),
+        )
+        count = cur.rowcount
+    if count:
+        logger.info("%d retry request(s) for stage %s fulfilled by run %d",
+                    count, stage, run_id)
+    return count
+
+
+def pending_retry_requests(stage: str | None = None) -> list[dict]:
+    """Read the retry requests that no scheduled run has fulfilled yet."""
+    sql = ("""SELECT id, stage, source, symbol_count, attempt, idempotency_key,
+                     details, started_at, finished_at
+              FROM sync_runs
+              WHERE status='skipped' AND phase=%s AND NOT (details ? %s)""")
+    params: list = [RETRY_REQUEST_PHASE, RETRY_SATISFIED_BY]
+    if stage is not None:
+        sql += " AND stage=%s"
+        params.append(stage)
+    sql += " ORDER BY id"
+    with db.db_cursor() as cur:
+        cur.execute(sql, params)
+        return [dict(row) for row in cur.fetchall()]
 
 
 def finish_run(
