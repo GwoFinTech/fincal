@@ -395,6 +395,11 @@ class UniverseStatus(BaseModel):
 class DiagnosticsResponse(BaseModel):
     providers: dict[str, ProviderStats | dict] = {}
     cache: CacheStats = CacheStats()
+    # Issue #83: the same counters attributed to the cache that reported them
+    # (`earnings`, `ical`). `cache` stays the aggregate so existing consumers
+    # keep working; the label is the cache's own name, never a key, symbol,
+    # token or user id.
+    cache_by_name: dict[str, CacheStats] = {}
     sync_runs_24h: list[SyncRunSummary | dict] = []
     # Issue #53: the pipeline is weekly, so the 24h window above is empty most
     # days. `sync_runs_window` covers the configurable window instead (kept

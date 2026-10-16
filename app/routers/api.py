@@ -24,7 +24,9 @@ logger = logging.getLogger(__name__)
 # Per-endpoint caches. The default symbol universe lives in app.universe (Issue
 # #58) with its own TTL, so /api/popular no longer wraps it in a second,
 # hour-long cache that could outlive an upstream change.
-_earnings_cache = LayerCache(default_ttl=120.0, stale_ttl=1800.0)
+# `name` is the metrics label this cache reports under (Issue #83); it is a
+# constant, never the per-user key used below.
+_earnings_cache = LayerCache(default_ttl=120.0, stale_ttl=1800.0, name="earnings")
 
 
 def invalidate_calendar_caches() -> None:

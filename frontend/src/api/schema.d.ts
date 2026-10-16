@@ -661,6 +661,13 @@ export interface components {
              */
             cache: components["schemas"]["CacheStats"];
             /**
+             * Cache By Name
+             * @default {}
+             */
+            cache_by_name: {
+                [key: string]: components["schemas"]["CacheStats"];
+            };
+            /**
              * Sync Runs 24H
              * @default []
              */

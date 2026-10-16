@@ -66,6 +66,10 @@ from ..singleflight import Singleflight
 
 router = APIRouter(tags=["ical"])
 
+# Metric label for this cache (Issue #83). Constant — the cache key below
+# carries a subscription token and must never reach a counter.
+FEED_CACHE_NAME = "ical"
+
 # Cache iCal feeds per token + options for 1 hour.
 _ical_cache = TTLCache(maxsize=512, ttl=3600)
 # Hit/miss counting for this cache is reported to app.metrics (Issue #83) — the
@@ -136,7 +140,7 @@ def ical_feed(
         # #83): the 304 is the conditional-request form of the same body. The
         # counters stay aggregate on purpose — the key carries the subscription
         # token, which must never become a metric label.
-        metrics.record_cache_hit()
+        metrics.record_cache_hit(FEED_CACHE_NAME)
         cached_response = cached  # TTLCache stores FastAPI Response objects.
         etag = cached_response.headers.get("etag", "")
         last_modified = cached_response.headers.get("last-modified", formatdate(946684800, usegmt=True))
@@ -187,7 +191,7 @@ def ical_feed(
     try:
         # Cold path: this request produces the feed itself (a hit would have
         # returned above, so reaching here — 304 included — is a miss).
-        metrics.record_cache_miss()
+        metrics.record_cache_miss(FEED_CACHE_NAME)
         ical_content, earnings = _ical_flight.do(str(cache_key), _generate)
     except TimeoutError:
         # Issue #32: don't silently serve a stale/empty feed (and don't let a

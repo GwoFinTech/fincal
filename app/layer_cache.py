@@ -20,6 +20,10 @@ Every decision taken here is reported to ``app.metrics`` (Issue #83), so
 * a caller that joins an in-flight refresh and returns its snapshot counts as a
   **hit**: no upstream call was made on its behalf;
 * the origin call's outcome → ``record_cache_refresh(True|False)``.
+
+Each counter is reported under this cache's ``name`` (``app/routers/api.py``
+passes ``earnings``), so ``/api/admin/diagnostics`` can attribute the numbers
+without ever labelling a single key.
 """
 from __future__ import annotations
 
@@ -49,7 +53,7 @@ class LayerCache:
     """TTL cache with stale-while-revalidate and singleflight."""
 
     def __init__(self, default_ttl: float = 300.0, stale_ttl: float = 3600.0,
-                 waiter_timeout: float = 30.0):
+                 waiter_timeout: float = 30.0, name: str = ""):
         self._entries: dict[str, CacheEntry] = {}
         self._locks: dict[str, threading.Event] = {}
         # Ordering tickets per key (Issue #34): every fetch takes a ticket when
@@ -62,6 +66,10 @@ class LayerCache:
         self._default_ttl = default_ttl
         self._stale_ttl = stale_ttl
         self._waiter_timeout = waiter_timeout
+        # Metric label for this cache (Issue #83), e.g. "earnings". Empty means
+        # "report to the aggregate only" — a per-key or per-tenant label is never
+        # acceptable, so the caller must name the cache and nothing finer.
+        self._name = name
         self._mutex = threading.Lock()
 
     def get(self, key: str) -> CacheEntry | None:
@@ -161,12 +169,12 @@ class LayerCache:
 
         # Fresh cache hit
         if entry and time.time() < entry.expires_at:
-            metrics.record_cache_hit()
+            metrics.record_cache_hit(self._name)
             return entry.data, entry
 
         # Stale but valid — return stale data, trigger refresh
         if entry and entry.last_success_at and self.is_stale_valid(key):
-            metrics.record_cache_stale()
+            metrics.record_cache_stale(self._name)
             self._trigger_refresh(key, fetcher, ttl)
             return entry.data, entry
 
@@ -196,11 +204,11 @@ class LayerCache:
             try:
                 data = fetcher()
                 self.put(key, data, ttl, ticket=ticket)
-                metrics.record_cache_refresh(True)
+                metrics.record_cache_refresh(True, self._name)
                 logger.debug("cache refresh ok: %s", key)
             except Exception as exc:
                 self.mark_stale(key, f"refresh_failed:{type(exc).__name__}", ticket=ticket)
-                metrics.record_cache_refresh(False)
+                metrics.record_cache_refresh(False, self._name)
                 logger.warning("cache refresh failed for %s: %s", key, exc)
             finally:
                 with self._mutex:
@@ -236,17 +244,17 @@ class LayerCache:
             if entry is not None:
                 # Joined a refresh started for someone else: this caller cost
                 # the origin nothing, so it is a hit (Issue #83).
-                metrics.record_cache_hit()
+                metrics.record_cache_hit(self._name)
                 return entry.data, entry
             # The producer released the key without storing anything (it raced
             # with invalidate()): fall through and fetch it ourselves.
 
         # We are the fetcher
-        metrics.record_cache_miss()
+        metrics.record_cache_miss(self._name)
         try:
             data = fetcher()
             entry = self.put(key, data, ttl, ticket=ticket)
-            metrics.record_cache_refresh(True)
+            metrics.record_cache_refresh(True, self._name)
             if entry is None:  # pragma: no cover - defensive, put always returns an entry
                 now = time.time()
                 return data, CacheEntry(data=data, fetched_at=now,
@@ -256,10 +264,10 @@ class LayerCache:
         except Exception as exc:
             # If we have stale data, return it
             self.mark_stale(key, f"fetch_failed:{type(exc).__name__}", ticket=ticket)
-            metrics.record_cache_refresh(False)
+            metrics.record_cache_refresh(False, self._name)
             entry = self._entries.get(key)
             if entry and entry.last_success_at:
-                metrics.record_cache_stale()
+                metrics.record_cache_stale(self._name)
                 return entry.data, entry
             raise
         finally:

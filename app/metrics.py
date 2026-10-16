@@ -17,18 +17,23 @@ Three rules keep the numbers honest, and each of them is deliberate:
   crash, a container recreate). Read them as "what has *this* process served
   since it started", never as a lifetime total; there is no persistence and no
   cross-process aggregation (a multi-worker deployment reports one worker).
-* **Aggregate, low cardinality.** Cache counters aggregate every cache that
-  reports (earnings + iCal feed); provider counters are keyed by provider name
-  (``kurumi`` / ``longbridge`` / ``futu`` / …). Nothing per request may become a
-  label — no cache key, symbol, token or user id: the label set is bounded by
-  the code, not by traffic, so a busy feed cannot inflate the metric surface.
+* **Aggregate, low cardinality.** Cache counters are reported twice: as a
+  process-wide aggregate (``cache``, every reporting cache together) and broken
+  down by cache name (``cache_by_name``: ``earnings`` for the calendar layer
+  cache, ``ical`` for the feed cache). Provider counters are keyed by provider
+  name (``kurumi`` / ``longbridge`` / ``futu`` / …). Nothing per request may
+  become a label — no cache key, symbol, token or user id: the label set is
+  bounded by the code, not by traffic, so a busy feed cannot inflate the metric
+  surface.
 * **One number, one meaning.** :meth:`Metrics.record_cache_hit` counts a read
   answered without asking the origin (a cache served the caller, joins on an
   in-flight refresh included); :meth:`Metrics.record_cache_miss` counts a read
   that had to produce the value itself; :meth:`Metrics.record_cache_stale`
   counts any reply that handed the caller a *stale* snapshot;
   :meth:`Metrics.record_cache_refresh` counts the outcome of the origin call
-  that (re)produced a value.
+  that (re)produced a value. Every cache counter takes the reporting cache's
+  name; the aggregate is always updated, the per-name breakdown only when a
+  name is given.
 """
 from __future__ import annotations
 
@@ -78,6 +83,20 @@ class Metrics:
         self._mutex = threading.Lock()
         self._providers: dict[str, ProviderStats] = defaultdict(ProviderStats)
         self._cache = CacheStats()
+        self._cache_by_name: dict[str, CacheStats] = {}
+
+    def _cache_targets_locked(self, name: str) -> list[CacheStats]:
+        """The per-name bucket (when a name is given) plus the aggregate.
+
+        Both are updated, so ``cache`` always equals the sum of the reporting
+        caches and ``cache_by_name`` attributes it. An unnamed cache (a
+        LayerCache a caller did not label) reports to the aggregate only rather
+        than inventing a label.
+        """
+        targets = [self._cache]
+        if name:
+            targets.append(self._cache_by_name.setdefault(name, CacheStats()))
+        return targets
 
     def record_provider_call(self, provider: str, *, success: bool,
                               category: str = "", duration_ms: float = 0.0):
@@ -102,28 +121,32 @@ class Metrics:
             elif category == "invalid_response":
                 s.invalid_response += 1
 
-    def record_cache_hit(self):
+    def record_cache_hit(self, name: str = ""):
         """A read the cache answered without asking the origin."""
         with self._mutex:
-            self._cache.hits += 1
+            for stats in self._cache_targets_locked(name):
+                stats.hits += 1
 
-    def record_cache_miss(self):
+    def record_cache_miss(self, name: str = ""):
         """A read that had to produce the value itself (origin was called)."""
         with self._mutex:
-            self._cache.misses += 1
+            for stats in self._cache_targets_locked(name):
+                stats.misses += 1
 
-    def record_cache_stale(self):
+    def record_cache_stale(self, name: str = ""):
         """A reply that handed the caller a stale snapshot (Issue #83)."""
         with self._mutex:
-            self._cache.stale_returns += 1
+            for stats in self._cache_targets_locked(name):
+                stats.stale_returns += 1
 
-    def record_cache_refresh(self, success: bool):
+    def record_cache_refresh(self, success: bool, name: str = ""):
         """Outcome of the origin call that (re)produced a cached value."""
         with self._mutex:
-            if success:
-                self._cache.refresh_ok += 1
-            else:
-                self._cache.refresh_fail += 1
+            for stats in self._cache_targets_locked(name):
+                if success:
+                    stats.refresh_ok += 1
+                else:
+                    stats.refresh_fail += 1
 
     def snapshot(self) -> dict:
         with self._mutex:
@@ -151,12 +174,24 @@ class Metrics:
                     "refresh_ok": self._cache.refresh_ok,
                     "refresh_fail": self._cache.refresh_fail,
                 },
+                "cache_by_name": {
+                    name: {
+                        "hits": s.hits,
+                        "misses": s.misses,
+                        "hit_rate": round(s.hit_rate, 3),
+                        "stale_returns": s.stale_returns,
+                        "refresh_ok": s.refresh_ok,
+                        "refresh_fail": s.refresh_fail,
+                    }
+                    for name, s in sorted(self._cache_by_name.items())
+                },
             }
 
     def reset(self):
         with self._mutex:
             self._providers.clear()
             self._cache = CacheStats()
+            self._cache_by_name.clear()
 
 
 # Global instance

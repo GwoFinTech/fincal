@@ -373,11 +373,11 @@ timezone, so the ages are stable.
 ### Diagnostics counters (Issue #83)
 
 `/api/admin/diagnostics` publishes two counter sections that used to be
-constants whatever the traffic — `cache` (`hits` / `misses` / `hit_rate` /
-`stale_returns` / `refresh_ok` / `refresh_fail`) and `providers` (per-provider
-`calls` / `success` / `success_rate` / `avg_ms` / `errors`). Issue #15 declared
-them, but no code wrote to them: the four cache paths ran without touching a
-counter and the only instrumented provider entry point
+constants whatever the traffic — `cache` + `cache_by_name` (`hits` / `misses` /
+`hit_rate` / `stale_returns` / `refresh_ok` / `refresh_fail`) and `providers`
+(per-provider `calls` / `success` / `success_rate` / `avg_ms` / `errors`).
+Issue #15 declared them, but no code wrote to them: the four cache paths ran
+without touching a counter and the only instrumented provider entry point
 (`provider_client.http_get_json`) is unreachable under the production
 `WATCHLIST_SOURCE=hybrid`. They are now written at the decision points:
 
@@ -401,10 +401,12 @@ Read them with three caveats in mind (`app/metrics.py` documents the same):
 - **Per process, not cumulative.** Counters live in the process and reset on
   restart (deploy, crash, container recreate); they are not a lifetime report
   and are not aggregated across workers.
-- **Aggregate, low cardinality.** Cache counters aggregate both caches and
-  provider counters are keyed by provider name only — the label set is bounded
-  by the code, so no cache key, symbol, subscription token or user id can end up
-  in a label (the iCal cache key carries a token, `_earnings_cache`'s key
+- **Aggregate, low cardinality.** The cache counters are published twice: the
+  aggregate `cache` (every reporting cache summed) and `cache_by_name`, one
+  bucket per cache (`earnings` for the calendar layer cache, `ical` for the feed
+  cache). Provider counters are keyed by provider name only — the label set is
+  bounded by the code, so no cache key, symbol, subscription token or user id can
+  end up in a label (the iCal cache key carries a token, `_earnings_cache`'s key
   carries a user id, and neither is exposed).
 - **A green number is not a promise.** `calls=0` after a restart means "nothing
   has happened yet", not "nothing is wrong"; use the freshness summary above for

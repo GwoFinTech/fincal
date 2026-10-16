@@ -195,6 +195,55 @@ class LayerCacheWiringTests(CounterIsolationMixin, TestCase):
         self.assertEqual(_cache()["hits"], 1)
 
 
+class CacheAttributionTests(CounterIsolationMixin, TestCase):
+    """`cache_by_name` attributes the aggregate to the reporting cache."""
+
+    def test_named_cache_reports_to_both_and_the_aggregate_adds_up(self):
+        from app.layer_cache import LayerCache
+
+        earnings = LayerCache(default_ttl=120.0, stale_ttl=1800.0, name="earnings")
+        ical = LayerCache(default_ttl=120.0, stale_ttl=1800.0, name="ical")
+
+        earnings.get_or_refresh("k", lambda: "a", ttl=120.0)
+        earnings.get_or_refresh("k", lambda: "a", ttl=120.0)   # hit
+        ical.get_or_refresh("k", lambda: "b", ttl=120.0)
+
+        snapshot = metrics.snapshot()
+        self.assertEqual(snapshot["cache_by_name"]["earnings"]["misses"], 1)
+        self.assertEqual(snapshot["cache_by_name"]["earnings"]["hits"], 1)
+        self.assertEqual(snapshot["cache_by_name"]["ical"]["misses"], 1)
+        self.assertEqual(snapshot["cache_by_name"]["ical"]["hits"], 0)
+        self.assertEqual(snapshot["cache"]["hits"],
+                         sum(entry["hits"] for entry in snapshot["cache_by_name"].values()))
+        self.assertEqual(snapshot["cache"]["misses"],
+                         sum(entry["misses"] for entry in snapshot["cache_by_name"].values()))
+
+    def test_unnamed_cache_does_not_invent_a_label(self):
+        from app.layer_cache import LayerCache
+
+        LayerCache(default_ttl=120.0).get_or_refresh("k", lambda: "a", ttl=120.0)
+
+        snapshot = metrics.snapshot()
+        self.assertEqual(snapshot["cache"]["misses"], 1)
+        self.assertEqual(snapshot["cache_by_name"], {})
+
+    def test_endpoint_caches_are_attributed_to_their_own_names(self):
+        """The two production caches report under constants, not their keys."""
+        from app.routers import ical
+        from app.routers.api import _earnings_cache
+
+        self.assertEqual(_earnings_cache._name, "earnings")
+        self.assertEqual(ical.FEED_CACHE_NAME, "ical")
+
+        _earnings_cache.get_or_refresh("earnings:k", lambda: "a", ttl=120.0)
+        metrics.record_cache_hit(ical.FEED_CACHE_NAME)
+
+        snapshot = metrics.snapshot()
+        self.assertEqual(set(snapshot["cache_by_name"]), {"earnings", "ical"})
+        self.assertEqual(snapshot["cache"]["hits"], 1)
+        self.assertEqual(snapshot["cache"]["misses"], 1)
+
+
 class EarningsEndpointWiringTests(CounterIsolationMixin, TestCase):
     """Acceptance #1 over the endpoint itself, not a stand-in for it."""
 
@@ -414,9 +463,10 @@ class ProviderWiringTests(CounterIsolationMixin, TestCase):
 
         snapshot = metrics.snapshot()
         self.assertLessEqual(set(snapshot["providers"]), PROVIDER_ALLOWLIST)
-        # The cache counters are aggregate values, not a labelled map: there is
-        # nowhere for a cache key, token or user id to end up.
+        # The cache counters are aggregate values plus one bucket per named
+        # cache: there is nowhere for a cache key, token or user id to end up.
         self.assertEqual(set(snapshot["cache"]), CACHE_FIELDS)
+        self.assertLessEqual(set(snapshot["cache_by_name"]), {"earnings", "ical"})
 
 
 class ProducerSourceTests(TestCase):
@@ -427,14 +477,17 @@ class ProducerSourceTests(TestCase):
 
     def test_cache_counters_are_written_at_the_decision_points(self):
         layer_cache = self._source("app/layer_cache.py")
-        for call in ("record_cache_hit()", "record_cache_miss()",
-                     "record_cache_stale()", "record_cache_refresh(True)",
-                     "record_cache_refresh(False)"):
+        for call in ("record_cache_hit(self._name)", "record_cache_miss(self._name)",
+                     "record_cache_stale(self._name)",
+                     "record_cache_refresh(True, self._name)",
+                     "record_cache_refresh(False, self._name)"):
             self.assertIn(call, layer_cache, f"layer cache never reports {call}")
 
         ical = self._source("app/routers/ical.py")
-        self.assertIn("record_cache_hit()", ical)
-        self.assertIn("record_cache_miss()", ical)
+        self.assertIn("record_cache_hit(FEED_CACHE_NAME)", ical)
+        self.assertIn("record_cache_miss(FEED_CACHE_NAME)", ical)
+        # The label is a module-level constant, not the per-token cache key.
+        self.assertIn('FEED_CACHE_NAME = "ical"', ical)
 
     def test_provider_counters_are_written_for_every_client_path(self):
         self.assertIn("record_provider_call",
