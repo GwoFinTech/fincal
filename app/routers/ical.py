@@ -57,6 +57,7 @@ def _feed_headers(etag: str, last_modified: str) -> dict[str, str]:
         "Last-Modified": last_modified,
     }
 from .. import db, config
+from ..metrics import metrics
 from ..symbol import normalize
 from ..ical import generate_ical
 from datetime import date, timedelta
@@ -65,8 +66,12 @@ from ..singleflight import Singleflight
 
 router = APIRouter(tags=["ical"])
 
-# Cache iCal feeds per token + options for 1 hour
+# Cache iCal feeds per token + options for 1 hour.
 _ical_cache = TTLCache(maxsize=512, ttl=3600)
+# Hit/miss counting for this cache is reported to app.metrics (Issue #83) — the
+# feed is the most frequently polled entry point, so "cache works" has to be
+# measurable. `_content_versions` below is bookkeeping for Last-Modified, not a
+# data cache, and is deliberately not counted.
 _ical_flight = Singleflight()
 
 # Content versions: cache_key -> (etag, changed_at). Mirrors the feed cache
@@ -127,6 +132,11 @@ def ical_feed(
     cache_key = (token, lang, scope, predicted, markets)
     cached = _ical_cache.get(cache_key)
     if cached is not None:
+        # Both answers come out of the cached feed, so both are hits (Issue
+        # #83): the 304 is the conditional-request form of the same body. The
+        # counters stay aggregate on purpose — the key carries the subscription
+        # token, which must never become a metric label.
+        metrics.record_cache_hit()
         cached_response = cached  # TTLCache stores FastAPI Response objects.
         etag = cached_response.headers.get("etag", "")
         last_modified = cached_response.headers.get("last-modified", formatdate(946684800, usegmt=True))
@@ -138,6 +148,8 @@ def ical_feed(
         cur.execute("SELECT id, email, name FROM users WHERE ical_token = %s", (token,))
         user = cur.fetchone()
         if not user:
+            # An unknown token is not a cache miss: there is no feed to cache,
+            # and counting scanners here would drown the real hit rate.
             return Response(content="Not Found", status_code=404)
         cur.execute("SELECT symbol, market FROM watchlist WHERE user_id = %s", (user["id"],))
         watchlist = cur.fetchall()
@@ -173,6 +185,9 @@ def ical_feed(
         return generate_ical(earn, user.get("email", ""), title_lang=lang), earn
 
     try:
+        # Cold path: this request produces the feed itself (a hit would have
+        # returned above, so reaching here — 304 included — is a miss).
+        metrics.record_cache_miss()
         ical_content, earnings = _ical_flight.do(str(cache_key), _generate)
     except TimeoutError:
         # Issue #32: don't silently serve a stale/empty feed (and don't let a

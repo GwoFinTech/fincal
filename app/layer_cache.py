@@ -6,6 +6,20 @@ in the background. Singleflight prevents concurrent duplicate refreshes
 the blocking path, and every producer carries an ordering ticket so a
 snapshot produced by an earlier-started fetch can never overwrite a newer
 one (Issue #34).
+
+Every decision taken here is reported to ``app.metrics`` (Issue #83), so
+``/api/admin/diagnostics`` measures real traffic instead of answering zero:
+
+* fresh read answered from cache → ``record_cache_hit()``;
+* caller served a stale snapshot while a refresh runs → ``record_cache_stale()``
+  (the blocking path that fails and falls back to the cached snapshot counts
+  too — the caller still got stale data);
+* blocking read that has to ask the origin → ``record_cache_miss()`` — including
+  the caller that waited for another producer's refresh, but ends up fetching
+  itself because nothing was stored;
+* a caller that joins an in-flight refresh and returns its snapshot counts as a
+  **hit**: no upstream call was made on its behalf;
+* the origin call's outcome → ``record_cache_refresh(True|False)``.
 """
 from __future__ import annotations
 
@@ -14,6 +28,8 @@ import time
 import logging
 from dataclasses import dataclass
 from typing import Any, Callable
+
+from .metrics import metrics
 
 logger = logging.getLogger(__name__)
 
@@ -145,10 +161,12 @@ class LayerCache:
 
         # Fresh cache hit
         if entry and time.time() < entry.expires_at:
+            metrics.record_cache_hit()
             return entry.data, entry
 
         # Stale but valid — return stale data, trigger refresh
         if entry and entry.last_success_at and self.is_stale_valid(key):
+            metrics.record_cache_stale()
             self._trigger_refresh(key, fetcher, ttl)
             return entry.data, entry
 
@@ -178,9 +196,11 @@ class LayerCache:
             try:
                 data = fetcher()
                 self.put(key, data, ttl, ticket=ticket)
+                metrics.record_cache_refresh(True)
                 logger.debug("cache refresh ok: %s", key)
             except Exception as exc:
                 self.mark_stale(key, f"refresh_failed:{type(exc).__name__}", ticket=ticket)
+                metrics.record_cache_refresh(False)
                 logger.warning("cache refresh failed for %s: %s", key, exc)
             finally:
                 with self._mutex:
@@ -214,14 +234,19 @@ class LayerCache:
             lock.wait(timeout=self._waiter_timeout)
             entry = self._entries.get(key)
             if entry is not None:
+                # Joined a refresh started for someone else: this caller cost
+                # the origin nothing, so it is a hit (Issue #83).
+                metrics.record_cache_hit()
                 return entry.data, entry
             # The producer released the key without storing anything (it raced
             # with invalidate()): fall through and fetch it ourselves.
 
         # We are the fetcher
+        metrics.record_cache_miss()
         try:
             data = fetcher()
             entry = self.put(key, data, ttl, ticket=ticket)
+            metrics.record_cache_refresh(True)
             if entry is None:  # pragma: no cover - defensive, put always returns an entry
                 now = time.time()
                 return data, CacheEntry(data=data, fetched_at=now,
@@ -231,8 +256,10 @@ class LayerCache:
         except Exception as exc:
             # If we have stale data, return it
             self.mark_stale(key, f"fetch_failed:{type(exc).__name__}", ticket=ticket)
+            metrics.record_cache_refresh(False)
             entry = self._entries.get(key)
             if entry and entry.last_success_at:
+                metrics.record_cache_stale()
                 return entry.data, entry
             raise
         finally:

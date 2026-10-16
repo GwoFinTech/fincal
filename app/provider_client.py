@@ -152,23 +152,39 @@ def http_get_json(url: str, *, cfg: ProviderConfig | None = None) -> dict | list
 
 
 def cli_json(command: list[str], *, cfg: ProviderConfig | None = None) -> dict | list:
-    """Run a CLI command and parse JSON output with retries."""
+    """Run a CLI command and parse JSON output with retries.
+
+    Counted like :func:`http_get_json` (Issue #83): one attempt per upstream
+    call, so a provider reached through the CLI is visible in
+    ``/api/admin/diagnostics`` instead of only in logs.
+    """
+    from .metrics import metrics
     cfg = cfg or ProviderConfig(name="cli")
     last_error: ProviderError | None = None
 
     for attempt in range(cfg.max_retries + 1):
+        t0 = time.time()
         try:
             proc = subprocess.run(
                 command, capture_output=True, text=True, timeout=cfg.timeout,
             )
             if proc.returncode != 0:
                 raise RuntimeError(f"exit {proc.returncode}: {proc.stderr[:200]}")
-            return json.loads(proc.stdout)
+            data = json.loads(proc.stdout)
+            metrics.record_provider_call(cfg.name, success=True,
+                                         duration_ms=(time.time() - t0) * 1000)
+            return data
         except json.JSONDecodeError as exc:
+            metrics.record_provider_call(cfg.name, success=False,
+                                          category=ErrorCategory.INVALID_RESPONSE.value,
+                                          duration_ms=(time.time() - t0) * 1000)
             raise ProviderError(ErrorCategory.INVALID_RESPONSE, f"{cfg.name} invalid JSON") from exc
         except Exception as exc:
             err = classify_error(exc, cfg.name)
             last_error = err
+            metrics.record_provider_call(cfg.name, success=False,
+                                          category=err.category.value,
+                                          duration_ms=(time.time() - t0) * 1000)
             if attempt < cfg.max_retries and _should_retry(err.category, cfg):
                 delay = _backoff_delay(attempt, cfg, err.retry_after)
                 logger.warning("%s attempt %d failed (%s); retrying in %.1fs",

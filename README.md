@@ -370,6 +370,46 @@ DB_HOST=localhost uv run python scripts/check_sync_freshness.py
 Timestamps are compared and printed in UTC regardless of the database session
 timezone, so the ages are stable.
 
+### Diagnostics counters (Issue #83)
+
+`/api/admin/diagnostics` publishes two counter sections that used to be
+constants whatever the traffic — `cache` (`hits` / `misses` / `hit_rate` /
+`stale_returns` / `refresh_ok` / `refresh_fail`) and `providers` (per-provider
+`calls` / `success` / `success_rate` / `avg_ms` / `errors`). Issue #15 declared
+them, but no code wrote to them: the four cache paths ran without touching a
+counter and the only instrumented provider entry point
+(`provider_client.http_get_json`) is unreachable under the production
+`WATCHLIST_SOURCE=hybrid`. They are now written at the decision points:
+
+- `app/layer_cache.py` (the earnings calendar cache) — a fresh read is a
+  **hit**, a read that has to produce the value is a **miss**, a caller handed a
+  *stale* snapshot is a **stale return** (stale-while-revalidate, and the
+  blocking path that falls back to the cached snapshot after a failed refresh),
+  and the origin call's outcome is **refresh_ok** / **refresh_fail**. A caller
+  that joins an in-flight refresh and returns its result is a hit: it cost the
+  origin nothing.
+- `app/routers/ical.py` (the feed cache) — hit/miss per request, the `304`
+  conditional answer included (same cached body, same hit). An unknown token
+  (`404`) is not counted: there is no feed to cache.
+- `app/company_name.py` + `app/provider_client.py` — `kurumi`, `longbridge` and
+  `futu` appear in `providers`, including the real upstream call
+  `/api/admin/health` makes on every poll (`probe_kurumi` →
+  `fetch_from_kurumi`), which was previously invisible.
+
+Read them with three caveats in mind (`app/metrics.py` documents the same):
+
+- **Per process, not cumulative.** Counters live in the process and reset on
+  restart (deploy, crash, container recreate); they are not a lifetime report
+  and are not aggregated across workers.
+- **Aggregate, low cardinality.** Cache counters aggregate both caches and
+  provider counters are keyed by provider name only — the label set is bounded
+  by the code, so no cache key, symbol, subscription token or user id can end up
+  in a label (the iCal cache key carries a token, `_earnings_cache`'s key
+  carries a user id, and neither is exposed).
+- **A green number is not a promise.** `calls=0` after a restart means "nothing
+  has happened yet", not "nothing is wrong"; use the freshness summary above for
+  "has the pipeline run".
+
 ### Dependency probes (Issue #70, #79)
 
 `/api/admin/health`'s `checks.kurumi` asks the endpoint the client actually

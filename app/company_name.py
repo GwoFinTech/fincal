@@ -19,12 +19,14 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+import time
 import urllib.request
 from dataclasses import dataclass
 from urllib.error import URLError
 from urllib.parse import urlsplit
 
 import app.config as config
+from app.metrics import metrics
 from app.provider_client import (
     ErrorCategory, ProviderConfig, ProviderError, classify_error,
 )
@@ -33,6 +35,21 @@ logger = logging.getLogger(__name__)
 
 _KURUMI_CFG = ProviderConfig(name="kurumi", timeout=config.KURUMI_API_TIMEOUT, max_retries=1)
 _LB_CFG = ProviderConfig(name="longbridge", timeout=30, max_retries=0)
+
+
+def _count_call(provider: str, started: float, *, success: bool,
+                category: str = "") -> None:
+    """Report one upstream attempt to ``app.metrics`` (Issue #83).
+
+    The three fetchers below build their own request/CLI/SDK call instead of
+    going through ``provider_client.http_get_json`` (which is the only place
+    that used to count), so without this the ``providers`` section of
+    ``/api/admin/diagnostics`` stayed empty — even though
+    ``/api/admin/health`` really calls Kurumi on every poll. Keyed by provider
+    name only: no symbol, no URL, no credential.
+    """
+    metrics.record_provider_call(provider, success=success, category=category,
+                                 duration_ms=(time.time() - started) * 1000)
 
 
 @dataclass
@@ -135,22 +152,32 @@ def probe_kurumi(symbol: str = KURUMI_PROBE_SYMBOL,
 
 
 def fetch_from_kurumi(symbol: str, market: str) -> str:
-    """Query Kurumi /api/stock/{symbol}/overview. Raises ProviderError on failure."""
+    """Query Kurumi /api/stock/{symbol}/overview. Raises ProviderError on failure.
+
+    A transport success that carries no usable name still counts as one
+    successful call: the counters describe the upstream, not the caller's
+    fallback chain (Issue #83).
+    """
     url = kurumi_overview_url(symbol, market)
+    started = time.time()
     try:
         req = urllib.request.Request(url, headers={"Accept": "application/json"})
         with urllib.request.urlopen(req, timeout=_KURUMI_CFG.timeout) as resp:
             data = json.loads(resp.read().decode("utf-8") or "{}")
         name = str(data.get("name") or "").strip()
+        _count_call("kurumi", started, success=True)
         return name
     except Exception as exc:
-        raise classify_error(exc, "kurumi") from exc
+        err = classify_error(exc, "kurumi")
+        _count_call("kurumi", started, success=False, category=err.category.value)
+        raise err from exc
 
 
 def fetch_from_longbridge(symbol: str, market: str) -> str:
     """Query `longbridge static`. Raises ProviderError on failure."""
     lb_sym = (symbol.split(".")[0].lstrip("0") or "0") if market == "HK" else symbol
     lb_sym = f"{lb_sym}.{market}"
+    started = time.time()
     try:
         p = subprocess.run(
             ["longbridge", "static", lb_sym, "--format", "json"],
@@ -160,14 +187,24 @@ def fetch_from_longbridge(symbol: str, market: str) -> str:
             raise RuntimeError(f"longbridge_cli_exit_{p.returncode}")
         rows = json.loads(p.stdout or "[]")
         if rows and isinstance(rows, list):
-            return str(rows[0].get("name", "")).strip()
-        return ""
+            name = str(rows[0].get("name", "")).strip()
+        else:
+            name = ""
+        _count_call("longbridge", started, success=True)
+        return name
     except Exception as exc:
-        raise classify_error(exc, "longbridge") from exc
+        err = classify_error(exc, "longbridge")
+        _count_call("longbridge", started, success=False, category=err.category.value)
+        raise err from exc
 
 
 def fetch_from_futu(symbol: str, market: str) -> str:
-    """Query Futu OpenD get_stock_basicinfo. Raises ProviderError on failure."""
+    """Query Futu OpenD get_stock_basicinfo. Raises ProviderError on failure.
+
+    The SDK is not reachable through ``provider_client``, so its attempt is
+    counted explicitly (Issue #83). A missing SDK returns "" without counting
+    anything: no call was made to anybody.
+    """
     try:
         from futu import RET_OK, Market, SecurityType, OpenQuoteContext
         from app.symbol import to_futu_code
@@ -179,6 +216,7 @@ def fetch_from_futu(symbol: str, market: str) -> str:
     canonical = f"{symbol}.{market}" if "." not in symbol else symbol
     code = to_futu_code(canonical)
     ctx = None
+    started = time.time()
     try:
         ctx = OpenQuoteContext(host=config.FUTU_HOST, port=config.FUTU_PORT)
         ret, data = ctx.get_stock_basicinfo(
@@ -186,10 +224,18 @@ def fetch_from_futu(symbol: str, market: str) -> str:
             SecurityType.STOCK, [code],
         )
         if ret == RET_OK and data is not None and not data.empty:
-            return str(data.iloc[0].get("name", "")).strip()
+            name = str(data.iloc[0].get("name", "")).strip()
+            _count_call("futu", started, success=True)
+            return name
+        # OpenD answered with an error or with nothing usable: a real call that
+        # produced no name, reported as such instead of silently vanishing.
+        _count_call("futu", started, success=False,
+                    category=ErrorCategory.INVALID_RESPONSE.value)
         return ""
     except Exception as exc:  # noqa: BLE001
-        raise classify_error(exc, "futu") from exc
+        err = classify_error(exc, "futu")
+        _count_call("futu", started, success=False, category=err.category.value)
+        raise err from exc
     finally:
         if ctx is not None:
             ctx.close()
