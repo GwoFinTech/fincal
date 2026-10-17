@@ -175,7 +175,7 @@ def list_sync_runs(limit: int = 50, _: dict = Depends(admin_user)):
             """SELECT id, stage, status, source, symbol_count, record_count,
                       details, error_code, started_at, finished_at,
                       heartbeat_at, attempt, idempotency_key,
-                      phase, current, total
+                      timeout_seconds, phase, current, total
                FROM sync_runs ORDER BY started_at DESC LIMIT %s""",
             (limit,),
         )
