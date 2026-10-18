@@ -60,6 +60,7 @@ from .. import db, config
 from ..metrics import metrics
 from ..symbol import normalize
 from ..ical import generate_ical
+from ..log_redaction import token_fingerprint
 from datetime import date, timedelta
 from cachetools import TTLCache
 from ..singleflight import Singleflight
@@ -197,8 +198,11 @@ def ical_feed(
         # Issue #32: don't silently serve a stale/empty feed (and don't let a
         # raw exception become a 500). Tell the calendar client to retry later.
         from fastapi.responses import JSONResponse
-        logger.warning("ical feed generation timed out for token=%s scope=%s lang=%s",
-                       token, scope, lang)
+        # Issue #85: the token is the feed's only credential, so the warning
+        # carries a fingerprint (greppable, non-reversible) instead of the
+        # subscription itself. Same rule the cache key already follows above.
+        logger.warning("ical feed generation timed out for token_fp=%s scope=%s lang=%s",
+                       token_fingerprint(token), scope, lang)
         return JSONResponse(
             status_code=503,
             content={"error": "calendar generation timed out, retry shortly"},

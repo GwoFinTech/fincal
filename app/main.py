@@ -9,9 +9,17 @@ from . import db
 from .routers import api, admin, ical as ical_router
 from .errors import error_middleware
 from .etag_middleware import etag_middleware
+from .log_redaction import install_log_redaction
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Issue #85: ``/ical/{token}`` is a bearer credential, and uvicorn's default
+# access log writes the request path verbatim — production had 144 copies of one
+# live subscription token in `docker logs`. Installed at import time (uvicorn
+# imports the app before it serves anything) and on the emitting logger, so the
+# token never reaches a handler; uvicorn's start command stays untouched.
+install_log_redaction()
 
 
 @asynccontextmanager

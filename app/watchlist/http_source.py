@@ -5,6 +5,7 @@ Uses unified provider_client for timeout, retry, error classification.
 import logging
 from .base import WatchlistSource
 from .. import config
+from ..log_redaction import sanitize_url
 from ..provider_client import ProviderConfig, http_get_json
 
 logger = logging.getLogger(__name__)
@@ -44,7 +45,9 @@ class HttpWatchlistSource(WatchlistSource):
         else:
             codes = [str(s) for s in items]
 
-        logger.info("Fetched %d symbols from %s", len(codes), url)
+        # Issue #85: WATCHLIST_HTTP_URL may carry its credential in the query
+        # string; log the endpoint, not the credential.
+        logger.info("Fetched %d symbols from %s", len(codes), sanitize_url(url))
         return codes
 
     @property

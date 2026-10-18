@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from enum import Enum
 from urllib.error import HTTPError, URLError
 
+from .log_redaction import sanitize_url
+
 logger = logging.getLogger(__name__)
 
 
@@ -57,6 +59,10 @@ class ProviderConfig:
 
 def _classify_http_error(exc: HTTPError) -> ProviderError:
     code = exc.code
+    # Issue #85: ``exc.url`` is the full request URL, query string included, and
+    # these messages are logged verbatim by every caller. Narrow it to the
+    # endpoint (shared with ``WATCHLIST_HTTP_URL``'s token) before it travels.
+    url = sanitize_url(exc.url)
     if code == 429:
         retry_after = None
         raw = exc.headers.get("Retry-After") if exc.headers else None
@@ -67,13 +73,13 @@ def _classify_http_error(exc: HTTPError) -> ProviderError:
                 pass
         return ProviderError(
             ErrorCategory.RATE_LIMITED,
-            f"HTTP 429 from {exc.url}",
+            f"HTTP 429 from {url}",
             status_code=429,
             retry_after=retry_after or 60.0,
         )
     if code >= 500:
-        return ProviderError(ErrorCategory.HTTP_ERROR, f"HTTP {code} from {exc.url}", status_code=code)
-    return ProviderError(ErrorCategory.HTTP_ERROR, f"HTTP {code} from {exc.url}", status_code=code)
+        return ProviderError(ErrorCategory.HTTP_ERROR, f"HTTP {code} from {url}", status_code=code)
+    return ProviderError(ErrorCategory.HTTP_ERROR, f"HTTP {code} from {url}", status_code=code)
 
 
 def classify_error(exc: Exception, provider: str = "") -> ProviderError:
@@ -108,13 +114,6 @@ def _backoff_delay(attempt: int, cfg: ProviderConfig, retry_after: float | None 
         return min(retry_after, cfg.max_delay)
     delay = cfg.base_delay * (2 ** attempt)
     return min(delay, cfg.max_delay)
-
-
-def _sanitize_log_url(url: str) -> str:
-    """Strip query params that may contain tokens."""
-    if "?" in url:
-        return url.split("?")[0] + "?[REDACTED]"
-    return url
 
 
 # ── High-level helpers ──────────────────────────────────────────────

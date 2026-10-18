@@ -23,6 +23,34 @@ Any forwardAuth-compatible service works — set `AUTH_MIDDLEWARE` to your middl
 
 For single-user or local-only setups, leave `AUTH_LOGIN_URL` empty to run without authentication.
 
+### Subscription tokens
+
+`GET /ical/{token}` is public by design: the token *is* the credential, and with
+`scope=all` it reads the whole earnings universe. Two consequences are baked in:
+
+- **Tokens never reach a log line.** `app/log_redaction.py` installs a filter on
+  `uvicorn.access` (at `import app.main`, so plain `uvicorn app.main:app` is
+  covered), the feed's timeout warning logs an 8-hex fingerprint instead of the
+  token, and provider/watchlist URLs are logged without their query string.
+- **Tokens are rotatable.** `users.ical_token` is no longer write-once:
+
+  ```bash
+  python scripts/rotate_ical_tokens.py                     # dry run, all users
+  python scripts/rotate_ical_tokens.py --user-id 3 --apply
+  python scripts/rotate_ical_tokens.py --email a@b.c --apply
+  docker restart fincal    # drops the feed cache the old URL is still served from
+  ```
+
+  The new URL is published by `GET /api/me` (`ical_url`); the script prints only
+  fingerprints. Restarting is required after an out-of-process rotation because
+  the feed cache lives in the server's memory — until then (or until the 3600 s
+  TTL) the old URL keeps answering.
+
+Rotating invalidates existing calendar subscriptions (clients must re-subscribe
+from the URL in the app). After rotating, historical `docker logs` still hold
+the old value, so treat that log as compromised and rotate it out; if Traefik's
+access log is ever enabled, keep `/ical/` out of it or apply the same redaction.
+
 ## Quick Start
 
 ### Prerequisites
