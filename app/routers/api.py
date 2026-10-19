@@ -26,7 +26,15 @@ logger = logging.getLogger(__name__)
 # hour-long cache that could outlive an upstream change.
 # `name` is the metrics label this cache reports under (Issue #83); it is a
 # constant, never the per-user key used below.
-_earnings_cache = LayerCache(default_ttl=120.0, stale_ttl=1800.0, name="earnings")
+_earnings_cache = LayerCache(
+    default_ttl=120.0,
+    stale_ttl=1800.0,
+    name="earnings",
+    # Bounded, LRU (Issue #86): the key contains caller-chosen dates, so without
+    # a cap every distinct window would pin its payload (up to ~2 MiB) in the
+    # process forever. The bound matches the iCal feed cache's slot count.
+    max_entries=config.EARNINGS_CACHE_MAX_ENTRIES,
+)
 
 
 def invalidate_calendar_caches() -> None:
@@ -42,6 +50,34 @@ def invalidate_calendar_caches() -> None:
       own watchlist symbols in, Issue #72).
     """
     _earnings_cache.invalidate()
+
+
+def _validate_window(start: date, end: date) -> None:
+    """Reject a calendar window that is inverted or wider than the bound.
+
+    The endpoint's ``start``/``end`` are raw ``date`` query parameters, so the
+    caller controls both the cache key and the size of the cached payload
+    (Issue #86). ``EARNINGS_MAX_WINDOW_DAYS`` keeps a single request inside the
+    horizons the product actually shows (default view:
+    ``CALENDAR_FORWARD_DAYS`` ahead; watchlist view: the same), and spans the
+    one legitimate backwards reach — the calendar's previous month.
+
+    Both failures answer 422 with the language-neutral code ``invalid_window``
+    so the client can render its own wording.
+    """
+    if start > end:
+        raise AppError(
+            "invalid_window",
+            "start must not be after end",
+            422,
+        )
+    span_days = (end - start).days
+    if span_days > config.EARNINGS_MAX_WINDOW_DAYS:
+        raise AppError(
+            "invalid_window",
+            f"window spans {span_days} days, limit is {config.EARNINGS_MAX_WINDOW_DAYS}",
+            422,
+        )
 
 
 @router.get("/config", response_model=AppConfig)
@@ -153,6 +189,14 @@ def api_earnings(
         # local literal: a caller that omits `end` used to get 90 days while the
         # watchlist view and the iCal feed reached 420 (Issue #59).
         end = date.today() + timedelta(days=config.CALENDAR_FORWARD_DAYS)
+
+    # The window is both cache-key material and the size of the payload, so it
+    # is validated before either is used (Issue #86): an unbounded
+    # ``start``/``end`` pair let one authenticated caller create an unlimited
+    # number of ~2 MiB cache entries (a ten-year window was accepted and cached
+    # as-is). Rejections carry the language-neutral code ``invalid_window``;
+    # bulk history remains available through ``/api/export``.
+    _validate_window(start, end)
 
     cache_key = f"earnings:{start}:{end}:{watchlistOnly}:{fincal_user['id']}"
     # The key is per user, so any writer that changes this user's symbol set must

@@ -24,12 +24,23 @@ Every decision taken here is reported to ``app.metrics`` (Issue #83), so
 Each counter is reported under this cache's ``name`` (``app/routers/api.py``
 passes ``earnings``), so ``/api/admin/diagnostics`` can attribute the numbers
 without ever labelling a single key.
+
+The cache is **bounded** (Issue #86): ``max_entries`` caps how many keys stay
+resident and the least recently used one is evicted when the cap is exceeded.
+Before this, nothing ever removed an entry — `default_ttl`/`stale_ttl` only
+decided whether a payload had to be re-fetched, not whether it was kept — so a
+caller that varied a key-forming argument (for `/api/earnings`, `start`/`end`)
+could pin one payload per distinct key forever. Eviction and `invalidate()`
+both drop the key's ordering ticket and singleflight bookkeeping too; keys with
+a live producer are skipped, because deleting the in-flight `Event` would
+downgrade singleflight to concurrent origin calls (Issue #34).
 """
 from __future__ import annotations
 
 import threading
 import time
 import logging
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -53,8 +64,12 @@ class LayerCache:
     """TTL cache with stale-while-revalidate and singleflight."""
 
     def __init__(self, default_ttl: float = 300.0, stale_ttl: float = 3600.0,
-                 waiter_timeout: float = 30.0, name: str = ""):
-        self._entries: dict[str, CacheEntry] = {}
+                 waiter_timeout: float = 30.0, name: str = "",
+                 max_entries: int | None = 512):
+        # ``max_entries`` (Issue #86): upper bound on resident keys, LRU order.
+        # ``None`` or a non-positive value keeps the old unbounded behaviour for
+        # callers that do not need a cap (tests, one-key caches).
+        self._entries: OrderedDict[str, CacheEntry] = OrderedDict()
         self._locks: dict[str, threading.Event] = {}
         # Ordering tickets per key (Issue #34): every fetch takes a ticket when
         # it starts, and a snapshot may only be stored if no later ticket has
@@ -66,6 +81,7 @@ class LayerCache:
         self._default_ttl = default_ttl
         self._stale_ttl = stale_ttl
         self._waiter_timeout = waiter_timeout
+        self._max_entries = max_entries if max_entries and max_entries > 0 else None
         # Metric label for this cache (Issue #83), e.g. "earnings". Empty means
         # "report to the aggregate only" — a per-key or per-tenant label is never
         # acceptable, so the caller must name the cache and nothing finer.
@@ -73,8 +89,16 @@ class LayerCache:
         self._mutex = threading.Lock()
 
     def get(self, key: str) -> CacheEntry | None:
-        """Return the cache entry if it exists (may be stale)."""
-        return self._entries.get(key)
+        """Return the cache entry if it exists (may be stale).
+
+        Reading through the cache counts as a use for LRU purposes, so a key
+        that is still being served is not the first one evicted (Issue #86).
+        """
+        with self._mutex:
+            entry = self._entries.get(key)
+            if entry is not None:
+                self._entries.move_to_end(key)
+            return entry
 
     def is_fresh(self, key: str) -> bool:
         """Check if cache entry is within TTL."""
@@ -134,7 +158,51 @@ class LayerCache:
                 error_code=None,
             )
             self._entries[key] = entry
+            # Newest key goes last; an overwritten key must also move there, or
+            # an updated payload would keep its old (oldest) LRU position.
+            self._entries.move_to_end(key)
+            self._evict_locked()
             return entry
+
+    def _evict_locked(self) -> None:
+        """Drop least recently used keys until ``max_entries`` holds (Issue #86).
+
+        Runs under ``self._mutex``. A key with a live producer is skipped: its
+        fetch is about to store a snapshot and deleting the singleflight
+        ``Event`` underneath it would let a second caller fetch the same key
+        concurrently (Issue #34). Those keys are candidates again on the next
+        ``put`` — their producer removes the lock right after storing.
+        """
+        if self._max_entries is None:
+            return
+        while len(self._entries) > self._max_entries:
+            victim = next(
+                (k for k in self._entries if not self._is_live_locked(k)),
+                None,
+            )
+            if victim is None:
+                # Every remaining key is mid-fetch; the cap cannot be honoured
+                # without breaking singleflight, so wait for the next store.
+                return
+            del self._entries[victim]
+            self._forget_key_locked(victim)
+            logger.debug("cache: evicted %s (max_entries=%d)", victim, self._max_entries)
+
+    def _is_live_locked(self, key: str) -> bool:
+        """True when a producer currently owns ``key``'s singleflight slot."""
+        lock = self._locks.get(key)
+        return lock is not None and not lock.is_set()
+
+    def _forget_key_locked(self, key: str) -> None:
+        """Drop a key's ordering ticket and applied snapshot marker (Issue #86).
+
+        Tickets and ``_applied`` used to outlive their entries forever: nothing
+        removed them, not even ``invalidate()``. A ticket counter restarting at
+        0 is harmless (a later fetch always gets a higher number than an absent
+        ``_applied``), so eviction may safely drop both.
+        """
+        self._tickets.pop(key, None)
+        self._applied.pop(key, None)
 
     def mark_stale(self, key: str, error_code: str, ticket: int | None = None) -> None:
         """Mark existing entry as stale after a failed refresh.
@@ -165,7 +233,10 @@ class LayerCache:
         If cache is stale: return stale data, trigger background refresh (singleflight).
         If no cache: block and fetch.
         """
-        entry = self._entries.get(key)
+        with self._mutex:
+            entry = self._entries.get(key)
+            if entry is not None:
+                self._entries.move_to_end(key)  # LRU: a served key is a hot key
 
         # Fresh cache hit
         if entry and time.time() < entry.expires_at:
@@ -278,8 +349,24 @@ class LayerCache:
                     lock.set()
 
     def invalidate(self, key: str | None = None) -> None:
-        """Clear cache entry or all entries."""
-        if key:
-            self._entries.pop(key, None)
-        else:
-            self._entries.clear()
+        """Clear one cache entry, or all of them (Issues #72, #86).
+
+        Clearing is complete: the entry, its ordering ticket and its applied
+        snapshot marker all go, so a cache that is invalidated on every
+        watchlist write no longer keeps a permanent record of every key it has
+        ever served. Keys with a live producer are skipped instead — their
+        in-flight fetch still owns the singleflight ``Event`` that other
+        callers are waiting on, and it will store a fresh snapshot on
+        completion, which is exactly what an invalidation asks for.
+        """
+        with self._mutex:
+            if key:
+                keys = [key]
+            else:
+                keys = list(self._entries)
+                keys.extend(k for k in self._locks if k not in self._entries)
+            for k in keys:
+                if self._is_live_locked(k):
+                    continue
+                self._entries.pop(k, None)
+                self._forget_key_locked(k)

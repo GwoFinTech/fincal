@@ -95,6 +95,31 @@ ICAL_BASE_URL = os.getenv("ICAL_BASE_URL", "")
 # a prediction outside the window has no other channel to reach the subscriber.
 CALENDAR_FORWARD_DAYS = int(os.getenv("CALENDAR_FORWARD_DAYS", "420"))
 
+# Capacity and window bounds for the `/api/earnings` response cache (Issue #86).
+#
+# `LayerCache` used to be an unbounded dict: every distinct `start`/`end` a
+# caller sent stayed resident forever together with its payload (measured
+# against the production universe: 0.80 MiB for the default window, 1.05 MiB
+# for the widest accepted one), so an authenticated caller could grow the
+# process without limit just by varying the dates. Eviction is LRU, which is
+# harmless for the UI — one displayed month is one key.
+#
+# The cap is 128, not the 512 slots the iCal feed cache uses: at 1.05 MiB per
+# payload, 512 keys would allow ~537 MiB of retained bodies for a service whose
+# baseline RSS is ~52 MiB. The real working set is "users x months browsed":
+# 6 users x 14 windows (12 browsed months + watchlist + default) = 84, so 128
+# keeps every user's recent months cached while capping the route at ~134 MiB.
+# Raise it through the environment if a deployment serves many more users.
+#
+# `EARNINGS_MAX_WINDOW_DAYS` bounds how far apart `start` and `end` may be.
+# The default leaves room for the shipped horizons (default view:
+# 7 + CALENDAR_FORWARD_DAYS; watchlist view: CALENDAR_FORWARD_DAYS) plus 90
+# days, so no legitimate outlet is affected while a decade-long request is
+# rejected with `invalid_window` instead of being cached. Bulk history stays
+# available through `/api/export`, which is a separate path.
+EARNINGS_CACHE_MAX_ENTRIES = int(os.getenv("EARNINGS_CACHE_MAX_ENTRIES", "128"))
+EARNINGS_MAX_WINDOW_DAYS = int(os.getenv("EARNINGS_MAX_WINDOW_DAYS", str(CALENDAR_FORWARD_DAYS + 90)))
+
 # Kurumi (tsummt) API — preferred company-name source for FinCal symbols.
 # Issue #70: the default is FinCal's *own* listen address inside the production
 # container, and FinCal answers the old probe path (`/api/config`) itself, so a
