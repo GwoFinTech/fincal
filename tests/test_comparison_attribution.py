@@ -305,7 +305,16 @@ class LongbridgeAttributionWriteTests(TestCase):
         self.assertIsNone(rows[0][13],
                           "an event without actuals must not label the row's Futu actual")
 
-    def test_upsert_labels_the_actual_side_only_for_the_values_it_wrote(self):
+    def test_upsert_never_wipes_or_downgrades_a_stored_label(self):
+        """Issue #89: a label is evidence, so the upsert may only add one.
+
+        Production had 3,852 US rows whose estimate and actual were both present
+        and both unattributed (34% of the pairs), because the write path only
+        labelled a figure the *current* event carried and the old
+        ``CASE WHEN EXCLUDED.eps_actual IS NOT NULL … THEN EXCLUDED.actual_currency``
+        wrote the event's ``unknown``/NULL over an actual that Futu had labelled
+        with its own reporting currency.
+        """
         cursor = MagicMock()
         cursor.fetchall.return_value = []
         recorder = _RecordingExecuteValues()
@@ -316,9 +325,34 @@ class LongbridgeAttributionWriteTests(TestCase):
                                     eps_actual=0.02),
             ])
         sql = _insert_sql(recorder)
-        self.assertIn("estimate_currency = COALESCE(EXCLUDED.estimate_currency", sql)
-        self.assertIn("CASE WHEN EXCLUDED.eps_actual IS NOT NULL "
-                      "OR EXCLUDED.revenue_actual IS NOT NULL", sql)
+
+        # Estimate side: keep a real stored label, never replace it with the
+        # ``unknown`` marker, and only adopt the event's currency for an estimate
+        # Longbridge actually owns.
+        self.assertIn("estimate_currency = CASE", sql)
+        self.assertIn("LOWER(earnings.estimate_currency) <> 'unknown'", sql)
+        self.assertIn("LOWER(COALESCE(earnings.estimate_source, '')) IN ('', 'longbridge')", sql)
+        self.assertIn("THEN EXCLUDED.estimate_currency", sql)
+        # Actual side: only touched when this event carries the actual, and then
+        # only to fill in a real declaration.
+        self.assertIn("actual_currency = CASE", sql)
+        self.assertIn("WHEN EXCLUDED.eps_actual IS NULL AND EXCLUDED.revenue_actual IS NULL", sql)
+        self.assertIn("THEN EXCLUDED.actual_currency", sql)
+        self.assertNotIn("COALESCE(EXCLUDED.actual_currency, earnings.actual_currency)", sql)
+
+    def test_the_batch_labels_a_frozen_estimate_from_the_events_currency(self):
+        """An event that only repeats the date still states the currency.
+
+        The estimate is written once and then re-served by later events that
+        carry no estimate of their own; gating the label on "this event has an
+        estimate" is what left those rows unattributable forever (Issue #89).
+        """
+        info = self._info(eps_estimate="")
+        rows = self._batch_for([{"infos": [info]}])
+
+        self.assertIsNone(rows[0][7], "the event carries no estimate value")
+        self.assertEqual(rows[0][12], "USD",
+                         "the period's estimate may still be labelled by this event")
 
     def test_insert_columns_match_the_batch_width(self):
         """The batch layout and the INSERT column list are one contract (Issue #61)."""

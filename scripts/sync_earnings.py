@@ -489,10 +489,33 @@ def flush_batch(cur, rows: list[tuple]) -> FlushStats:
             revenue_estimate = COALESCE(EXCLUDED.revenue_estimate, earnings.revenue_estimate),
             revenue_actual = COALESCE(EXCLUDED.revenue_actual, earnings.revenue_actual),
             before_after = COALESCE(EXCLUDED.before_after, earnings.before_after),
-            estimate_currency = COALESCE(EXCLUDED.estimate_currency, earnings.estimate_currency),
+            -- Issue #61 / #89: a label is evidence, so it is never wiped and never
+            -- downgraded.  It is written when the row carries none (or only the
+            -- ``unknown`` marker) and the new value is a real declaration; the
+            -- estimate side only accepts it for an estimate Longbridge owns
+            -- (``estimate_source`` longbridge/unattributed) — the same rule the
+            -- one-time backfill uses, because a predictor-owned estimate is not
+            -- Longbridge's figure and must not inherit the calendar's currency.
+            estimate_currency = CASE
+                WHEN earnings.estimate_currency IS NOT NULL
+                     AND LOWER(earnings.estimate_currency) <> 'unknown'
+                    THEN earnings.estimate_currency
+                WHEN LOWER(COALESCE(earnings.estimate_source, '')) IN ('', 'longbridge')
+                     AND EXCLUDED.estimate_currency IS NOT NULL
+                     AND LOWER(EXCLUDED.estimate_currency) <> 'unknown'
+                    THEN EXCLUDED.estimate_currency
+                ELSE earnings.estimate_currency END,
             estimate_basis = COALESCE(earnings.estimate_basis, EXCLUDED.estimate_basis),
-            actual_currency = CASE WHEN EXCLUDED.eps_actual IS NOT NULL OR EXCLUDED.revenue_actual IS NOT NULL
-                                   THEN EXCLUDED.actual_currency ELSE earnings.actual_currency END,
+            actual_currency = CASE
+                WHEN EXCLUDED.eps_actual IS NULL AND EXCLUDED.revenue_actual IS NULL
+                    THEN earnings.actual_currency
+                WHEN earnings.actual_currency IS NOT NULL
+                     AND LOWER(earnings.actual_currency) <> 'unknown'
+                    THEN earnings.actual_currency
+                WHEN EXCLUDED.actual_currency IS NOT NULL
+                     AND LOWER(EXCLUDED.actual_currency) <> 'unknown'
+                    THEN EXCLUDED.actual_currency
+                ELSE earnings.actual_currency END,
             actual_basis = CASE WHEN EXCLUDED.eps_actual IS NOT NULL OR EXCLUDED.revenue_actual IS NOT NULL
                                 THEN EXCLUDED.actual_basis ELSE earnings.actual_basis END,
             {fiscal.CONFIRM_IDENTITY_PROMOTION},
@@ -637,10 +660,16 @@ def sync_earnings(run_id: int, stats: SyncStats | None = None) -> SyncStats:
                     kv.get("revenue_estimate"), kv.get("revenue_actual"),
                     date_type,
                     # Issue #61: the calendar event states the currency its figures
-                    # are in, so the estimate is labelled whenever the event carries
-                    # one, and the actual only when this event actually supplied the
-                    # actual value (an actual written by Futu keeps its own label).
-                    currency if (kv.get("eps_estimate") is not None or kv.get("revenue_estimate") is not None) else None,
+                    # are in.  The estimate slot carries it whenever the event
+                    # declares one — not only when this event also carries the
+                    # estimate value: a period's estimate is written once and then
+                    # re-served by events that only repeat the date, so gating on
+                    # "this event has an estimate" left 34% of US rows with a
+                    # stored estimate and no currency to compare it by (the
+                    # upsert below decides whether the label applies to *this*
+                    # row).  The actual slot keeps its gate: a Longbridge actual
+                    # that Futu wrote must keep Futu's own reporting currency.
+                    currency,
                     currency if (kv.get("eps_actual") is not None or kv.get("revenue_actual") is not None) else None,
                     UNKNOWN_ATTRIBUTION,
                     UNKNOWN_ATTRIBUTION,
