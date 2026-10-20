@@ -13,6 +13,13 @@ OUT_FILE="frontend/src/api/schema.d.ts"
 # Ensure output directory exists
 mkdir -p "$(dirname "$OUT_FILE")"
 
+# NOTE: the default URL is the service published on :8000. On a host where that
+# port belongs to a *different* service (e.g. another project's API), the
+# generated file silently becomes that service's schema — pass
+# FINCAL_OPENAPI_URL, or generate from FinCal's own schema instead:
+#   python -c "import json, app.main as m; print(json.dumps(m.app.openapi()))" > /tmp/o.json
+#   npx openapi-typescript /tmp/o.json -o frontend/src/api/schema.d.ts
+
 if [ "${1:-}" = "--check" ]; then
     echo "=== Checking TypeScript types are up-to-date ==="
     npx openapi-typescript "$OPENAPI_URL" -o "$OUT_FILE.check"

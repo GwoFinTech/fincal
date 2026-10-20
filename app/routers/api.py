@@ -14,7 +14,7 @@ from ..errors import AppError, NotFoundError, ForbiddenError
 from ..schemas import (
     AppConfig, UserResponse, WatchlistItem, WatchlistAddResult,
     WatchlistRemoveResult, EarningItem, DecisionResponse, PopularStocks,
-    SearchItem,
+    SearchItem, SystemUniverse,
 )
 
 router = APIRouter(prefix="/api", tags=["api"])
@@ -283,6 +283,130 @@ def api_popular(user=Depends(get_current_user)):
     return popular_stocks_by_market()
 
 
+# ── System universe: read-only view of the default watchlist ────────────────
+#
+# Every user's calendar, export and iCal feed is built from one symbol range:
+# the configured watchlist source (``WATCHLIST_SOURCE``).  Until now only an
+# admin could see what that range *is* — ``/api/admin/overview`` — so a normal
+# user could not tell whether a missing symbol was never tracked or simply had
+# no upcoming report, and could not explain 「为什么日历里只有这些公司」.
+#
+# This endpoint answers that for any signed-in user, and it is read-only by
+# construction: there is no mutation counterpart under ``/api`` (the editable
+# list stays admin-only at ``/api/admin/watchlist``).  It reads the same
+# ``app.universe`` accessor the calendar uses, so it cannot drift from what is
+# actually served, and it reports each symbol's origin so a user can tell
+# FinCal's own additions apart from the shared upstream list.
+#
+# One display name per ``(symbol, market)``, shared by the search list and the
+# read-only system-universe view: the newest *provider* row's name (algorithm
+# rows only copy a provider name), with the ``stock_names`` cache as fallback.
+_AUTHORITATIVE_NAME_CTE = """authoritative_name AS (
+    SELECT DISTINCT ON (symbol, market) symbol, market, company_name
+    FROM earnings
+    WHERE company_name IS NOT NULL AND company_name <> ''
+    ORDER BY symbol, market, (COALESCE(date_source, '') = 'algorithm'),
+             report_date DESC, id DESC
+)"""
+
+_UNIVERSE_NAME_SQL = f"""
+WITH {_AUTHORITATIVE_NAME_CTE}
+SELECT p.symbol, p.market,
+       COALESCE(a.company_name, NULLIF(sn.company_name, ''), '') AS company_name
+FROM unnest(%(symbols)s::text[], %(markets)s::text[]) AS p(symbol, market)
+LEFT JOIN authoritative_name a ON a.symbol = p.symbol AND a.market = p.market
+LEFT JOIN stock_names sn ON sn.symbol = p.symbol AND sn.market = p.market
+"""
+
+
+def _managed_codes() -> set[str] | None:
+    """``{'US:AAPL', 'HK:0700.HK'}`` of the FinCal-managed symbols.
+
+    ``None`` when the managed table cannot be read: the universe itself is still
+    answerable, so the origin column degrades to "unknown" instead of failing the
+    whole view.
+    """
+    from ..symbol import bare_ticker
+
+    try:
+        with db.db_cursor() as cur:
+            cur.execute("SELECT symbol, market FROM managed_watchlist")
+            rows = cur.fetchall()
+    except Exception as exc:
+        logger.warning("system universe: managed watchlist unreadable: %s", exc)
+        return None
+    codes: set[str] = set()
+    for row in rows:
+        market = (row["market"] or "").strip().upper()
+        raw = (row["symbol"] or "").strip().upper()
+        if not raw:
+            continue
+        codes.add(f"{market}:{normalize(bare_ticker(raw), market) if market == 'HK' else bare_ticker(raw)}")
+    return codes
+
+
+def _universe_names(pairs: list[tuple[str, str]]) -> dict[tuple[str, str], str]:
+    """Display names for the universe, one per ``(symbol, market)``.
+
+    Same precedence the search list uses (``_AUTHORITATIVE_NAME_CTE``): the
+    newest provider row's name, then the ``stock_names`` cache.  A failure here
+    only costs the names — the range itself is what the page is for.
+    """
+    if not pairs:
+        return {}
+    try:
+        with db.db_cursor() as cur:
+            cur.execute(_UNIVERSE_NAME_SQL, {
+                "symbols": [pair[0] for pair in pairs],
+                "markets": [pair[1] for pair in pairs],
+            })
+            rows = cur.fetchall()
+    except Exception as exc:
+        logger.warning("system universe: name lookup failed: %s", exc)
+        return {}
+    return {(row["symbol"], row["market"]): row["company_name"] or "" for row in rows}
+
+
+@router.get("/universe", response_model=SystemUniverse)
+def api_universe(user=Depends(get_current_user)):
+    """The default watchlist range the whole system tracks (read-only)."""
+    from ..universe import popular_stocks, universe_status
+    from ..watchlist import source_description
+
+    us, hk = popular_stocks()
+    status = universe_status()
+    description = source_description()
+
+    pairs = sorted([(symbol, "US") for symbol in us] + [(symbol, "HK") for symbol in hk],
+                   key=lambda pair: (pair[1], sort_key(pair[0])))
+    managed = _managed_codes()
+    names = _universe_names(pairs)
+
+    items = []
+    for symbol, market in pairs:
+        origin = None
+        if managed is not None:
+            origin = "managed" if f"{market}:{symbol}" in managed else "shared"
+        items.append({
+            "symbol": symbol,
+            "market": market,
+            "company_name": names.get((symbol, market), ""),
+            "origin": origin,
+        })
+
+    return {
+        **description,
+        "source": status.get("source") or "",
+        "stale": bool(status.get("stale")),
+        "error_code": status.get("error_code"),
+        "updated_at": status.get("last_success_at"),
+        "fetched_at": status.get("fetched_at"),
+        "counts": {"US": len(us), "HK": len(hk), "total": len(us) + len(hk)},
+        "items": items,
+        "skipped": list(status.get("skipped_symbols") or []),
+    }
+
+
 # ── Watchlist search (Issue #69) ────────────────────────────────────────────
 #
 # `/api/search` is the watchlist page's only add-candidate source, so one code has
@@ -312,14 +436,8 @@ def api_popular(user=Depends(get_current_user)):
 #     display name does not narrow the search;
 #   * orders the matches by relevance — exact code, code prefix, code substring,
 #     then name-only — with `market, symbol` keeping each tier stable.
-_SEARCH_SQL = """
-WITH authoritative_name AS (
-    SELECT DISTINCT ON (symbol, market) symbol, market, company_name
-    FROM earnings
-    WHERE company_name IS NOT NULL AND company_name <> ''
-    ORDER BY symbol, market, (COALESCE(date_source, '') = 'algorithm'),
-             report_date DESC, id DESC
-),
+_SEARCH_SQL = f"""
+WITH {_AUTHORITATIVE_NAME_CTE},
 symbols AS (
     SELECT DISTINCT symbol, market FROM earnings
 ),

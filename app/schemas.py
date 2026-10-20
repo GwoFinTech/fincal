@@ -207,6 +207,52 @@ class PopularStocks(BaseModel):
     HK: list[str]
 
 
+# ── System universe (read-only, every user) ────────────────────────
+
+class SystemUniverseItem(BaseModel):
+    """One symbol of the range the whole system tracks."""
+
+    symbol: str
+    market: str
+    company_name: str = ""
+    # ``managed`` = FinCal's own managed watchlist, ``shared`` = the upstream
+    # (Kurumi) watchlist; ``None`` when the origin could not be determined.
+    origin: str | None = None
+
+
+class SystemUniverseCounts(BaseModel):
+    US: int
+    HK: int
+    total: int
+
+
+class SystemUniverse(BaseModel):
+    """The default watchlist every user's calendar is built from.
+
+    Read-only by contract: it is the same universe ``/api/earnings`` (default
+    view), ``/api/export`` and ``/api/popular`` serve, described with the
+    metadata an operator would otherwise only see in the admin panel.
+    """
+
+    source: str
+    configured: str
+    type: str
+    location: str
+    transport: str
+    external_dependency: bool
+    local_fallback: bool
+    stale: bool
+    error_code: str | None = None
+    #: Last successful read from the configured source (ISO-8601, UTC).
+    updated_at: datetime | None = None
+    #: Last read attempt, successful or not.
+    fetched_at: datetime | None = None
+    counts: SystemUniverseCounts
+    items: list[SystemUniverseItem]
+    #: Codes the source offers that map onto no market FinCal serves (#66).
+    skipped: list[str] = []
+
+
 # ── Admin ──────────────────────────────────────────────────────────
 
 class ManagedWatchlistItem(BaseModel):

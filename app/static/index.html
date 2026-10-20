@@ -174,6 +174,9 @@
       <div class="inline-flex gap-1 rounded-[10px] p-1" style="background:var(--surface);border:1px solid var(--border);">
         <button @click="appTab='calendar'" :class="appTab === 'calendar' ? 'app-tab-active' : ''" class="ui-tab app-tab">日历</button>
         <button @click="appTab='watchlist'" :class="appTab === 'watchlist' ? 'app-tab-active' : ''" class="ui-tab app-tab">自选 <span v-if="user && watchlist.length" class="ml-1 text-[11px] opacity-75">{{ watchlist.length }}</span></button>
+        <!-- Read-only: what the system itself tracks (every user's calendar is
+             built from this range). The editable list stays admin-only. -->
+        <button @click="appTab='universe'" :class="appTab === 'universe' ? 'app-tab-active' : ''" class="ui-tab app-tab">系统自选</button>
       </div>
     </nav>
 
@@ -228,6 +231,104 @@
         <p class="text-[11px] mt-2" style="color:var(--text-muted);">「下次财报」= 今天之后最近的财报日（含算法预测，标「预」）；无未来财报时为「—」。与日历显示月份无关。</p>
       </template>
       <section v-else class="surface max-w-lg mx-auto mt-8 p-6 text-center"><div class="w-10 h-10 mx-auto mb-3 rounded-full flex items-center justify-center text-lg" style="background:var(--surface-raised);">☆</div><h2 class="text-[17px] font-semibold">登录后管理自选</h2><p class="text-[12px] leading-5 mt-2" style="color:var(--text-muted);">自选会安全地保存到你的账户，并用于日历中的“只看自选”筛选。</p><button v-if="appConfig.auth_login_url" @click="login" class="ui-btn ui-btn-primary mt-4">登录</button></section>
+    </main>
+
+    <!-- System universe: the symbol range the system itself tracks, readable by
+         every signed-in user. Deliberately has no mutation control — editing the
+         range is the admin's job (`/api/admin/watchlist`); this page only makes
+         the range (and where each symbol comes from) visible. -->
+    <main v-if="appTab === 'universe'" class="max-w-[1600px] mx-auto px-4 py-5 pb-8">
+      <template v-if="user">
+        <div class="flex flex-wrap items-end justify-between gap-3 mb-4">
+          <div>
+            <h2 class="text-[20px] font-semibold">系统自选范围</h2>
+            <p class="text-[12px] mt-1" style="color:var(--text-muted);">系统默认追踪的标的清单——日历、导出与 iCal 订阅都按这份范围生成。此页只读。</p>
+          </div>
+          <span class="text-[12px]" style="color:var(--text-muted);">{{ systemUniverse.counts.total }} 个标的</span>
+        </div>
+
+        <div class="grid grid-cols-3 gap-2.5 mb-4">
+          <div class="watchlist-stat"><div class="text-[11px] text-zinc-500">全部</div><div class="mt-1 text-[22px] font-semibold">{{ systemUniverse.counts.total }}</div></div>
+          <div class="watchlist-stat"><div class="text-[11px] text-zinc-500">美股 · US</div><div class="mt-1 text-[22px] font-semibold text-blue-300">{{ systemUniverse.counts.US }}</div></div>
+          <div class="watchlist-stat"><div class="text-[11px] text-zinc-500">港股 · HK</div><div class="mt-1 text-[22px] font-semibold text-pink-300">{{ systemUniverse.counts.HK }}</div></div>
+        </div>
+
+        <section class="surface p-3 mb-5" aria-label="系统自选范围来源">
+          <div class="grid sm:grid-cols-3 gap-3 text-[12px]">
+            <div>
+              <div class="text-[11px] text-zinc-500 mb-1">清单来源</div>
+              <div class="font-medium">{{ universeSourceLabel }}</div>
+              <div class="text-[11px] text-zinc-500 mt-1">{{ systemUniverse.transport === 'database' ? 'PostgreSQL · ' + systemUniverse.location : 'FinCal 本地数据库' }}</div>
+            </div>
+            <div>
+              <div class="text-[11px] text-zinc-500 mb-1">最近一次读取成功</div>
+              <div class="font-medium">{{ universeUpdatedLabel }}</div>
+              <div class="text-[11px] text-zinc-500 mt-1">上游增删按缓存周期生效</div>
+            </div>
+            <div>
+              <div class="text-[11px] text-zinc-500 mb-1">状态</div>
+              <div class="font-medium" :class="systemUniverse.stale ? 'text-amber-400' : 'text-emerald-400'">{{ systemUniverse.stale ? '降级：沿用上次成功的清单' : '正常' }}</div>
+              <div v-if="systemUniverse.error_code" class="text-[11px] text-amber-400 mt-1">{{ systemUniverse.error_code }}</div>
+            </div>
+          </div>
+          <p v-if="systemUniverse.skipped.length" class="text-[11px] mt-3" style="color:var(--text-muted);">
+            另有 {{ systemUniverse.skipped.length }} 个代码不属于美股/港股（如 A 股、ETF），未纳入日历：{{ systemUniverse.skipped.join('、') }}
+          </p>
+        </section>
+
+        <div v-if="universeLoading" class="flex items-center gap-2 text-[12px] text-zinc-500 py-3"><div class="spinner" style="width:14px;height:14px;"></div> 加载中…</div>
+        <div v-else class="grid lg:grid-cols-2 gap-4">
+          <section class="surface overflow-hidden">
+            <div class="flex items-center justify-between px-4 py-3 border-b" style="border-color:var(--border);">
+              <div class="section-title mb-0 border-0 p-0">美股 <span class="text-zinc-500 font-normal">{{ usUniverse.length }}</span></div>
+              <span class="text-[11px] text-zinc-500">只读</span>
+            </div>
+            <div class="overflow-x-auto">
+              <table class="w-full min-w-[420px] text-[12px]">
+                <thead class="text-[10px] text-zinc-500" style="background:var(--surface-raised);">
+                  <tr><th class="text-left px-4 py-2 font-medium">代码</th><th class="text-left px-3 py-2 font-medium">公司</th><th class="text-left px-4 py-2 font-medium">来源</th></tr>
+                </thead>
+                <tbody>
+                  <tr v-if="!usUniverse.length"><td colspan="3" class="px-4 py-5 text-zinc-500">暂无美股标的。</td></tr>
+                  <tr v-for="item in usUniverse" :key="'US-' + item.symbol" class="border-t" style="border-color:var(--border);">
+                    <td class="px-4 py-2 font-semibold text-[13px]">{{ item.symbol }} <span class="badge badge-US" style="font-size:9px;">US</span></td>
+                    <td class="px-3 py-2 text-zinc-400">{{ item.company_name || '—' }}</td>
+                    <td class="px-4 py-2 text-[11px] text-zinc-500">{{ universeOriginLabel(item.origin) }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+          <section class="surface overflow-hidden">
+            <div class="flex items-center justify-between px-4 py-3 border-b" style="border-color:var(--border);">
+              <div class="section-title mb-0 border-0 p-0">港股 <span class="text-zinc-500 font-normal">{{ hkUniverse.length }}</span></div>
+              <span class="text-[11px] text-zinc-500">只读</span>
+            </div>
+            <div class="overflow-x-auto">
+              <table class="w-full min-w-[420px] text-[12px]">
+                <thead class="text-[10px] text-zinc-500" style="background:var(--surface-raised);">
+                  <tr><th class="text-left px-4 py-2 font-medium">代码</th><th class="text-left px-3 py-2 font-medium">公司</th><th class="text-left px-4 py-2 font-medium">来源</th></tr>
+                </thead>
+                <tbody>
+                  <tr v-if="!hkUniverse.length"><td colspan="3" class="px-4 py-5 text-zinc-500">暂无港股标的。</td></tr>
+                  <tr v-for="item in hkUniverse" :key="'HK-' + item.symbol" class="border-t" style="border-color:var(--border);">
+                    <td class="px-4 py-2 font-semibold text-[13px]">{{ item.symbol }} <span class="badge badge-HK" style="font-size:9px;">HK</span></td>
+                    <td class="px-3 py-2 text-zinc-400">{{ item.company_name || '—' }}</td>
+                    <td class="px-4 py-2 text-[11px] text-zinc-500">{{ universeOriginLabel(item.origin) }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+        <p class="text-[11px] mt-2" style="color:var(--text-muted);">范围由管理员维护（Kurumi 共享清单 + FinCal 本地自选）；你的个人自选不会改变这里，也不会改变其他用户的日历。</p>
+      </template>
+      <section v-else class="surface max-w-lg mx-auto mt-8 p-6 text-center">
+        <div class="w-10 h-10 mx-auto mb-3 rounded-full flex items-center justify-center text-lg" style="background:var(--surface-raised);">▤</div>
+        <h2 class="text-[17px] font-semibold">登录后查看系统自选范围</h2>
+        <p class="text-[12px] leading-5 mt-2" style="color:var(--text-muted);">登录后可查看系统默认追踪的标的清单，以及每只标的的来源（Kurumi 共享 / FinCal 自选）。</p>
+        <button v-if="appConfig.auth_login_url" @click="login" class="ui-btn ui-btn-primary mt-4">登录</button>
+      </section>
     </main>
 
     <!-- Calendar and selection workspace -->

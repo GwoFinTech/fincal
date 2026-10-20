@@ -81,15 +81,12 @@ def _normalize_managed(payload: ManagedInput) -> tuple[str, str]:
 
 
 def source_description() -> dict:
-    configured = config.WATCHLIST_SOURCE.strip().lower()
-    return {
-        "configured": configured,
-        "type": "postgresql" if configured in ("tsummt", "hybrid") else configured,
-        "location": f"{config.DB_HOST}:{config.DB_PORT}/{config.TSUMMT_DB}" if configured in ("tsummt", "hybrid") else "fincal.managed_watchlist",
-        "transport": "database" if configured in ("tsummt", "hybrid") else "local",
-        "external_dependency": configured == "tsummt",
-        "local_fallback": configured in ("tsummt", "hybrid", "http"),
-    }
+    """Kept as a module-level alias so tests and callers that import it from
+    this router keep working; the implementation lives with the watchlist
+    sources it describes."""
+    from ..watchlist import source_description as _describe
+
+    return _describe()
 
 
 @router.get("/overview", response_model=OverviewResponse)

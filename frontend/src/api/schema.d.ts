@@ -156,6 +156,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/universe": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Api Universe
+         * @description The default watchlist range the whole system tracks (read-only).
+         */
+        get: operations["api_universe_api_universe_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/search": {
         parameters: {
             query?: never;
@@ -1236,6 +1256,72 @@ export interface components {
             cnt: number;
         };
         /**
+         * SystemUniverse
+         * @description The default watchlist every user's calendar is built from.
+         *
+         *     Read-only by contract: it is the same universe ``/api/earnings`` (default
+         *     view), ``/api/export`` and ``/api/popular`` serve, described with the
+         *     metadata an operator would otherwise only see in the admin panel.
+         */
+        SystemUniverse: {
+            /** Source */
+            source: string;
+            /** Configured */
+            configured: string;
+            /** Type */
+            type: string;
+            /** Location */
+            location: string;
+            /** Transport */
+            transport: string;
+            /** External Dependency */
+            external_dependency: boolean;
+            /** Local Fallback */
+            local_fallback: boolean;
+            /** Stale */
+            stale: boolean;
+            /** Error Code */
+            error_code?: string | null;
+            /** Updated At */
+            updated_at?: string | null;
+            /** Fetched At */
+            fetched_at?: string | null;
+            counts: components["schemas"]["SystemUniverseCounts"];
+            /** Items */
+            items: components["schemas"]["SystemUniverseItem"][];
+            /**
+             * Skipped
+             * @default []
+             */
+            skipped: string[];
+        };
+        /** SystemUniverseCounts */
+        SystemUniverseCounts: {
+            /** Us */
+            US: number;
+            /** Hk */
+            HK: number;
+            /** Total */
+            total: number;
+        };
+        /**
+         * SystemUniverseItem
+         * @description One symbol of the range the whole system tracks.
+         */
+        SystemUniverseItem: {
+            /** Symbol */
+            symbol: string;
+            /** Market */
+            market: string;
+            /**
+             * Company Name
+             * @default
+             */
+            company_name: string;
+            /** Origin */
+            origin?: string | null;
+        };
+        /**
          * UniverseStatus
          * @description State of the live default calendar/export universe (Issue #58).
          */
@@ -1589,6 +1675,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PopularStocks"];
+                };
+            };
+        };
+    };
+    api_universe_api_universe_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SystemUniverse"];
                 };
             };
         };

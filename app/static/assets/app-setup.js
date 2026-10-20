@@ -410,6 +410,67 @@
     };
   }
 
+  // ── useSystemUniverse: read-only view of the default watchlist ──────
+  // The calendar, the export and the iCal feed all render one symbol range —
+  // the configured watchlist source (Kurumi's shared list + FinCal's managed
+  // list). Until now only the admin panel could show what that range *is*, so
+  // a user could not tell whether a symbol was never tracked or simply had no
+  // upcoming report. This tab answers 「系统到底追踪哪些标的」 for every
+  // user and has no write path at all: the editable list stays admin-only
+  // (`/api/admin/watchlist`), which is what makes it safe for everyone.
+  function useSystemUniverse(apiFetch) {
+    const EMPTY = {
+      source: '', configured: '', transport: '', location: '',
+      external_dependency: false, stale: false, error_code: null,
+      updated_at: null, counts: { US: 0, HK: 0, total: 0 }, items: [], skipped: [],
+    };
+    const systemUniverse = ref({ ...EMPTY, counts: { ...EMPTY.counts } });
+    const universeLoading = ref(false);
+
+    const usUniverse = computed(() => (systemUniverse.value.items || []).filter(i => i.market === 'US'));
+    const hkUniverse = computed(() => (systemUniverse.value.items || []).filter(i => i.market === 'HK'));
+
+    // The configured source, spelled the way the rest of the product talks
+    // about it (`app/watchlist/loader.py`: tsummt+managed / managed / http).
+    const universeSourceLabel = computed(() => {
+      const src = (systemUniverse.value.source || '').toLowerCase();
+      if (src.includes('fallback')) return '内置兜底清单（配置来源暂不可用）';
+      const parts = [];
+      if (src.includes('tsummt')) parts.push('Kurumi 共享清单');
+      if (src.includes('managed')) parts.push('FinCal 本地自选');
+      if (src.includes('http')) parts.push('外部 HTTP 清单');
+      return parts.length ? parts.join(' + ') : (systemUniverse.value.configured || '—');
+    });
+
+    function universeOriginLabel(origin) {
+      if (origin === 'managed') return 'FinCal 自选';
+      if (origin === 'shared') return 'Kurumi 共享';
+      return '—';
+    }
+
+    // Not `fmtDateTime`: that one renders an empty value as 「进行中」 (a sync
+    // run's state), which would read as a lie for "never read successfully".
+    const universeUpdatedLabel = computed(() => {
+      const value = systemUniverse.value.updated_at;
+      return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '尚未成功读取';
+    });
+
+    async function loadUniverse() {
+      universeLoading.value = true;
+      try {
+        const data = await apiFetch('/api/universe');
+        if (data) systemUniverse.value = { ...EMPTY, ...data, counts: data.counts || EMPTY.counts };
+      } finally {
+        universeLoading.value = false;
+      }
+    }
+
+    return {
+      systemUniverse, universeLoading, usUniverse, hkUniverse,
+      universeSourceLabel, universeOriginLabel, universeUpdatedLabel, loadUniverse,
+    };
+  }
+
   // ── useFormatters: number/percentage/date helpers ───────────────
   function useFormatters() {
     // Issue #61: the API marks a row whose estimate and actual are not the same
@@ -615,6 +676,9 @@
       // 6. Admin
       const admin = useAdmin(apiFetch, showToast);
 
+      // 6b. System universe (read-only for every user)
+      const su = useSystemUniverse(apiFetch);
+
       // 7. Formatters
       const fmt = useFormatters();
 
@@ -649,6 +713,10 @@
       // stale "下次财报" (Issue #56).
       watch(appTab, (tab) => {
         if (tab === 'watchlist' && user.value) wl.loadNextEarnings();
+        // The universe is the same range for everyone and changes only when an
+        // admin edits the source, so it is read on entry instead of being kept
+        // in step with the calendar month.
+        if (tab === 'universe' && user.value) su.loadUniverse();
       });
 
       onMounted(async () => {
@@ -692,6 +760,11 @@
         managedWatchlist: admin.managedWatchlist, syncRuns: admin.syncRuns, managedForm: admin.managedForm,
         openAdmin: admin.openAdmin, saveManaged: admin.saveManaged, editManaged: admin.editManaged,
         deleteManaged: admin.deleteManaged, resetManaged: admin.resetManaged, fmtDateTime: admin.fmtDateTime,
+        // System universe (read-only)
+        systemUniverse: su.systemUniverse, universeLoading: su.universeLoading,
+        usUniverse: su.usUniverse, hkUniverse: su.hkUniverse,
+        universeSourceLabel: su.universeSourceLabel, universeOriginLabel: su.universeOriginLabel,
+        universeUpdatedLabel: su.universeUpdatedLabel,
         // Formatters
         ...fmt,
         // Shared
