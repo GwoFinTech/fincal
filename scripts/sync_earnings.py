@@ -49,6 +49,8 @@ import json
 import logging
 import sys
 import os
+
+import psycopg2.errors
 from dataclasses import dataclass
 from datetime import date, timedelta
 
@@ -86,6 +88,9 @@ class FlushStats:
     dropped_disclosures: int = 0
     #: Periods where an incoming release replaced a stored disclosure row.
     takeovers: int = 0
+    #: Rows skipped because another confirmed row already holds the same fiscal
+    #: identity at a different (report_date, report_type) — Issue #87.
+    identity_skipped: int = 0
 
 
 @dataclass
@@ -430,6 +435,56 @@ def dedupe_batch(rows: list[tuple]) -> list[tuple]:
     return list(unique.values())
 
 
+def _insert_earnings_rows(cur, insert_sql: str, rows: list[tuple]) -> tuple[list[tuple], int]:
+    """Insert the batch, falling back to row-by-row on a fiscal-identity clash.
+
+    The batch is one statement, so a single row that collides with
+    ``idx_earnings_fiscal_identity`` — the same fiscal period arriving at a
+    second ``(report_date, report_type)``, which the natural-key ON CONFLICT
+    cannot catch — used to discard the other ~199 rows of the batch too.  Full-day
+    calendar fetches (Issue #90) made that the normal case: 14 batches of 200 were
+    lost silently on every run.  Each row now gets its own savepoint, so only the
+    colliding rows are skipped, the rest of the batch lands, and every skip names
+    the period, date and report type that already owns the identity (Issue #87).
+
+    Returns ``(written_rows, skipped_count)``.
+    """
+    from psycopg2.extras import execute_values
+
+    cur.execute("SAVEPOINT earnings_batch")
+    try:
+        execute_values(cur, insert_sql, rows, page_size=BATCH_SIZE)
+    except psycopg2.errors.UniqueViolation as exc:
+        cur.execute("ROLLBACK TO SAVEPOINT earnings_batch")
+        logger.warning(
+            "  batch insert hit %s on %d rows; retrying row by row so one "
+            "colliding fiscal identity cannot discard the batch",
+            type(exc).__name__, len(rows),
+        )
+    else:
+        cur.execute("RELEASE SAVEPOINT earnings_batch")
+        return list(rows), 0
+
+    written: list[tuple] = []
+    skipped = 0
+    for row in rows:
+        cur.execute("SAVEPOINT earnings_row")
+        try:
+            execute_values(cur, insert_sql, [row], page_size=1)
+        except psycopg2.errors.UniqueViolation:
+            cur.execute("ROLLBACK TO SAVEPOINT earnings_row")
+            skipped += 1
+            logger.warning(
+                "  skipped %s.%s FY%s Q%s @%s (%s): another confirmed row already "
+                "holds this fiscal period",
+                row[0], row[1], row[5], row[6], row[3], row[4],
+            )
+        else:
+            cur.execute("RELEASE SAVEPOINT earnings_row")
+            written.append(row)
+    return written, skipped
+
+
 def flush_batch(cur, rows: list[tuple]) -> FlushStats:
     """Batch upsert using execute_values.
 
@@ -497,9 +552,7 @@ def flush_batch(cur, rows: list[tuple]) -> FlushStats:
             move["from"], move["to"], move["id"],
         )
     from psycopg2.extras import execute_values
-    execute_values(
-        cur,
-        f"""INSERT INTO earnings (symbol, market, company_name, report_date, report_type,
+    insert_sql = f"""INSERT INTO earnings (symbol, market, company_name, report_date, report_type,
            fiscal_year, fiscal_quarter,
            eps_estimate, eps_actual, revenue_estimate, revenue_actual, before_after,
            estimate_currency, actual_currency, estimate_basis, actual_basis)
@@ -531,24 +584,35 @@ def flush_batch(cur, rows: list[tuple]) -> FlushStats:
                     THEN EXCLUDED.estimate_currency
                 ELSE earnings.estimate_currency END,
             estimate_basis = COALESCE(earnings.estimate_basis, EXCLUDED.estimate_basis),
+            -- Issue #89/#91: the label describes *this* provider's number, so it
+            -- may never outlive the value it was written for.  A declaration from
+            -- the writer always wins; a re-sync by the same writer keeps what is
+            -- stored; a *different* writer that declares nothing resets the label
+            -- to `unknown` instead of leaving Futu's TWD/EUR/CNY sitting on a
+            -- USD-converted Longbridge figure.
             actual_currency = CASE
                 WHEN EXCLUDED.eps_actual IS NULL AND EXCLUDED.revenue_actual IS NULL
-                    THEN earnings.actual_currency
-                WHEN earnings.actual_currency IS NOT NULL
-                     AND LOWER(earnings.actual_currency) <> 'unknown'
                     THEN earnings.actual_currency
                 WHEN EXCLUDED.actual_currency IS NOT NULL
                      AND LOWER(EXCLUDED.actual_currency) <> 'unknown'
                     THEN EXCLUDED.actual_currency
-                ELSE earnings.actual_currency END,
-            actual_basis = CASE WHEN EXCLUDED.eps_actual IS NOT NULL OR EXCLUDED.revenue_actual IS NOT NULL
-                                THEN EXCLUDED.actual_basis ELSE earnings.actual_basis END,
+                WHEN LOWER(COALESCE(earnings.actual_source, '')) = 'longbridge'
+                    THEN earnings.actual_currency
+                ELSE 'unknown' END,
+            actual_basis = CASE
+                WHEN EXCLUDED.eps_actual IS NULL AND EXCLUDED.revenue_actual IS NULL
+                    THEN earnings.actual_basis
+                WHEN EXCLUDED.actual_basis IS NOT NULL
+                     AND LOWER(EXCLUDED.actual_basis) <> 'unknown'
+                    THEN EXCLUDED.actual_basis
+                WHEN LOWER(COALESCE(earnings.actual_source, '')) = 'longbridge'
+                    THEN earnings.actual_basis
+                ELSE 'unknown' END,
             {fiscal.CONFIRM_IDENTITY_PROMOTION},
             updated_at = NOW()
-        """,
-        rows,
-        page_size=BATCH_SIZE,
-    )
+        """
+    written_rows, identity_skipped = _insert_earnings_rows(cur, insert_sql, rows)
+    rows = written_rows
     keys = [(r[0], r[1], r[3]) for r in rows]
     execute_values(cur, """UPDATE earnings AS e SET
         date_source = 'longbridge', date_status = CASE WHEN e.eps_actual IS NOT NULL OR e.revenue_actual IS NOT NULL THEN 'reported' ELSE 'scheduled' END,
@@ -564,7 +628,8 @@ def flush_batch(cur, rows: list[tuple]) -> FlushStats:
         WHERE e.eps_estimate IS NOT NULL OR e.revenue_estimate IS NOT NULL""", keys)
     return FlushStats(rows=len(rows), moves=len(outcome.moves), skipped=len(outcome.skipped),
                       dropped_disclosures=len(outcome.dropped) + collapse_drops,
-                      takeovers=sum(1 for move in outcome.moves if move.get("kind") == "takeover"))
+                      takeovers=sum(1 for move in outcome.moves if move.get("kind") == "takeover"),
+                      identity_skipped=identity_skipped)
 
 
 def _flush_batch(run_stats: SyncStats, batch: list[tuple], label: str) -> None:
@@ -591,13 +656,14 @@ def _flush_batch(run_stats: SyncStats, batch: list[tuple], label: str) -> None:
         return
     run_stats.written += flushed.rows
     run_stats.rescheduled += flushed.moves
-    run_stats.skipped += flushed.skipped
+    run_stats.skipped += flushed.skipped + flushed.identity_skipped
     run_stats.dropped_disclosures += flushed.dropped_disclosures
     run_stats.takeovers += flushed.takeovers
     logger.info(
-        "  Flushed %d records (written: %d, fetched: %d, skipped: %d, disclosures dropped: %d, takeovers: %d)",
+        "  Flushed %d records (written: %d, fetched: %d, skipped: %d [%d held by another row], "
+        "disclosures dropped: %d, takeovers: %d)",
         flushed.rows, run_stats.written, run_stats.fetched, run_stats.skipped,
-        run_stats.dropped_disclosures, run_stats.takeovers,
+        flushed.identity_skipped, run_stats.dropped_disclosures, run_stats.takeovers,
     )
 
 

@@ -333,12 +333,16 @@ class LongbridgeAttributionWriteTests(TestCase):
         self.assertIn("LOWER(earnings.estimate_currency) <> 'unknown'", sql)
         self.assertIn("LOWER(COALESCE(earnings.estimate_source, '')) IN ('', 'longbridge')", sql)
         self.assertIn("THEN EXCLUDED.estimate_currency", sql)
-        # Actual side: only touched when this event carries the actual, and then
-        # only to fill in a real declaration.
+        # Actual side: only touched when this event carries the actual, then the
+        # writer's own declaration wins; a same-writer re-sync keeps the stored
+        # label; a *different* writer that declares nothing resets it (a label may
+        # not outlive the value it described).
         self.assertIn("actual_currency = CASE", sql)
         self.assertIn("WHEN EXCLUDED.eps_actual IS NULL AND EXCLUDED.revenue_actual IS NULL", sql)
         self.assertIn("THEN EXCLUDED.actual_currency", sql)
-        self.assertNotIn("COALESCE(EXCLUDED.actual_currency, earnings.actual_currency)", sql)
+        self.assertIn("WHEN LOWER(COALESCE(earnings.actual_source, '')) = 'longbridge'", sql)
+        self.assertIn("ELSE 'unknown' END", sql)
+        self.assertIn("actual_basis = CASE", sql)
 
     def test_the_batch_labels_a_frozen_estimate_from_the_events_currency(self):
         """An event that only repeats the date still states the currency.
