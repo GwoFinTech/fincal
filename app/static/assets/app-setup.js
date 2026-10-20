@@ -455,6 +455,16 @@
       return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '尚未成功读取';
     });
 
+    // The dropped codes are worth showing (they answer 「为什么搜不到这只票」)
+    // but the list is A-shares and ETFs, ~25 long: show the count and a sample
+    // instead of a wall of codes.
+    const universeSkippedLabel = computed(() => {
+      const skipped = systemUniverse.value.skipped || [];
+      if (!skipped.length) return '';
+      const sample = skipped.slice(0, 8).join('、');
+      return skipped.length > 8 ? `${sample} 等 ${skipped.length} 个` : sample;
+    });
+
     async function loadUniverse() {
       universeLoading.value = true;
       try {
@@ -467,7 +477,8 @@
 
     return {
       systemUniverse, universeLoading, usUniverse, hkUniverse,
-      universeSourceLabel, universeOriginLabel, universeUpdatedLabel, loadUniverse,
+      universeSourceLabel, universeOriginLabel, universeUpdatedLabel,
+      universeSkippedLabel, loadUniverse,
     };
   }
 
@@ -764,7 +775,7 @@
         systemUniverse: su.systemUniverse, universeLoading: su.universeLoading,
         usUniverse: su.usUniverse, hkUniverse: su.hkUniverse,
         universeSourceLabel: su.universeSourceLabel, universeOriginLabel: su.universeOriginLabel,
-        universeUpdatedLabel: su.universeUpdatedLabel,
+        universeUpdatedLabel: su.universeUpdatedLabel, universeSkippedLabel: su.universeSkippedLabel,
         // Formatters
         ...fmt,
         // Shared

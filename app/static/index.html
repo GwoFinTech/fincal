@@ -258,7 +258,9 @@
             <div>
               <div class="text-[11px] text-zinc-500 mb-1">清单来源</div>
               <div class="font-medium">{{ universeSourceLabel }}</div>
-              <div class="text-[11px] text-zinc-500 mt-1">{{ systemUniverse.transport === 'database' ? 'PostgreSQL · ' + systemUniverse.location : 'FinCal 本地数据库' }}</div>
+              <!-- Deliberately not the database host/port: the API exposes it for
+                   the admin panel, but a user-facing page has no use for it. -->
+              <div class="text-[11px] text-zinc-500 mt-1">{{ systemUniverse.transport === 'database' ? '共享数据库（由 Kurumi 侧维护）' : 'FinCal 本地数据库' }}</div>
             </div>
             <div>
               <div class="text-[11px] text-zinc-500 mb-1">最近一次读取成功</div>
@@ -272,7 +274,7 @@
             </div>
           </div>
           <p v-if="systemUniverse.skipped.length" class="text-[11px] mt-3" style="color:var(--text-muted);">
-            另有 {{ systemUniverse.skipped.length }} 个代码不属于美股/港股（如 A 股、ETF），未纳入日历：{{ systemUniverse.skipped.join('、') }}
+            另有 {{ systemUniverse.skipped.length }} 个代码不属于美股/港股（如 A 股、ETF），未纳入日历：{{ universeSkippedLabel }}
           </p>
         </section>
 

@@ -261,3 +261,20 @@ def test_the_page_renders_both_markets_and_the_source_metadata():
     assert "universeSourceLabel" in page and "universeUpdatedLabel" in page
     assert "systemUniverse.stale" in page and "systemUniverse.skipped" in page
     assert "universeOriginLabel" in page
+
+
+def test_the_page_shows_a_sample_of_the_dropped_codes_not_a_wall():
+    assert "universeSkippedLabel" in _universe_page()
+
+    js = APP_JS.read_text(encoding="utf-8")
+    block = js[js.index("function useSystemUniverse"):js.index("function useFormatters")]
+    assert "skipped.slice(0, 8)" in block
+
+
+def test_the_page_does_not_leak_infrastructure_details():
+    """The API carries the source's host/port for the admin panel; the
+    user-facing page must not print it."""
+    page = _universe_page()
+
+    assert "systemUniverse.location" not in page
+    assert "5432" not in page
