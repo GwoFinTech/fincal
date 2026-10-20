@@ -61,11 +61,13 @@ def _targets(*symbols, market="US"):
 
 
 class StageVerdictTests(TestCase):
-    def _run(self, targets, results, *, run_id: int | None = 7, error=None):
+    def _run(self, targets, results, *, run_id: int | None = 7, error=None,
+             english_targets=None):
         """Call ``run()`` with every IO surface mocked.
 
         Returns ``(exit_code, finish_run, cache_name, resolve)``.
         """
+        english_targets = english_targets or []
         cursor = _Cursor()
 
         @contextmanager
@@ -82,6 +84,8 @@ class StageVerdictTests(TestCase):
         with mock.patch.object(sync_stock_names, "db_cursor", _db_cursor), \
                 mock.patch.object(sync_stock_names, "init_db", mock.MagicMock()), \
                 mock.patch.object(sync_stock_names, "missing_name_targets", missing), \
+                mock.patch.object(sync_stock_names, "english_name_targets",
+                                  mock.MagicMock(return_value=english_targets)), \
                 mock.patch.object(sync_stock_names, "resolve_company_name_result", resolve), \
                 mock.patch.object(sync_stock_names, "cache_name", cache), \
                 mock.patch.object(sync_stock_names, "start_run",
@@ -112,9 +116,35 @@ class StageVerdictTests(TestCase):
         code, finish, cache, _ = self._run(_targets("AAPL"), [RESOLVED])
 
         self.assertEqual(code, 0)
-        cache.assert_called_once_with("AAPL", "US", "APPLE INC", "kurumi")
+        # Issue #55: the English name travels with the display name; an empty one
+        # is passed explicitly so the two columns are never confused.
+        cache.assert_called_once_with("AAPL", "US", "APPLE INC", "kurumi", "")
         self.assertEqual(finish.call_args.kwargs["status"], "success")
         self.assertEqual(finish.call_args.kwargs["record_count"], 1)
+
+    def test_english_name_is_cached_next_to_the_display_name(self):
+        """Issue #55: a scope symbol that already has a display name is still a
+        target when its English name is missing, and the resolved pair is stored."""
+        bilingual = NameResult(name="腾讯控股", source="kurumi", name_en="TENCENT")
+        code, finish, cache, _ = self._run(
+            [], [bilingual], english_targets=_targets("0700.HK", market="HK"))
+
+        self.assertEqual(code, 0)
+        cache.assert_called_once_with("0700.HK", "HK", "腾讯控股", "kurumi", "TENCENT")
+        self.assertEqual(finish.call_args.kwargs["details"]["english_missing"], 0)
+
+    def test_missing_english_name_is_reported_but_does_not_fail_the_stage(self):
+        """A Chinese-only name is a documented fallback (`en` shows it), not an
+        unresolved display name — the stage stays green and the count is visible."""
+        code, finish, cache, _ = self._run(
+            [], [NameResult(name="某某科技", source="kurumi")],
+            english_targets=_targets("0999.HK", market="HK"))
+
+        self.assertEqual(code, 0)
+        self.assertEqual(finish.call_args.kwargs["status"], "success")
+        details = finish.call_args.kwargs["details"]
+        self.assertEqual(details["english_missing"], 1)
+        self.assertEqual(details["english_missing_symbols"], ["0999.HK"])
 
     def test_targets_that_all_fail_are_recorded_as_a_failed_run(self):
         """Acceptance 3: three providers down used to be a green run."""
@@ -183,12 +213,15 @@ class MainResultTests(TestCase):
         with mock.patch.object(sync_stock_names, "init_db", mock.MagicMock()), \
                 mock.patch.object(sync_stock_names, "missing_name_targets",
                                   mock.MagicMock(return_value=targets)), \
+                mock.patch.object(sync_stock_names, "english_name_targets",
+                                  mock.MagicMock(return_value=[])), \
                 mock.patch.object(sync_stock_names, "resolve_company_name_result",
                                   mock.MagicMock(side_effect=[RESOLVED, UNRESOLVED])), \
                 mock.patch.object(sync_stock_names, "cache_name",
                                   mock.MagicMock(side_effect=lambda *a: cached.append(a))):
-            filled, unresolved = sync_stock_names.main()
+            filled, unresolved, english_missing = sync_stock_names.main()
 
         self.assertEqual(filled, 1)
         self.assertEqual(unresolved, [("MSFT", "all_sources_failed")])
-        self.assertEqual(cached, [("AAPL", "HK", "APPLE INC", "kurumi")])
+        self.assertEqual(cached, [("AAPL", "HK", "APPLE INC", "kurumi", "")])
+        self.assertEqual(english_missing, [("AAPL", "english_name_unavailable")])

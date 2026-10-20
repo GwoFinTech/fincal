@@ -55,6 +55,37 @@ def _fold_ical_lines(lines: list[str]) -> list[str]:
     return folded
 
 
+def _status_marker(date_status: str, title_lang: str) -> str:
+    """The ``[预测]`` / ``[未确认]`` suffix, in the feed's language (Issue #55).
+
+    These two markers used to be hard-coded Chinese, so a ``lang=en`` subscription
+    mixed ``Earnings`` with ``[预测]``. One table for both languages keeps the
+    vocabulary in a single place — the same reason ``_comparability_note`` has
+    one.
+    """
+    labels = {
+        "predicted": {"zh": " [预测]", "en": " [Predicted]"},
+        "unavailable": {"zh": " [未确认]", "en": " [Unconfirmed]"},
+    }
+    return labels.get(date_status, {}).get(title_lang) or labels.get(date_status, {}).get("zh") or ""
+
+
+def _company_label(event: dict, title_lang: str) -> str:
+    """The company name an event shows, in the feed's language (Issue #55).
+
+    ``company_name`` is the display name (Kurumi's, usually Chinese) and
+    ``company_name_en`` the Latin one. An English feed uses the Latin name and
+    falls back to the display name when the sync never resolved one — the
+    documented rule: no empty titles, no double spaces, and never a fake
+    placeholder. The gap itself is counted by the stock_names stage.
+    """
+    company = str(event.get("company_name") or "").strip()
+    if title_lang == "zh":
+        return company
+    name_en = str(event.get("company_name_en") or "").strip()
+    return name_en or company
+
+
 def _comparability_note(reason: str, title_lang: str = "en") -> str:
     """One description line explaining why no surprise is shown (Issue #61).
 
@@ -251,7 +282,7 @@ def generate_ical(earnings: list[dict], user_email: str = "", title_lang: str = 
 
         symbol = e.get("symbol", "?")
         market = e.get("market", "US")
-        company = e.get("company_name", "")
+        company = _company_label(e, title_lang)
         report_type = e.get("report_type", "Q")
         fq = e.get("fiscal_quarter", "")
         fy = e.get("fiscal_year", "")
@@ -271,31 +302,26 @@ def generate_ical(earnings: list[dict], user_email: str = "", title_lang: str = 
 
         fq_str = f"Q{fq}" if fq else ""
         is_pred = e.get("is_predicted", False)
-        pred_marker = " [预测]" if is_pred else ""
-        # Issue #17: explicit source status in summary
+        # Issue #55: the status marker follows the feed's language; a reported
+        # event carries none. `_status_marker` owns the wording for both.
         date_status = e.get("date_status", "")
         date_source = e.get("date_source", "")
-        if date_status == "predicted":
-            source_tag = " [预测]"
-        elif date_status == "reported":
-            source_tag = ""
-        elif date_status == "unavailable":
-            source_tag = " [未确认]"
-        else:
-            source_tag = pred_marker
+        source_tag = "" if date_status == "reported" else _status_marker(date_status, title_lang)
+        if not source_tag and date_status != "reported" and is_pred:
+            source_tag = _status_marker("predicted", title_lang)
         # The symbol already carries the market suffix for HK (e.g. 0700.HK).
         # Bare symbols are product-default US symbols, so do not append a
-        # redundant `(US)` / `(HK)` marker. Put the company name next to code.
+        # redundant `(US)` / `(HK)` marker. Put the company name next to code;
+        # `company` is already resolved for the feed's language (Issue #55).
         summary_parts = [str(symbol)]
         if company:
-            summary_parts.append(str(company) if title_lang == "zh" else str(e.get("company_name_en") or company))
+            summary_parts.append(str(company))
         if fq_str:
             summary_parts.append(fq_str)
         summary_parts.append("财报" if title_lang == "zh" else "Earnings")
         summary = " ".join(summary_parts) + source_tag
-        # Company names use the cached canonical name; title_lang controls the
-        # event wording because the current earnings schema has one name field.
-        # Keep the human-readable summary free of duplicate market labels.
+        # Company names use the cached canonical name; title_lang decides which of
+        # the two stored spellings is shown (Issue #55).
         comparison_reason = e.get("comparison_unavailable_reason") or fiscal.comparison_unavailable_reason(e)
         desc_parts = [f"Company: {company}" if company else "",
                       f"Fiscal: FY{fy} {fq_str}" if fy else "",

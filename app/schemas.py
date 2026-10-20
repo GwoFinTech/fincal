@@ -71,6 +71,11 @@ class EarningItem(BaseModel):
     symbol: str
     market: str
     company_name: str = ""
+    # The Latin company name an English iCal subscription shows (Issue #55). The
+    # display name comes from Kurumi and is usually Chinese, so the two live in
+    # separate columns; this field is how the read path, both exports and the
+    # response model stay in agreement about it.
+    company_name_en: str | None = None
     report_date: date
     report_type: str = "Q"
     fiscal_year: int | None = None

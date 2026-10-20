@@ -153,6 +153,7 @@ def _full_row() -> dict:
     """One row shaped exactly like ``fetch_earnings_from_db`` output."""
     return {
         "id": 42, "symbol": "AAPL", "market": "US", "company_name": "Apple Inc.",
+        "company_name_en": "Apple",
         "report_date": "2026-07-30", "report_type": "Q",
         "fiscal_year": 2026, "fiscal_quarter": 3, "before_after": "after",
         "eps_estimate": 1.89, "eps_actual": 2.03,

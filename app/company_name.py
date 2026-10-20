@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import subprocess
 import time
 import urllib.request
@@ -54,9 +55,17 @@ def _count_call(provider: str, started: float, *, success: bool,
 
 @dataclass
 class NameResult:
-    """Result of a company-name lookup with error metadata."""
+    """Result of a company-name lookup with error metadata.
+
+    ``name`` is the display name the calendar shows (Kurumi's, usually Chinese);
+    ``name_en`` is the Latin name an English iCal subscription needs (Issue #55).
+    They come from different providers on purpose — Kurumi has no English field
+    and Longbridge ``static`` has no Chinese one — so one must never be written
+    into the other's column.
+    """
     name: str
     source: str = ""
+    name_en: str = ""
     error_code: str | None = None
 
     @property
@@ -66,6 +75,24 @@ class NameResult:
     @property
     def unavailable(self) -> bool:
         return not self.name and self.error_code is not None
+
+
+# CJK ideographs, kana and Hangul: a name containing any of them cannot be the
+# English title of an ``en`` subscription (Issue #55, criterion 3).
+_CJK_RE = re.compile(
+    r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]"
+)
+
+
+def has_cjk(value) -> bool:
+    """Whether ``value`` contains Chinese/Japanese/Korean characters."""
+    return bool(value) and bool(_CJK_RE.search(str(value)))
+
+
+def is_english_name(value) -> bool:
+    """A usable English name: non-empty and free of CJK characters."""
+    text = str(value or "").strip()
+    return bool(text) and not has_cjk(text)
 
 
 def kurumi_symbol(symbol: str, market: str) -> str:
@@ -247,9 +274,37 @@ def resolve_company_name(symbol: str, market: str) -> tuple[str, str]:
     return (result.name, result.source) if result.ok else ("", "")
 
 
+def resolve_english_name(symbol: str, market: str) -> str:
+    """Resolve the Latin name used by an ``en`` subscription (Issue #55).
+
+    Deliberately independent of the display-name chain: the display name is
+    Kurumi's (usually Chinese) and only Longbridge ``static``/Futu carry a Latin
+    spelling. A candidate is accepted only when it is free of CJK characters,
+    because a Chinese name in an English title is the bug this fixes — returning
+    "" lets the caller fall back explicitly instead.
+    """
+    for fetcher in (fetch_from_longbridge, fetch_from_futu):
+        try:
+            candidate = fetcher(symbol, market)
+        except ProviderError:
+            continue
+        except Exception:  # noqa: BLE001 - a fallback may never be fatal
+            continue
+        if is_english_name(candidate):
+            return str(candidate).strip()
+    return ""
+
+
 def resolve_company_name_result(symbol: str, market: str) -> NameResult:
-    """Resolve a company name with error metadata (issue #4, #6)."""
+    """Resolve a company name with error metadata (issue #4, #6, #55).
+
+    ``name``/``source`` keep the documented priority (Kurumi → Longbridge →
+    Futu) so the calendar's display name does not change. ``name_en`` is resolved
+    separately: an already-Latin display name is its own English name (no extra
+    upstream call), otherwise Longbridge/Futu are asked for one.
+    """
     errors: list[str] = []
+    resolved: NameResult | None = None
     for fetcher, source in (
         (fetch_from_kurumi, "kurumi"),
         (fetch_from_longbridge, "longbridge"),
@@ -258,13 +313,22 @@ def resolve_company_name_result(symbol: str, market: str) -> NameResult:
         try:
             name = fetcher(symbol, market)
             if name:
-                return NameResult(name=name, source=source)
+                resolved = NameResult(name=name, source=source)
+                break
         except ProviderError as exc:
             errors.append(f"{source}:{exc.error_code}")
             continue
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{source}:unknown")
             continue
-    if errors:
-        return NameResult(name="", source="", error_code="all_sources_failed")
-    return NameResult(name="", source="", error_code="unavailable")
+
+    if resolved is None:
+        if errors:
+            return NameResult(name="", source="", error_code="all_sources_failed")
+        return NameResult(name="", source="", error_code="unavailable")
+
+    if is_english_name(resolved.name):
+        resolved.name_en = str(resolved.name).strip()
+    else:
+        resolved.name_en = resolve_english_name(symbol, market)
+    return resolved

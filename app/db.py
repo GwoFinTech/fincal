@@ -96,6 +96,7 @@ def init_db():
                 symbol TEXT NOT NULL,
                 market TEXT NOT NULL DEFAULT 'US',
                 company_name TEXT DEFAULT '',
+                company_name_en TEXT DEFAULT '',
                 report_date DATE NOT NULL,
                 report_type TEXT DEFAULT 'Q',
                 fiscal_year INTEGER,
@@ -129,7 +130,13 @@ def init_db():
         # row could not say whether its estimate and its actual were even the same
         # unit of money. ``actual_currency``/``actual_basis`` mirror the estimate
         # pair; historical rows keep NULL, which the read path reads as unknown.
+        # Issue #55: the iCal feed's ``lang=en`` branch read a ``company_name_en``
+        # field that no table ever had, so an English subscription silently kept
+        # the Chinese name.  The English name is a separate column on purpose:
+        # Kurumi supplies the display (usually Chinese) name and Longbridge
+        # ``static`` supplies the Latin one, and one must not overwrite the other.
         for column, definition in (
+            ("company_name_en", "TEXT"),
             ("date_source", "TEXT NOT NULL DEFAULT 'unknown'"), ("date_status", "TEXT NOT NULL DEFAULT 'scheduled'"),
             ("estimate_source", "TEXT"), ("estimate_as_of", "TIMESTAMPTZ"), ("estimate_currency", "TEXT"),
             ("estimate_basis", "TEXT"), ("actual_source", "TEXT"), ("actual_as_of", "TIMESTAMPTZ"),
@@ -174,9 +181,14 @@ def init_db():
         cur.execute("""CREATE TABLE IF NOT EXISTS stock_names (
             id BIGSERIAL PRIMARY KEY, symbol TEXT NOT NULL, market TEXT NOT NULL,
             company_name TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT '',
+            company_name_en TEXT NOT NULL DEFAULT '',
             fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             UNIQUE(symbol, market)
         )""")
+        # Issue #55: installations created before the English column existed keep
+        # their rows; CREATE TABLE does not add a column to them, so migrate
+        # additively (same idempotent pattern as the earnings columns above).
+        cur.execute("ALTER TABLE stock_names ADD COLUMN IF NOT EXISTS company_name_en TEXT NOT NULL DEFAULT ''")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_stock_names_lookup ON stock_names(symbol, market)")
         cur.execute("""CREATE TABLE IF NOT EXISTS earnings_guidance_status (
             id BIGSERIAL PRIMARY KEY, symbol TEXT NOT NULL, market TEXT NOT NULL,

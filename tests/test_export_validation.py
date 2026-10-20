@@ -133,6 +133,7 @@ def test_export_csv_headers_include_provenance_and_consensus():
     sample = [{
         "id": 1,
         "symbol": "AAPL", "market": "US", "company_name": "Apple Inc.",
+        "company_name_en": "Apple",
         "report_date": "2026-07-30", "report_type": "Q",
         "fiscal_year": 2026, "fiscal_quarter": 3,
         "before_after": "after", "eps_estimate": None, "eps_actual": 1.45,
