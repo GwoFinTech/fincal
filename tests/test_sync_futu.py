@@ -322,6 +322,30 @@ class FutuEpsFieldTests(TestCase):
         assert "'futu_invalid_field'" in sql
         assert "futu_invalid_field" in sync_futu.REPLACEABLE_ACTUAL_SOURCES
 
+    def test_a_provider_consistent_pair_is_never_broken_by_a_late_stage(self):
+        """Issue #91: Futu fills a gap, it does not sever an existing pair.
+
+        ``sync_all.sh`` runs this stage *after* longbridge, so writing here over a
+        Longbridge actual turned every such row into "Longbridge estimate × Futu
+        actual": two providers, neither stating a basis, therefore 「—」 in the
+        panel — even though both Longbridge figures are USD-converted and unit
+        consistent (TSM 4.31/ADS vs a 3.94 estimate; OpenD reports 136.25 TWD).
+        """
+        ctx = MagicMock()
+        ctx.get_financials_statements.return_value = (0, _income_response())
+        cursor = _RecordingCursor()
+        with patch.object(sync_futu, "check_cancelled"), _db_mock(cursor):
+            sync_futu.sync_actuals(ctx, 1, ["AAPL.US"])
+
+        updates = [sql for sql, _ in cursor.executed if "SET eps_actual" in sql or "SET revenue_actual" in sql]
+        assert updates, "the stage must still write a missing actual"
+        for sql in updates:
+            # the pairing guard is attached to every actuals UPDATE
+            assert "LOWER(actual_source) = LOWER(estimate_source)" in sql
+            assert "NOT (" in sql
+            # and the gap-filling path is still allowed
+            assert "COALESCE(actual_source, 'unknown') IN" in sql
+
 
 class FutuWatchdogTests(TestCase):
     """Issue #48: an expired watchdog must be catchable, not fatal."""

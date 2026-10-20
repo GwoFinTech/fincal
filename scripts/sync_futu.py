@@ -73,6 +73,24 @@ _REPLACEABLE_SOURCES_SQL = "(" + ", ".join(
     f"'{source}'" for source in REPLACEABLE_ACTUAL_SOURCES
 ) + ")"
 
+#: A same-provider pair must stay a pair (Issue #91).  ``sync_all.sh`` runs the
+#: Longbridge stage first and this stage second, so writing Futu's actual over a
+#: Longbridge one left almost every row in the default universe as
+#: "Longbridge estimate × Futu actual": different providers, neither of them
+#: stating an accounting basis, so ``comparison_unavailable_reason`` had to
+#: refuse the subtraction and the panel showed 「—」 for AAPL, AMD, AMZN …
+#: The two providers also quote different units — Longbridge USD-converts both
+#: sides (TSM 4.31/ADS against a 3.94 estimate) while OpenD reports the statement
+#: currency (TSM 136.25 TWD) — so replacing one side of a pair mixes units even
+#: when the currency happens to line up afterwards.  Futu now fills the *gap*
+#: (no actual yet) and leaves a provider-consistent pair alone.
+_KEEP_SAME_PROVIDER_PAIR_SQL = """
+    AND NOT (
+        estimate_source IS NOT NULL
+        AND actual_source IS NOT NULL
+        AND LOWER(actual_source) = LOWER(estimate_source)
+    )"""
+
 
 @dataclass(frozen=True)
 class StatementField:
@@ -863,6 +881,7 @@ def sync_actuals(ctx, run_id: int, symbols: list[str],
                                 WHERE symbol = %s AND market = %s AND fiscal_year = %s
                                 AND fiscal_quarter = %s
                                 AND COALESCE(actual_source, 'unknown') IN {_REPLACEABLE_SOURCES_SQL}
+                                {_KEEP_SAME_PROVIDER_PAIR_SQL}
                                 """,
                                 (eps.value, currency, basis, symbol, market, fy, fq),
                             )
@@ -875,6 +894,7 @@ def sync_actuals(ctx, run_id: int, symbols: list[str],
                                 WHERE symbol = %s AND market = %s AND fiscal_year = %s
                                 AND fiscal_quarter = %s
                                 AND COALESCE(actual_source, 'unknown') IN {_REPLACEABLE_SOURCES_SQL}
+                                {_KEEP_SAME_PROVIDER_PAIR_SQL}
                                 """,
                                 (revenue.value, currency, basis, symbol, market, fy, fq),
                             )
