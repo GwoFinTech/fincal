@@ -137,6 +137,19 @@ def next_calendar_cursor(api_next_date: str, last_report_date: str, current_star
     return max(candidates) if candidates else None
 
 
+#: Events requested per calendar call.  The provider caps one response at ~3,300
+#: events and, when a single day holds more than the requested count, it returns
+#: that many *and advances the cursor to the next date* — so the surplus is lost
+#: for good.  ``--count 300`` therefore kept 300 of the 3,320 events announced on
+#: 2026-05-07 (and of 1,735 on 2026-08-13, 2,509 on 2026-02-12): every busy
+#: earnings day silently lost ~90% of its releases, which is also why some of
+#: those symbols then appeared with no currency/time label at all (Issue #90).
+#: 10,000 is above the provider's own ceiling — raising it further returns the
+#: same totals (measured: 5,000 / 10,000 / 20,000 all returned 3,320) — so this
+#: asks for the whole day and leaves the ceiling to the provider.
+CALENDAR_PAGE_COUNT = 10000
+
+
 def fetch_calendar(market: str, start: str, end: str) -> list[dict]:
     """Fetch all earnings calendar pages from Longbridge, paginating via next_date."""
     all_pages = []
@@ -151,7 +164,7 @@ def fetch_calendar(market: str, start: str, end: str) -> list[dict]:
             "--market", market,
             "--start", cursor_start,
             "--end", end,
-            "--count", "300",
+            "--count", str(CALENDAR_PAGE_COUNT),
             "--format", "json",
         ]
         try:
@@ -172,6 +185,18 @@ def fetch_calendar(market: str, start: str, end: str) -> list[dict]:
             cursor_start = next_cursor
             continue
         all_pages.extend(pages)
+
+        # A page that fills the request is the one case where the next cursor
+        # still leaves events behind (see CALENDAR_PAGE_COUNT): the provider
+        # advances the date instead of paging, so say so instead of losing them
+        # silently (Issue #90).
+        for page in pages:
+            if len(page.get("infos") or []) >= CALENDAR_PAGE_COUNT:
+                logger.warning(
+                    "%s %s: %d events returned for one date — the provider's "
+                    "ceiling was reached, any surplus is not in this response",
+                    market, page.get("date"), len(page.get("infos") or []),
+                )
 
         next_date = data.get("next_date", "")
         last_page_date = pages[-1].get("date", "")
