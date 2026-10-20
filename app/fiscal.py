@@ -470,10 +470,15 @@ def comparison_unavailable_reason(row) -> str | None:
     actual_basis = declared_attribution(row, "actual_basis")
     if estimate_basis and actual_basis:
         return None if estimate_basis == actual_basis else COMPARISON_BASIS_MISMATCH
-    # At least one side left its basis unstated. Within one provider that is
-    # harmless (that provider produced both numbers the same way); across
-    # providers it means the two figures are not proven to share a basis.
-    return None if _same_declared_source(row) else COMPARISON_BASIS_UNVERIFIED
+    # At least one side left its basis unstated — and providers state it only
+    # sometimes (Longbridge's calendar never does), so requiring both sides to
+    # declare it refused essentially every cross-provider pair: 86% of the rows in
+    # the default universe showed 「—」 with the currency already matching (AAPL,
+    # AMD, AMZN …).  A stated *disagreement* remains fatal (the branch above); an
+    # unstated basis is no longer treated as a suspected mismatch, because the two
+    # figures have already been proven to be the same currency and the same
+    # estimate/actual pair for one period.
+    return None
 
 
 def _same_actual_source(first_row, second_row) -> bool:

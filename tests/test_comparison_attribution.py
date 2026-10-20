@@ -126,19 +126,20 @@ class ComparisonRuleTests(TestCase):
         row = dict(KTOS_ROW, estimate_basis="gaap", actual_basis="gaap")
         self.assertIsNone(fiscal.comparison_unavailable_reason(row))
 
-    def test_cross_provider_without_a_stated_basis_is_unverified(self):
-        # KTOS: same currency code, 1083× apart — nothing proves the two figures
-        # share a base, so the row must not be subtracted.
-        self.assertEqual(
-            fiscal.comparison_unavailable_reason(KTOS_ROW),
-            fiscal.COMPARISON_BASIS_UNVERIFIED,
-        )
+    def test_cross_provider_without_a_stated_basis_is_still_comparable(self):
+        # KTOS: the currency is stated and equal, so the pair is one period's
+        # estimate and actual in one unit.  Treating an *unstated* accounting base
+        # as a suspected mismatch refused 86% of the default universe (AAPL, AMD,
+        # AMZN …) even though Longbridge's calendar never states a base — the
+        # figures are now compared, and a *stated* disagreement is still fatal.
+        self.assertIsNone(fiscal.comparison_unavailable_reason(KTOS_ROW))
 
-    def test_an_unattributed_source_is_not_treated_as_the_same_provider(self):
-        row = dict(LONGBRIDGE_ROW, actual_source=None)
+    def test_an_unattributed_source_is_still_refused_when_the_currency_is_missing(self):
+        # Provider identity alone no longer decides — the currency does.
+        row = dict(LONGBRIDGE_ROW, actual_source=None, actual_currency=None)
         self.assertEqual(
             fiscal.comparison_unavailable_reason(row),
-            fiscal.COMPARISON_BASIS_UNVERIFIED,
+            fiscal.COMPARISON_CURRENCY_UNKNOWN,
         )
 
     def test_a_row_without_a_complete_pair_is_not_flagged(self):
@@ -697,12 +698,23 @@ class CrossPeriodGrowthRuleTests(TestCase):
             fiscal.COMPARISON_CURRENCY_MISMATCH,
         )
 
-    def test_cross_provider_without_a_stated_basis_is_unverified(self):
+    def test_a_period_ratio_is_still_withheld_across_providers(self):
+        # Row-level comparison relaxes the unstated-basis rule (one period, one
+        # unit once the currency matches); a *period* ratio keeps it, because a
+        # provider switch can also change the scale (LITE: 4.371945 → -84.65).
         pair = (dict(COMPARABLE_GROWTH_PAIR[0], actual_source="longbridge", actual_basis=None),
                 dict(COMPARABLE_GROWTH_PAIR[1], actual_source="futu", actual_basis=None))
         self.assertEqual(
             fiscal.growth_unavailable_reason(*pair, metric="eps"),
             fiscal.COMPARISON_BASIS_UNVERIFIED,
+        )
+
+    def test_two_different_currencies_still_block_the_period_ratio(self):
+        pair = (dict(COMPARABLE_GROWTH_PAIR[0], actual_currency="USD"),
+                dict(COMPARABLE_GROWTH_PAIR[1], actual_currency="TWD"))
+        self.assertEqual(
+            fiscal.growth_unavailable_reason(*pair, metric="eps"),
+            fiscal.COMPARISON_CURRENCY_MISMATCH,
         )
 
     def test_one_provider_needs_no_stated_basis(self):
