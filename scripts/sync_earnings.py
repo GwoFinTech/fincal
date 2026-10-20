@@ -545,6 +545,21 @@ def flush_batch(cur, rows: list[tuple]) -> FlushStats:
     rows = outcome.rows
     if not rows:
         return FlushStats(dropped_disclosures=len(outcome.dropped) + collapse_drops)
+    # Issue #87: one announcement is one row even when the two events carry
+    # different fiscal labels (or none), which the identity-grouped pass above
+    # cannot see.  Runs before the insert so the batch never mints a twin.
+    same_date = fiscal.settle_same_date_rows(cur, rows)
+    rows = same_date.rows
+    for taken in same_date.promoted:
+        logger.info(
+            "promoted same-day disclosure %s.%s %s: %s → %s (row %s, Issue #87)",
+            taken["symbol"], taken["market"], taken["report_date"], taken["from"],
+            taken["to"], taken["id"],
+        )
+    if not rows:
+        return FlushStats(
+            dropped_disclosures=len(outcome.dropped) + collapse_drops + len(same_date.dropped),
+        )
     for move in outcome.moves:
         logger.info(
             "rescheduled %s.%s FY%s Q%s: %s → %s (row %s, Issue #50)",
@@ -627,7 +642,8 @@ def flush_batch(cur, rows: list[tuple]) -> FlushStats:
         FROM earnings e JOIN (VALUES %s) AS v(symbol,market,report_date) ON (e.symbol,e.market,e.report_date)=(v.symbol,v.market,(v.report_date)::date)
         WHERE e.eps_estimate IS NOT NULL OR e.revenue_estimate IS NOT NULL""", keys)
     return FlushStats(rows=len(rows), moves=len(outcome.moves), skipped=len(outcome.skipped),
-                      dropped_disclosures=len(outcome.dropped) + collapse_drops,
+                      dropped_disclosures=(len(outcome.dropped) + collapse_drops
+                                           + len(same_date.dropped)),
                       takeovers=sum(1 for move in outcome.moves if move.get("kind") == "takeover"),
                       identity_skipped=identity_skipped)
 

@@ -255,12 +255,22 @@ def fiscal_label_consistent(symbol, market, fiscal_year, fiscal_quarter,
 
 
 def collapse_fiscal_duplicates(rows: list[dict]) -> list[dict]:
-    """Collapse rows sharing a fiscal period down to one authoritative row.
+    """Collapse rows sharing a fiscal period — or one announcement's date — to one.
 
-    Rows without a fiscal identity are passed through untouched.  The winner is
-    chosen with :func:`authority_key` and keeps its own field values (no
-    cross-row merging, no invented arbitration).  Output stays in the API's
+    Rows without a fiscal identity are passed through the period pass untouched.
+    The winner is chosen with :func:`authority_key` and keeps its own field values
+    (no cross-row merging, no invented arbitration).  Output stays in the API's
     documented ``report_date, market, symbol`` order.
+
+    Issue #87: the provider emits one announcement twice — as a quarterly
+    ``release`` and as a half-year/annual ``disclosure`` — and the two need not
+    share a fiscal label (the release can still carry a pre-#75 ``Q4`` label while
+    the disclosure is the corrected ``Q2``) or carry one at all (ADR symbols).
+    Their fiscal identities differ, so the period pass cannot see them as one
+    event even though every read path shows them as two rows on one date.  A
+    same-date pass therefore collapses a *mixed* release/disclosure group — and
+    only a mixed one, so two same-day disclosures or two releases are left alone —
+    keeping the release, which is the period's own event.
     """
     kept: list[dict] = []
     positions: dict[tuple, int] = {}
@@ -275,7 +285,43 @@ def collapse_fiscal_duplicates(rows: list[dict]) -> list[dict]:
             kept.append(row)
         elif authority_key(row) < authority_key(kept[position]):
             kept[position] = row
-    return sorted(kept, key=sort_key)
+    return sorted(_collapse_same_date(kept), key=sort_key)
+
+
+def _same_date_rank(row) -> tuple:
+    """Rank same-day rows: the release wins, then :func:`authority_key`."""
+    return (1 if is_disclosure(row.get("report_type")) else 0, authority_key(row))
+
+
+def _collapse_same_date(rows: list[dict]) -> list[dict]:
+    """Keep one row per ``(symbol, market, report_date)`` when a disclosure is involved.
+
+    A release and a disclosure on the same date are the same announcement, so the
+    release survives; two rows of the same kind are left as they are (a genuinely
+    different second announcement must not be folded away — Issue #87 risk note).
+    """
+    collapsed: list[dict] = []
+    positions: dict[tuple, int] = {}
+    for row in rows:
+        row_date = report_date_of(row)
+        if row_date is None or not row.get("symbol") or not row.get("market"):
+            collapsed.append(row)
+            continue
+        key = (row.get("symbol"), row.get("market"), row_date)
+        position = positions.get(key)
+        if position is None:
+            positions[key] = len(collapsed)
+            collapsed.append(row)
+            continue
+        incumbent = collapsed[position]
+        if is_disclosure(row.get("report_type")) == is_disclosure(incumbent.get("report_type")):
+            # Two releases (or two rows of one disclosure kind) on one date: not
+            # provably the same announcement, so keep both.
+            collapsed.append(row)
+            continue
+        if _same_date_rank(row) < _same_date_rank(incumbent):
+            collapsed[position] = row
+    return collapsed
 
 
 def collapse_rows_by_period(rows: list, identity_of, date_of, rank_of=None, dropped=None) -> list:
@@ -482,9 +528,12 @@ def growth_unavailable_reason(current_row, prior_row, metric: str = "eps") -> st
     prior_basis = declared_attribution(prior_row, "actual_basis")
     if current_basis and prior_basis:
         return None if current_basis == prior_basis else COMPARISON_BASIS_MISMATCH
-    # At least one period left its basis unstated. One provider computing both
-    # actuals is harmless; across providers the two figures are not proven to
-    # share a basis (GAAP against adjusted, per-share against per-ADR).
+    # The row-level rule no longer treats an unstated basis as a mismatch, but a
+    # *period* ratio is a different risk: the two actuals come from different
+    # periods and a provider switch can change the unit as well (LITE: 4.371945
+    # from Longbridge against -84.65 from Futu — the same currency, not the same
+    # scale, which rendered -2037% as 同比).  One provider computing both actuals
+    # is harmless; across providers an unstated basis keeps the ratio withheld.
     return None if _same_actual_source(current_row, prior_row) else COMPARISON_BASIS_UNVERIFIED
 
 
@@ -644,6 +693,138 @@ _TAKEOVER_ASSIGNMENT = (
     " revenue_actual = COALESCE(%s, revenue_actual),"
     " updated_at = NOW()"
 )
+
+
+@dataclass
+class SameDateOutcome:
+    """What :func:`settle_same_date_rows` wrote, dropped and promoted.
+
+    ``rows`` are the rows the caller may still insert; ``dropped`` are the
+    disclosures that this announcement already had a row for (either a release in
+    the same batch, or a stored release on that date); ``promoted`` are stored
+    disclosure rows that this batch's release turned into the period's release row
+    (the row id, so the caller can log it).
+    """
+
+    rows: list = field(default_factory=list)
+    dropped: list = field(default_factory=list)
+    promoted: list = field(default_factory=list)
+
+
+def settle_same_date_rows(cur, rows, *, symbol=0, market=1, report_date=3,
+                          report_type=4, fiscal_year=5, fiscal_quarter=6) -> SameDateOutcome:
+    """Make one announcement one row, independent of its fiscal label (Issue #87).
+
+    The provider emits the same announcement as a quarterly ``release`` and as a
+    half-year/annual ``disclosure``, and the two rows need not share a fiscal
+    identity: the release may still carry a pre-#75 label (``FY2026 Q4``) while the
+    disclosure is the corrected ``Q2``, and for ADR symbols neither row carries an
+    identity at all.  ``reschedule_confirmed_rows`` groups by *fiscal identity*, so
+    it never sees those pairs — and the table's unique key is
+    ``(symbol, market, report_date, report_type)``, so the second event was simply
+    inserted: 85 duplicate groups in production.
+
+    This pass is date-based instead:
+
+    * an incoming disclosure whose date already has a release (in this batch or
+      stored) is dropped — the release is the period's own event (Issue #50);
+    * an incoming release whose date is held by a single stored disclosure
+      *promotes* that row (``report_type`` becomes the release's, and a NULL fiscal
+      identity is filled from the release) so the caller's upsert merges into it
+      instead of adding a twin.  The promotion runs in a savepoint and is skipped
+      if it would collide, so a data conflict costs one row, not the batch.
+    """
+    from psycopg2 import errors as pg_errors
+
+    def date_key(value):
+        """The report date as a ``date`` — the batch carries ISO strings, the DB rows carry dates."""
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        try:
+            return date.fromisoformat(str(value)[:10])
+        except (TypeError, ValueError):
+            return str(value)
+
+    release_dates = {
+        (row[symbol], row[market], date_key(row[report_date]))
+        for row in rows if not is_disclosure(row[report_type])
+    }
+    kept: list = []
+    dropped: list = []
+    for row in rows:
+        if is_disclosure(row[report_type]) and (
+            (row[symbol], row[market], date_key(row[report_date])) in release_dates
+        ):
+            dropped.append(row)
+            continue
+        kept.append(row)
+    if not kept:
+        return SameDateOutcome(rows=[], dropped=dropped)
+
+    pairs = sorted({(row[symbol], row[market], date_key(row[report_date])) for row in kept})
+    cur.execute(
+        """SELECT id, symbol, market, report_date, report_type, is_predicted
+           FROM earnings
+           WHERE (symbol, market, report_date) IN %s""",
+        (tuple(pairs),),
+    )
+    stored: dict[tuple, list[dict]] = {}
+    for record in cur.fetchall() or ():
+        if not isinstance(record, dict) or "symbol" not in record:
+            # A cursor without a dict row factory cannot describe stored rows;
+            # the pass then simply has nothing to compare against.
+            continue
+        entry = dict(record)
+        stored.setdefault(
+            (entry["symbol"], entry["market"], date_key(entry["report_date"])), []
+        ).append(entry)
+
+    promoted: list = []
+    survivors: list = []
+    for row in kept:
+        key = (row[symbol], row[market], date_key(row[report_date]))
+        group = stored.get(key, [])
+        releases = [item for item in group if not is_disclosure(item["report_type"])]
+        disclosures = [item for item in group if is_disclosure(item["report_type"])]
+
+        if is_disclosure(row[report_type]) and releases:
+            dropped.append(row)
+            continue
+
+        if not is_disclosure(row[report_type]) and not releases and len(disclosures) == 1:
+            incumbent = disclosures[0]
+            if not incumbent["is_predicted"]:
+                cur.execute("SAVEPOINT earnings_same_date")
+                try:
+                    cur.execute(
+                        """UPDATE earnings
+                              SET report_type = %s,
+                                  fiscal_year = CASE WHEN fiscal_year IS NULL THEN %s
+                                                     ELSE fiscal_year END,
+                                  fiscal_quarter = CASE WHEN fiscal_quarter IS NULL THEN %s
+                                                        ELSE fiscal_quarter END,
+                                  updated_at = NOW()
+                            WHERE id = %s AND report_type = %s""",
+                        (row[report_type] or DEFAULT_REPORT_TYPE, row[fiscal_year],
+                         row[fiscal_quarter], incumbent["id"], incumbent["report_type"]),
+                    )
+                    cur.execute("RELEASE SAVEPOINT earnings_same_date")
+                except pg_errors.UniqueViolation:
+                    cur.execute("ROLLBACK TO SAVEPOINT earnings_same_date")
+                    logger.warning(
+                        "same-date promotion skipped %s.%s %s: row %s already owns that fiscal period",
+                        row[symbol], row[market], row[report_date], incumbent["id"],
+                    )
+                else:
+                    promoted.append({"id": incumbent["id"], "symbol": row[symbol],
+                                     "market": row[market], "report_date": row[report_date],
+                                     "from": incumbent["report_type"],
+                                     "to": row[report_type] or DEFAULT_REPORT_TYPE})
+                    incumbent["report_type"] = row[report_type] or DEFAULT_REPORT_TYPE
+        survivors.append(row)
+    return SameDateOutcome(rows=survivors, dropped=dropped, promoted=promoted)
 
 
 def reschedule_confirmed_rows(cur, rows, *, symbol=0, market=1, report_date=3,
