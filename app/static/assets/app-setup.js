@@ -1,4 +1,4 @@
-  const { createApp, ref, computed, onMounted, watch } = Vue;
+  const { createApp, ref, computed, onMounted, watch, nextTick } = Vue;
 
   // ── localYmd: format a Date as a local YYYY-MM-DD string ──────────
   // Previously the date window (`start`/`end`), `today`, and the calendar
@@ -224,11 +224,21 @@
       decision.value = null;
       selectedDay.value = calendarCells.value.find(cell => cell.isToday) || null;
     }
+    // A cell is a control now (`tabindex="0"`, Enter/Space), so it needs a name:
+    // "10月21日周三，5 个财报" is what a screen reader announces instead of a bare day.
+    function cellAriaLabel(cell) {
+      if (!cell || !cell.date) return '';
+      const when = cell.date.toLocaleDateString('zh-CN',
+        { month: 'long', day: 'numeric', weekday: 'short' });
+      const count = (cell.earnings || []).length;
+      return count ? `${when}，${count} 个财报` : `${when}，无财报`;
+    }
 
     return {
       viewMode, currentDate, selectedEarning, decision, selectedDay,
       weekdays, monthLabel, calendarCells,
       prevMonth, nextMonth, goToday, selectEarning, selectCell, clearSelection,
+      cellAriaLabel,
     };
   }
 
@@ -735,6 +745,49 @@
       // 7. Formatters
       const fmt = useFormatters();
 
+      // ── Dialog focus management ──────────────────────────────
+      // A dialog needs a focus owner: without one Esc never reaches its handler, Tab
+      // walks out through the backdrop into the page behind it, and closing strands
+      // focus on <body>. Both dialogs (订阅日历, 管理) go through the same two helpers.
+      const icalDialog = ref(null);
+      const adminDialog = ref(null);
+      let dialogReturnFocus = null;
+
+      function trapTab(event) {
+        const dialog = event.currentTarget;
+        const focusables = [...dialog.querySelectorAll(
+          'a[href], button:not([disabled]), input:not([disabled]), ' +
+          'select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        )].filter(el => el.offsetWidth || el.offsetHeight || el === document.activeElement);
+        if (!focusables.length) return;
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        } else if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        }
+      }
+
+      watch([() => ical.showIcalModal.value, () => admin.showAdmin.value],
+        async ([icalOpen, adminOpen]) => {
+          const dialog = icalOpen ? icalDialog.value : adminOpen ? adminDialog.value : null;
+          if (dialog) {
+            dialogReturnFocus = document.activeElement;
+            document.body.style.overflow = 'hidden';
+            await nextTick();
+            const firstControl = dialog.querySelector(
+              'input, select, textarea, button:not([disabled]), a[href]');
+            (firstControl || dialog).focus();
+            return;
+          }
+          document.body.style.overflow = '';
+          if (dialogReturnFocus && dialogReturnFocus.focus) dialogReturnFocus.focus();
+          dialogReturnFocus = null;
+        }, { flush: 'post' });  // the dialog ref only exists after the DOM update
+
       // ── Earnings loading ─────────────────────────────────────
       async function loadEarnings() {
         loading.value = true;
@@ -796,6 +849,8 @@
         viewMode: cal.viewMode, currentDate: cal.currentDate,
         selectedEarning: cal.selectedEarning, decision: cal.decision, selectedDay: cal.selectedDay,
         weekdays: cal.weekdays, monthLabel: cal.monthLabel, calendarCells: cal.calendarCells,
+        cellAriaLabel: cal.cellAriaLabel,
+        icalDialog, adminDialog, trapTab,
         prevMonth: cal.prevMonth, nextMonth: cal.nextMonth, goToday: cal.goToday,
         selectCell: cal.selectCell, clearSelection: cal.clearSelection,
         selectEarning: (e, day) => cal.selectEarning(e, day, apiFetch),
