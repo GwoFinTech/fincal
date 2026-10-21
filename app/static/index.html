@@ -109,6 +109,10 @@
     /* ── Calendar ── */
     .calendar-cell { min-height: 112px; padding: 7px; position: relative; overflow: hidden; cursor: pointer; transition: background 0.15s; }
     .calendar-cell .before-tag, .calendar-cell .after-tag { display: none; }
+    /* The badge's metrics live here, not in an inline style: an inline
+       `font-size:10px;padding:1px 5px` wins over the narrow-screen rules below,
+       which is how `ASML ↑` kept overflowing a 42px-wide phone cell. */
+    .calendar-cell .badge { font-size: 10px; padding: 1px 5px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
     .calendar-cell .cal-scroll { overflow-y: auto; overflow-x: hidden; scrollbar-width: none; }
     .calendar-cell .cal-scroll::-webkit-scrollbar { display: none; }
     .calendar-cell:hover { background: var(--surface-raised); }
@@ -135,6 +139,31 @@
       .calendar-workspace { grid-template-columns: minmax(0, 1fr) 400px; gap: 20px; }
       .calendar-cell { min-height: 126px; }
     }
+
+    /* ── Narrow screens ──────────────────────────────────────────────────────
+       A month cell is ~50px wide on a phone, so `2068.HK 26Q3 ↑` could never fit
+       and the cell's `overflow: hidden` simply sliced the code in half (the market
+       badge already carries US/HK in colour, and the fiscal label repeats on every
+       event of the month). Narrow screens therefore print the numeric code and
+       drop the fiscal label; the full code stays in the badge's title. */
+    .calendar-cell .sym-short { display: none; }
+    @media (max-width: 640px) {
+      .calendar-cell { padding: 4px; }
+      .calendar-cell .badge { font-size: 9.5px; padding: 1px 3px; gap: 2px; }
+      .calendar-cell .sym-full, .calendar-cell .fq-tag { display: none; }
+      .calendar-cell .sym-short { display: inline; }
+    }
+    @media (max-width: 420px) {
+      .calendar-cell .badge { font-size: 9px; padding: 1px 2px; gap: 1px; }
+    }
+
+    /* The detail panel is a whole screen below the month grid under 1024px, so a
+       tap on a day scrolls to it — leave room for the sticky header. */
+    .selection-panel { scroll-margin-top: 52px; }
+
+    /* Currency unit of a column; highlighted when the two sides disagree. */
+    .ccy { font-size: 9.5px; font-weight: 600; letter-spacing: .02em; color: var(--text-muted); }
+    .ccy-warn { color: #fbbf24; }
 
     /* ── Animations ── */
 
@@ -366,12 +395,11 @@
             <div class="cal-scroll space-y-0.5" style="max-height: 72px;">
               <div v-for="e in cell.earnings.slice(0, 4)" :key="e.id != null ? e.id : e.symbol+e.market+e.report_date+(e.report_type||'')"
                    class="badge cursor-pointer" :class="[('badge-' + e.market), { 'badge-mine': isMine(e), 'badge-predicted': e.is_predicted }]"
-                   style="font-size:10px;padding:1px 5px;"
                    :title="e.company_name + (e.is_predicted ? ' (预测)' : '')"
                    @click.stop="selectEarning(e, cell)">
                 <span v-if="e.before_after === 'before'" class="before-tag">盘前</span>
                 <span v-else-if="e.before_after === 'after'" class="after-tag">盘后</span>
-                {{ e.symbol }}
+                <span class="sym-full">{{ e.symbol }}</span><span class="sym-short">{{ compactSymbol(e.symbol) }}</span>
                 <span v-if="e.fiscal_year && e.fiscal_quarter" class="fq-tag">{{ fqLabel(e.fiscal_year, e.fiscal_quarter) }}</span>
                 <template v-if="hasComparison(e, 'eps')">
                   <span :class="epsSurplusClass(e)" style="font-size:9px;">{{ epsSurplus(e) > 0 ? '↑' : epsSurplus(e) < 0 ? '↓' : '—' }}</span>
@@ -444,23 +472,31 @@
               <svg class="w-3.5 h-3.5" style="color:var(--text-muted);" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 19V5m0 14h16M8 16v-5m4 5V8m4 8v-3"/></svg>
               业绩对比
             </div>
-            <div class="surface mb-3 overflow-x-auto">
-              <table class="w-full min-w-[390px] text-[11px]">
+            <div class="surface mb-3">
+              <!-- No min-width here: the panel is 340-400px wide, and a table that
+                   insists on 390px was sliced by the panel — the 「较预期」 column
+                   (the whole point of the section) lost half of every figure. -->
+              <table class="w-full text-[11px] table-fixed">
                 <thead style="background:var(--surface-raised);color:var(--text-muted);">
-                  <tr><th class="text-left p-2 font-medium">指标</th><th class="text-right p-2 font-medium">预期值<br><span class="font-normal text-[10px]">绝对值 / 同比</span></th><th class="text-right p-2 font-medium">实际值<br><span class="font-normal text-[10px]">绝对值 / 同比</span></th><th class="text-right p-2 font-medium">较预期<br><span class="font-normal text-[10px]">绝对值 / 涨跌幅</span></th></tr>
+                  <tr>
+                    <th class="text-left p-2 font-medium" style="width:17%">指标</th>
+                    <th class="text-right p-2 font-medium" style="width:26%">预期值 <span class="ccy">{{ currencyOf(selectedEarning.estimate_currency) || '—' }}</span><br><span class="font-normal text-[10px]">绝对值 / 同比</span></th>
+                    <th class="text-right p-2 font-medium" style="width:26%">实际值 <span class="ccy" :class="{ 'ccy-warn': currenciesDiffer(selectedEarning) }">{{ currencyOf(selectedEarning.actual_currency) || '—' }}</span><br><span class="font-normal text-[10px]">绝对值 / 同比</span></th>
+                    <th class="text-right p-2 font-medium" style="width:31%">较预期<br><span class="font-normal text-[10px]">绝对值 / 涨跌幅</span></th>
+                  </tr>
                 </thead>
                 <tbody>
-                  <tr style="border-top:1px solid var(--border);"><th class="text-left p-2 font-medium">营收</th><td class="p-2 text-right">{{ fmtBigNum(selectedEarning.revenue_estimate) }}<br><span style="color:var(--text-muted);">—</span></td><td class="p-2 text-right">{{ fmtBigNum(selectedEarning.revenue_actual) }}<br><span style="color:var(--text-muted);" :title="growthNote(decision, 'revenue_yoy')">{{ growthCell(decision, 'revenue_yoy') }}</span></td><td class="p-2 text-right" :class="revSurplusClass(selectedEarning)" :title="comparisonNote(selectedEarning)">
+                  <tr style="border-top:1px solid var(--border);"><th class="text-left p-2 font-medium">营收</th><td class="p-2 text-right whitespace-nowrap">{{ fmtBigNum(selectedEarning.revenue_estimate) }}<br><span style="color:var(--text-muted);">—</span></td><td class="p-2 text-right whitespace-nowrap">{{ fmtBigNum(selectedEarning.revenue_actual) }}<br><span style="color:var(--text-muted);" :title="growthNote(decision, 'revenue_yoy')">{{ growthCell(decision, 'revenue_yoy') }}</span></td><td class="p-2 text-right whitespace-nowrap" :class="revSurplusClass(selectedEarning)" :title="comparisonNote(selectedEarning)">
                     <template v-if="hasComparison(selectedEarning, 'revenue')">{{ fmtBigNum(metricDelta(selectedEarning.revenue_actual, selectedEarning.revenue_estimate)) }}<br>{{ signedPct(revSurplus(selectedEarning)) }}</template>
-                    <template v-else>—<br><span style="color:var(--text-muted);">{{ comparisonNote(selectedEarning) || '—' }}</span></template>
+                    <template v-else>—<br><span style="color:var(--text-muted);">{{ comparisonShortNote(selectedEarning) || '—' }}</span></template>
                   </td></tr>
-                  <tr style="border-top:1px solid var(--border);"><th class="text-left p-2 font-medium">EPS</th><td class="p-2 text-right">{{ fmtNum(selectedEarning.eps_estimate) }}<br><span style="color:var(--text-muted);">—</span></td><td class="p-2 text-right">{{ fmtNum(selectedEarning.eps_actual) }}<br><span style="color:var(--text-muted);" :title="growthNote(decision, 'eps_yoy')">{{ growthCell(decision, 'eps_yoy') }}</span></td><td class="p-2 text-right" :class="epsSurplusClass(selectedEarning)" :title="comparisonNote(selectedEarning)">
+                  <tr style="border-top:1px solid var(--border);"><th class="text-left p-2 font-medium">EPS</th><td class="p-2 text-right whitespace-nowrap">{{ fmtNum(selectedEarning.eps_estimate) }}<br><span style="color:var(--text-muted);">—</span></td><td class="p-2 text-right whitespace-nowrap">{{ fmtNum(selectedEarning.eps_actual) }}<br><span style="color:var(--text-muted);" :title="growthNote(decision, 'eps_yoy')">{{ growthCell(decision, 'eps_yoy') }}</span></td><td class="p-2 text-right whitespace-nowrap" :class="epsSurplusClass(selectedEarning)" :title="comparisonNote(selectedEarning)">
                     <template v-if="hasComparison(selectedEarning, 'eps')">{{ fmtNum(metricDelta(selectedEarning.eps_actual, selectedEarning.eps_estimate)) }}<br>{{ signedPct(epsSurplus(selectedEarning)) }}</template>
-                    <template v-else>—<br><span style="color:var(--text-muted);">{{ comparisonNote(selectedEarning) || '—' }}</span></template>
+                    <template v-else>—<br><span style="color:var(--text-muted);">{{ comparisonShortNote(selectedEarning) || '—' }}</span></template>
                   </td></tr>
                 </tbody>
               </table>
-              <p class="px-3 pb-3 text-[11px] leading-4" style="color:var(--text-muted);">预期来源：{{ estimateSourceLabel(selectedEarning) }}。同比仅基于已披露实际值；预期同比缺少同口径历史一致预期时显示“—”。预期与实际<b>币种不同</b>（如报表币种与报价币种）、<b>口径未标明</b>或<b>口径未经同一来源确认</b>时，「较预期」显示“—”（数值仍按各自来源原样列出），避免把不同口径的两个数相减。本期与上期的实际值之间同样适用该规则：两侧币种/口径不一致时，同比显示“不可比”而不是百分比（「—」不是数据缺失）。</p>
+              <p class="px-3 pb-3 text-[11px] leading-4" style="color:var(--text-muted);">预期来源：{{ estimateSourceLabel(selectedEarning) }}。「较预期」需要两侧<strong style="color:var(--text-secondary);">都标明币种且相同</strong>：币种缺失、两币种不同，或双方都声明了会计口径而口径不同时显示「—」（数值仍按各自来源原样列出），避免把不同单位的两个数相减。同比只基于已披露实际值，两侧币种或口径不一致时显示「不可比」（「—」不是数据缺失）。本期与上期的实际值沿用同一规则。</p>
             </div>
 
             <!-- Longbridge quarterly consensus section -->

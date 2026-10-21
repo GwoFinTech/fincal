@@ -196,16 +196,28 @@
       if (day) selectedDay.value = day;
       selectedEarning.value = e;
       decision.value = null;
+      revealSelectionPanel();
       if (e.id) {
         const data = await apiFetch(`/api/earnings/${e.id}/decision`);
         if (selectedEarning.value === e && data && data.status === 'available') decision.value = data;
       }
+    }
+    // Under 1024px the detail panel is rendered *after* the whole month grid, so a
+    // tap on a day or a symbol looked like it did nothing — the list was more than
+    // a screen below. Desktop keeps both columns in view, so nothing moves there.
+    const NARROW_VIEWPORT = '(max-width: 1023px)';
+    function revealSelectionPanel() {
+      if (typeof window === 'undefined' || !window.matchMedia) return;
+      if (!window.matchMedia(NARROW_VIEWPORT).matches) return;
+      const panel = document.querySelector('.selection-panel');
+      if (panel) panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
     function selectCell(cell) {
       if (cell.earnings.length === 0) return;
       selectedEarning.value = null;
       decision.value = null;
       selectedDay.value = cell;
+      revealSelectionPanel();
     }
     function clearSelection() {
       selectedEarning.value = null;
@@ -509,6 +521,14 @@
     function comparisonNote(e) {
       return attributionNote(e && e.comparison_unavailable_reason, '预期与实际');
     }
+    // The 「较预期」 cell is ~110px wide: print the cause (`币种不同`), not the whole
+    // sentence — `预期与实际币种不同，无法比较` wrapped onto three lines inside the
+    // row it was explaining. The full wording stays in the cell's title and in the
+    // footnote below the table.
+    function comparisonShortNote(e) {
+      const reason = e && e.comparison_unavailable_reason;
+      return reason ? (ATTRIBUTION_LABELS[reason] || '口径不可比') : '';
+    }
     // Issue #63: 同比/环比 subtract two *different* periods' actuals, so the
     // row-level guard above never covered them — production rendered "+5647.7%"
     // for TSM while the same panel showed "—" for that row's 较预期. The API now
@@ -615,6 +635,27 @@
       return actual == null || estimate == null ? null : Number(actual) - Number(estimate);
     }
     function fmtNum(n) { return n == null ? '—' : Number(n).toFixed(2); }
+    // The month cell is ~50px wide on a phone, where `2068.HK 26Q3` was simply
+    // sliced by the cell's overflow. The suffix is redundant inside the calendar —
+    // the badge is colour-coded per market and the legend says so — so narrow
+    // screens print `2068`; the title attribute still carries the full code.
+    function compactSymbol(symbol) {
+      return String(symbol == null ? '' : symbol).replace(/\.(HK|US)$/i, '');
+    }
+    // A stored label can be the literal string "unknown" (Longbridge's calendar
+    // never states a currency, and the sync writes that sentinel rather than NULL),
+    // which must read as "not stated" — printing "unknown" as a unit is noise.
+    function currencyOf(value) {
+      const text = value == null ? '' : String(value).trim();
+      return text === '' || text.toLowerCase() === 'unknown' ? '' : text;
+    }
+    // Estimate and actual in different currencies is exactly why 「较预期」 is
+    // withheld, so the unit has to be visible: same code → muted, different → warn.
+    function currenciesDiffer(e) {
+      const estimate = currencyOf(e && e.estimate_currency);
+      const actual = currencyOf(e && e.actual_currency);
+      return Boolean(estimate && actual && estimate !== actual);
+    }
     function fmtPct(ratio) { return ratio == null ? '—' : (ratio * 100).toFixed(1) + '%'; }
     function signedPct(ratio) {
       if (ratio == null) return '—';
@@ -655,6 +696,7 @@
       growthValue, growthReason, growthNote, growthCell, growthSuppressedNote,
       beatMissStreak, beatMissStreakText, beatMissStreakNote,
       metricDelta, fmtNum, fmtPct, signedPct, fmtBigNum,
+      compactSymbol, currenciesDiffer, currencyOf, comparisonShortNote,
       estimateSourceLabel, hasLongbridgeConsensus, fqLabel, periodLabel,
     };
   }
