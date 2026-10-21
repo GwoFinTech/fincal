@@ -196,3 +196,47 @@ def test_the_panel_leaves_room_for_the_sticky_header():
     assert ".selection-panel { scroll-margin-top: 52px; }" in html, (
         "without this the scrolled panel lands under the sticky header"
     )
+
+# ── the day list's figures ──────────────────────────────────────────────────
+
+def test_the_day_row_figures_share_one_fixed_column():
+    """Value and beat/miss percentage used to be two auto-width flex items.
+
+    The percentage therefore floated further right than the number it belongs to,
+    and both moved whenever a digit count changed — the list read as ragged.
+    """
+    html = page()
+    css = html[html.index(".day-row-num {"):html.index("}", html.index(".day-row-num {"))]
+
+    assert "width: 74px" in css, "the column must be fixed width to line up across rows"
+    assert "text-align: right" in css
+    assert "font-variant-numeric: tabular-nums" in css, (
+        "proportional digits defeat the alignment the fixed column provides"
+    )
+
+
+def test_the_percentage_sits_under_the_value_in_the_same_cell():
+    html = page()
+    row = html[html.index('class="day-row-main day-row-num'):html.index('class="day-row-action')]
+
+    # Both lines belong to the numeric button; a third flex sibling would drift again.
+    assert "fmtNum(e.eps_actual)" in row
+    assert "fmtPct(epsSurplus(e))" in row
+    assert row.count('class="block') >= 2
+
+
+def test_the_watchlist_toggle_is_an_icon_not_a_word():
+    html = page()
+    row = html[html.index('class="day-row-action'):html.index("</button>", html.index('class="day-row-action'))]
+
+    assert "☆ 加自选" not in row and "★ 已自选" not in row, (
+        "the label made the star as wide as the numbers column and pushed them apart"
+    )
+    assert 'aria-label="' in row, "an icon-only button still needs an accessible name"
+
+
+def test_the_estimate_is_labelled_when_no_actual_exists():
+    html = page()
+    row = html[html.index('class="day-row-main day-row-num'):html.index('class="day-row-action')]
+
+    assert "预期 {{ fmtNum(e.eps_estimate) }}" in row

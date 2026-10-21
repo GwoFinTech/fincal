@@ -130,6 +130,16 @@
     .day-row:hover { background: var(--border); }
     .day-row-main { border-radius: 8px; }
     .day-row-main:focus-visible, .day-row-action:focus-visible { outline: 2px solid var(--primary-light); outline-offset: 2px; }
+    /* Every row's figures sit in one fixed, right-aligned, tabular column. Before
+       this, the value and the beat/miss percentage were two auto-width flex items,
+       so the percentage floated further right than the number it belonged to and the
+       pair moved whenever a digit count changed. */
+    .day-row-num { width: 74px; text-align: right; font-size: 12px; line-height: 1.3;
+      font-variant-numeric: tabular-nums; }
+    .day-row { font-variant-numeric: tabular-nums; }
+    .day-row-action { width: 30px; min-width: 30px; min-height: 30px; padding: 0;
+      font-size: 14px; border: 1px solid var(--border); }
+    .detail-value, .ui-dialog table { font-variant-numeric: tabular-nums; }
     .calendar-cell.out { opacity: 0.35; }
     .calendar-cell.today .day-num { background: var(--primary); color: white; width: 24px; height: 24px; border-radius: 50%; display: flex; align-items: center; justify-content: center; }
     .calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 1px; background: var(--border); border-radius: 12px; overflow: hidden; }
@@ -581,7 +591,7 @@
                `$event.target.style` — unreachable from the keyboard, and the wrong
                element got repainted whenever the pointer landed on a child. -->
           <div v-for="e in selectedDay.earnings" :key="e.id != null ? e.id : e.symbol+e.market+e.report_date+(e.report_type||'')"
-               class="day-row flex items-center gap-2.5 p-1 rounded-lg transition">
+               class="day-row flex items-center gap-2 p-1 rounded-lg transition">
             <button type="button"
                     class="day-row-main flex-1 min-w-0 text-left flex items-center gap-2.5 p-1.5"
                     :aria-label="(e.symbol + ' ' + (e.company_name || '') + ' 查看详情').trim()"
@@ -598,21 +608,17 @@
                 <span class="block text-[11px] truncate" style="color:var(--text-muted);" v-if="e.company_name">{{ e.company_name }}</span>
               </span>
             </button>
-            <div class="text-right text-[12px] flex flex-col items-end gap-1 shrink-0">
-              <button v-if="user" type="button" @click="toggleWatchlist(e.symbol, e.market)" class="day-row-action ui-btn ui-btn-ghost" :class="isMine(e) ? 'text-amber-400' : 'text-zinc-500'" style="padding:3px 8px;font-size:11px;border:1px solid var(--border);border-radius:6px;" :title="isMine(e) ? '从自选移除' : '加入自选'" aria-label="切换自选">
-                {{ isMine(e) ? '★ 已自选' : '☆ 加自选' }}
-              </button>
-              <button v-if="e.eps_estimate != null || e.eps_actual != null" type="button"
-                      class="day-row-main text-right"
-                      :aria-label="(e.symbol + ' 查看详情').trim()"
-                      @click="selectEarning(e)">
-                <span v-if="e.eps_actual != null" :class="epsSurplusClass(e)" class="block font-medium">{{ fmtNum(e.eps_actual) }}</span>
-                <span v-else class="block" style="color:var(--text-muted);">预期 {{ fmtNum(e.eps_estimate) }}</span>
-              </button>
-            </div>
-            <div v-if="hasComparison(e, 'eps')" class="text-[11px] shrink-0">
-              <span :class="epsSurplusClass(e)">{{ epsSurplus(e) > 0 ? '+' : '' }}{{ fmtPct(epsSurplus(e)) }}</span>
-            </div>
+            <button type="button" class="day-row-main day-row-num shrink-0"
+                    :aria-label="(e.symbol + ' 查看详情').trim()"
+                    @click="selectEarning(e)">
+              <span v-if="e.eps_actual != null" :class="epsSurplusClass(e)" class="block font-medium">{{ fmtNum(e.eps_actual) }}</span>
+              <span v-else-if="e.eps_estimate != null" class="block text-[11px]" style="color:var(--text-muted);">预期 {{ fmtNum(e.eps_estimate) }}</span>
+              <span v-if="hasComparison(e, 'eps')" :class="epsSurplusClass(e)" class="block text-[11px]">{{ epsSurplus(e) > 0 ? '+' : '' }}{{ fmtPct(epsSurplus(e)) }}</span>
+              <span v-else-if="e.eps_actual != null && e.eps_estimate != null" class="block text-[10px]" style="color:var(--text-muted);">预期 {{ fmtNum(e.eps_estimate) }}</span>
+            </button>
+            <button v-if="user" type="button" @click="toggleWatchlist(e.symbol, e.market)" class="day-row-action ui-btn ui-btn-ghost shrink-0" :class="isMine(e) ? 'text-amber-400' : ''" :title="isMine(e) ? '从自选移除' : '加入自选'" :aria-label="isMine(e) ? '从自选移除' : '加入自选'">
+              {{ isMine(e) ? '★' : '☆' }}
+            </button>
           </div>
         </div>
         <div v-if="!selectedDay.earnings.length" class="py-8 text-center text-[12px]" style="color:var(--text-muted);">当天暂无财报。</div>
