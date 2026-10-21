@@ -375,7 +375,9 @@ def api_universe(user=Depends(get_current_user)):
 
     us, hk = popular_stocks()
     status = universe_status()
-    description = source_description()
+    # Issue #93: this endpoint serves every signed-in user, so it describes the
+    # source in coarse terms — the admin overview keeps the exact host/port/name.
+    description = source_description(include_location=False)
 
     pairs = sorted([(symbol, "US") for symbol in us] + [(symbol, "HK") for symbol in hk],
                    key=lambda pair: (pair[1], sort_key(pair[0])))

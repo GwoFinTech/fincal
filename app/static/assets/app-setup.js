@@ -420,7 +420,7 @@
   // (`/api/admin/watchlist`), which is what makes it safe for everyone.
   function useSystemUniverse(apiFetch) {
     const EMPTY = {
-      source: '', configured: '', transport: '', location: '',
+      source: '', configured: '', transport: '',
       external_dependency: false, stale: false, error_code: null,
       updated_at: null, counts: { US: 0, HK: 0, total: 0 }, items: [], skipped: [],
     };

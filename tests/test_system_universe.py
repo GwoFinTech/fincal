@@ -16,6 +16,7 @@ What is pinned here:
   reported instead of hidden or turned into a 500;
 * the page itself offers no mutation control and calls no write endpoint.
 """
+import json
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -25,10 +26,20 @@ from fastapi.testclient import TestClient
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from app import db, universe  # noqa: E402
+from app import config, db, universe  # noqa: E402
 from app.auth import get_current_user  # noqa: E402
 from app.main import app  # noqa: E402
+from app.routers import admin as admin_router  # noqa: E402
 from app.schemas import SystemUniverse  # noqa: E402
+from app.watchlist import source_description  # noqa: E402
+
+#: Issue #93: the public endpoint is checked against these, so a re-introduced
+#: interpolation cannot pass unnoticed.  They are patched into ``config`` and the
+#: *real* ``source_description`` runs — the old suite replaced that function
+#: wholesale, which is why it never saw the leak.
+SENTINEL_HOST = "sentinel-host"
+SENTINEL_PORT = "sentinel-port"
+SENTINEL_DB = "sentinel-db"
 
 INDEX_HTML = ROOT / "app" / "static" / "index.html"
 APP_JS = ROOT / "app" / "static" / "assets" / "app-setup.js"
@@ -49,14 +60,19 @@ STATUS = {
     "ttl_seconds": 300.0,
 }
 
-DESCRIPTION = {
-    "configured": "hybrid",
-    "type": "postgresql",
-    "location": "db:5432/tsummt",
-    "transport": "database",
-    "external_dependency": False,
-    "local_fallback": True,
-}
+#: What the public endpoint may say about the source's storage (Issue #93): a
+#: coarse identifier, never a host, port or database name.
+PUBLIC_LOCATION = "shared_database"
+
+
+def _config_patches():
+    """Pin the configuration the description is interpolated from."""
+    return (
+        patch.object(config, "WATCHLIST_SOURCE", "hybrid"),
+        patch.object(config, "DB_HOST", SENTINEL_HOST),
+        patch.object(config, "DB_PORT", SENTINEL_PORT),
+        patch.object(config, "TSUMMT_DB", SENTINEL_DB),
+    )
 
 
 class _Cursor:
@@ -108,17 +124,21 @@ class _Conn:
 
 def _call(rows_by_needle=None, *, us=("AAPL", "NVDA"), hk=("0700.HK",), status=None,
           explode_on=(), role="user"):
-    """GET /api/universe with the DB and the universe accessor faked."""
+    """GET /api/universe with the DB and the universe accessor faked.
+
+    The source description runs for real (only ``config`` is pinned), so a
+    re-introduced host/port interpolation fails these tests — Issue #93.
+    """
     executed = []
     cursor = _Cursor(rows_by_needle or {}, executed, explode_on)
     overrides = {get_current_user: lambda: {**USER, "role": role}}
     app.dependency_overrides = overrides
+    source_patch, host_patch, port_patch, db_patch = _config_patches()
     try:
         with patch.object(db, "db_cursor", lambda: _Conn(cursor)), \
              patch.object(universe, "popular_stocks", lambda **kw: (list(us), list(hk))), \
              patch.object(universe, "universe_status", lambda: dict(status or STATUS)), \
-             patch("app.watchlist.source_description", lambda: dict(DESCRIPTION)), \
-             patch.object(db, "db_cursor", lambda: _Conn(cursor)):
+             source_patch, host_patch, port_patch, db_patch:
             client = TestClient(app, raise_server_exceptions=False)
             return client.get("/api/universe"), executed
     finally:
@@ -272,9 +292,44 @@ def test_the_page_shows_a_sample_of_the_dropped_codes_not_a_wall():
 
 
 def test_the_page_does_not_leak_infrastructure_details():
-    """The API carries the source's host/port for the admin panel; the
-    user-facing page must not print it."""
+    """The user-facing page must not print the source's host/port."""
     page = _universe_page()
 
     assert "systemUniverse.location" not in page
     assert "5432" not in page
+
+
+def test_the_public_json_carries_no_host_port_or_database_name():
+    """Issue #93: the *interface* was the leak, not just the page.
+
+    7138237 removed ``location`` from the template but ``/api/universe`` — open to
+    every signed-in user — kept returning ``DB_HOST:DB_PORT/TSUMMT_DB`` verbatim.
+    The description now runs for real against sentinel values, so putting the
+    interpolation back turns this red.
+    """
+    resp, _ = _call({"FROM managed_watchlist": []})
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["location"] == PUBLIC_LOCATION, (
+        "the public endpoint reports a coarse identifier, not a location"
+    )
+    payload = json.dumps(body)
+    for secret in (SENTINEL_HOST, SENTINEL_PORT, SENTINEL_DB, "5432"):
+        assert secret not in payload, f"{secret!r} must not reach a normal user"
+
+
+def test_the_admin_overview_still_reports_the_exact_location():
+    """The admin panel (index.html) needs the real value; only the public one is coarse."""
+    source_patch, host_patch, port_patch, db_patch = _config_patches()
+    with source_patch, host_patch, port_patch, db_patch:
+        # ``app.routers.admin.source_description`` is what /api/admin/overview
+        # spreads into its ``source`` object.
+        described = admin_router.source_description()
+        public = source_description(include_location=False)
+
+    assert described["location"] == f"{SENTINEL_HOST}:{SENTINEL_PORT}/{SENTINEL_DB}"
+    assert public["location"] == PUBLIC_LOCATION
+    # Everything else about the description stays identical on both paths.
+    for field in ("configured", "type", "transport", "external_dependency", "local_fallback"):
+        assert described[field] == public[field]

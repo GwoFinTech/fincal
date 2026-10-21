@@ -242,6 +242,10 @@ class SystemUniverse(BaseModel):
     source: str
     configured: str
     type: str
+    #: Coarse identifier of where the source stores its symbols (``shared_database``
+    #: / ``local_managed`` / ``external_feed``).  This endpoint is open to every
+    #: signed-in user, so it never carries a host, port or database name — the
+    #: admin overview reports the exact value (Issue #93).
     location: str
     transport: str
     external_dependency: bool

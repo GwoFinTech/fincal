@@ -732,6 +732,8 @@ export interface components {
              * @default
              */
             company_name: string;
+            /** Company Name En */
+            company_name_en?: string | null;
             /**
              * Report Date
              * Format: date

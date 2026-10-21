@@ -15,19 +15,42 @@ Configure via environment variables:
 from .. import config
 from .loader import get_source, invalidate_cache
 
+#: Coarse identifiers the public (non-admin) views carry instead of the
+#: configured database's host, port and name (Issue #93).  ``/api/universe`` is a
+#: read-only page for every signed-in user, so it must not tell them the internal
+#: topology; the admin overview keeps the full value.
+PUBLIC_LOCATION_SHARED_DATABASE = "shared_database"
+PUBLIC_LOCATION_LOCAL_MANAGED = "local_managed"
+PUBLIC_LOCATION_EXTERNAL_FEED = "external_feed"
 
-def source_description() -> dict:
+
+def source_description(*, include_location: bool = True) -> dict:
     """How the configured watchlist source stores the symbols.
 
     Shared by the admin overview and the read-only universe view so both
     describe the same configuration (``WATCHLIST_SOURCE``) the same way.
+
+    ``include_location=False`` replaces ``host:port/database`` with a coarse
+    identifier (``shared_database`` / ``local_managed`` / ``external_feed``): the
+    public endpoint has no use for infrastructure details and used to hand them to
+    every signed-in user (Issue #93).  The admin path keeps the exact value.
     """
     configured = config.WATCHLIST_SOURCE.strip().lower()
+    shared_database = configured in ("tsummt", "hybrid")
+    if include_location:
+        location = (f"{config.DB_HOST}:{config.DB_PORT}/{config.TSUMMT_DB}"
+                    if shared_database else "fincal.managed_watchlist")
+    elif shared_database:
+        location = PUBLIC_LOCATION_SHARED_DATABASE
+    elif configured == "http":
+        location = PUBLIC_LOCATION_EXTERNAL_FEED
+    else:
+        location = PUBLIC_LOCATION_LOCAL_MANAGED
     return {
         "configured": configured,
-        "type": "postgresql" if configured in ("tsummt", "hybrid") else configured,
-        "location": f"{config.DB_HOST}:{config.DB_PORT}/{config.TSUMMT_DB}" if configured in ("tsummt", "hybrid") else "fincal.managed_watchlist",
-        "transport": "database" if configured in ("tsummt", "hybrid") else "local",
+        "type": "postgresql" if shared_database else configured,
+        "location": location,
+        "transport": "database" if shared_database else "local",
         "external_dependency": configured == "tsummt",
         "local_fallback": configured in ("tsummt", "hybrid", "http"),
     }
