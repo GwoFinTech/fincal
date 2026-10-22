@@ -55,6 +55,51 @@ def _fold_ical_lines(lines: list[str]) -> list[str]:
     return folded
 
 
+#: Every word the DESCRIPTION body and the calendar name use, one entry per
+#: key and both languages side by side (Issue #97).
+#:
+#: Before this table the body was hard-coded English while the summary and its
+#: markers already followed ``title_lang`` (Issue #55), so a ``zh`` subscription
+#: — the default for ``/ical/{token}`` — read "中文标题 + English body".  The
+#: ``en`` column holds the exact literals the feed emitted before the table
+#: existed, so an ``en`` feed stays byte-identical; only ``zh`` gains new text.
+#:
+#: ``comparability`` is a format template rather than a bare label: the whole
+#: line's punctuation is a language decision too, so ``{wording}`` and
+#: ``{reason}`` are filled in by :func:`_comparability_note`.
+_LABELS = {
+    "company": {"en": "Company", "zh": "公司"},
+    "fiscal": {"en": "Fiscal", "zh": "财季"},
+    "timing": {"en": "Timing", "zh": "时间"},
+    "date_source": {"en": "Date source", "zh": "日期来源"},
+    "eps_estimate": {"en": "EPS Est", "zh": "EPS 预期"},
+    "eps_actual": {"en": "EPS Actual", "zh": "EPS 实际"},
+    "predicted_warning": {"en": "⚠ Predicted date (not confirmed)",
+                          "zh": "⚠ 预测日期（未经确认）"},
+    "currency_unknown": {"en": "currency unknown", "zh": "币种未知"},
+    "pre_market": {"en": "Pre-market", "zh": "盘前"},
+    "after_hours": {"en": "After-hours", "zh": "盘后"},
+    "comparability": {"en": "Comparability: unavailable ({wording}; {reason})",
+                      "zh": "对比：不可用（{wording}；{reason}）"},
+    "calendar_name": {"en": "FinCal Earnings", "zh": "FinCal 财报日历"},
+}
+
+#: Label/value divider per language: the English feed's ``": "`` is what every
+#: subscriber already receives, the Chinese one uses the full-width colon.
+_SEPARATOR = {"en": ": ", "zh": "："}
+
+
+def _label(key: str, title_lang: str = "en") -> str:
+    """One label from :data:`_LABELS`; unknown languages read as ``en``."""
+    entry = _LABELS.get(key) or {}
+    return entry.get(title_lang) or entry.get("en") or ""
+
+
+def _labelled(key: str, value: str, title_lang: str = "en") -> str:
+    """``Company: Apple`` / ``公司：苹果`` — label, language divider, value."""
+    return f"{_label(key, title_lang)}{_SEPARATOR.get(title_lang, _SEPARATOR['en'])}{value}"
+
+
 def _status_marker(date_status: str, title_lang: str) -> str:
     """The ``[预测]`` / ``[未确认]`` suffix, in the feed's language (Issue #55).
 
@@ -91,7 +136,10 @@ def _comparability_note(reason: str, title_lang: str = "en") -> str:
 
     The event carries both figures, so a subscriber may reasonably expect a
     comparison; the line states the reason in words (the language the summary
-    already follows) and keeps the machine-readable code for support.
+    already follows) and keeps the machine-readable code for support.  The
+    surrounding wording — ``Comparability: unavailable`` and the brackets —
+    comes from :data:`_LABELS` since Issue #97, so the sentence is not half
+    English, half Chinese.
     """
     labels = {
         "currency_mismatch": {"en": "different currencies", "zh": "币种不同"},
@@ -100,21 +148,25 @@ def _comparability_note(reason: str, title_lang: str = "en") -> str:
         "basis_unverified": {"en": "accounting base unverified", "zh": "口径未经同一来源确认"},
     }
     wording = labels.get(reason, {}).get(title_lang) or labels.get(reason, {}).get("en") or reason
-    return f"Comparability: unavailable ({wording}; {reason})"
+    return _label("comparability", title_lang).format(wording=wording, reason=reason)
 
 
-def _attributed_amount(label: str, value, currency: str | None) -> str:
+def _attributed_amount(label: str, value, currency: str | None,
+                       title_lang: str = "en") -> str:
     """Render ``EPS Est: 3.34 (USD)`` — a figure always carries its currency.
 
     Issue #61: this description used to print the estimate and the actual side by
     side with no unit at all, so a TWD actual next to a USD estimate read like an
     enormous beat in every subscribed calendar. When the provider never declared
     the currency the line says so explicitly instead of falling back to the
-    listing's currency.
+    listing's currency — that placeholder follows ``title_lang`` (Issue #97);
+    the label itself is chosen and passed by the caller.
     """
     if value in (None, ""):
         return ""
-    return f"{label}: {value} ({currency or 'currency unknown'})"
+    placeholder = _label("currency_unknown", title_lang)
+    separator = _SEPARATOR.get(title_lang, _SEPARATOR["en"])
+    return f"{label}{separator}{value} ({currency or placeholder})"
 
 
 def _event_moment(event: dict) -> datetime | None:
@@ -264,14 +316,18 @@ def _dedupe_events(earnings: list[dict]) -> tuple[list[str], dict]:
 
 def generate_ical(earnings: list[dict], user_email: str = "", title_lang: str = "en") -> str:
     """Generate iCal content from earnings records."""
+    # The calendar's own name follows the feed's language too (Issue #97):
+    # otherwise the calendar list shows "FinCal Earnings" next to Chinese event
+    # titles, and two subscriptions become hard to tell apart.
+    calendar_name = _label("calendar_name", title_lang)
     lines = [
         "BEGIN:VCALENDAR",
         "VERSION:2.0",
         "PRODID:-//FinCal//Earnings Calendar//EN",
         "CALSCALE:GREGORIAN",
         "METHOD:PUBLISH",
-        "NAME:FinCal Earnings",
-        "X-WR-CALNAME:FinCal Earnings",
+        f"NAME:{_escape_ical(calendar_name)}",
+        f"X-WR-CALNAME:{_escape_ical(calendar_name)}",
         "X-WR-TIMEZONE:Asia/Shanghai",
         "REFRESH-INTERVAL;VALUE=DURATION:PT12H",
     ]
@@ -291,10 +347,10 @@ def generate_ical(earnings: list[dict], user_email: str = "", title_lang: str = 
         # Determine event time
         if before_after == "before":
             hour_start, hour_end = "080000", "090000"
-            time_label = "Pre-market"
+            time_label = _label("pre_market", title_lang)
         elif before_after == "after":
             hour_start, hour_end = "160000", "170000"
-            time_label = "After-hours"
+            time_label = _label("after_hours", title_lang)
         else:
             # All-day event
             hour_start, hour_end = None, None
@@ -323,15 +379,20 @@ def generate_ical(earnings: list[dict], user_email: str = "", title_lang: str = 
         # Company names use the cached canonical name; title_lang decides which of
         # the two stored spellings is shown (Issue #55).
         comparison_reason = e.get("comparison_unavailable_reason") or fiscal.comparison_unavailable_reason(e)
-        desc_parts = [f"Company: {company}" if company else "",
-                      f"Fiscal: FY{fy} {fq_str}" if fy else "",
-                      f"Timing: {time_label}" if time_label else "",
-                      f"⚠ Predicted date (not confirmed)" if is_pred else "",
-                      f"Date source: {date_source}" if date_source and date_source != "unknown" else "",
-                      _attributed_amount("EPS Est", e.get("eps_estimate"),
-                                         fiscal.declared_attribution(e, "estimate_currency")),
-                      _attributed_amount("EPS Actual", e.get("eps_actual"),
-                                         fiscal.declared_attribution(e, "actual_currency")),
+        # Issue #97: every label here comes from `_LABELS`, so the body follows
+        # the same `title_lang` as the summary instead of staying English.
+        desc_parts = [_labelled("company", company, title_lang) if company else "",
+                      _labelled("fiscal", f"FY{fy} {fq_str}", title_lang) if fy else "",
+                      _labelled("timing", time_label, title_lang) if time_label else "",
+                      _label("predicted_warning", title_lang) if is_pred else "",
+                      _labelled("date_source", date_source, title_lang)
+                      if date_source and date_source != "unknown" else "",
+                      _attributed_amount(_label("eps_estimate", title_lang), e.get("eps_estimate"),
+                                         fiscal.declared_attribution(e, "estimate_currency"),
+                                         title_lang),
+                      _attributed_amount(_label("eps_actual", title_lang), e.get("eps_actual"),
+                                         fiscal.declared_attribution(e, "actual_currency"),
+                                         title_lang),
                       _comparability_note(comparison_reason, title_lang) if comparison_reason else ""]
         desc = "\n".join(p for p in desc_parts if p)
 

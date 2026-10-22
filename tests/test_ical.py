@@ -53,7 +53,9 @@ def test_text_is_escaped_and_long_utf8_lines_are_folded():
     }], title_lang="zh")
     assert "SUMMARY:AAPL" in ics
     assert "(US)" not in ics
-    assert "DESCRIPTION:Company: " in ics
+    # Issue #97: a zh feed's body labels are Chinese too, so this pins the
+    # localized label rather than the old hard-coded English one.
+    assert "DESCRIPTION:公司：" in ics
     assert "\\," in ics and "\\;" in ics
     assert "\r\n " in ics
     assert all(len(line.encode("utf-8")) <= 75 for line in ics.split("\r\n"))

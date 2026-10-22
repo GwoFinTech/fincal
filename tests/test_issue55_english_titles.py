@@ -108,7 +108,8 @@ def test_chinese_feed_is_byte_identical_and_ignores_the_english_name():
     body = _unfold(ics)
 
     assert _lines(ics, "SUMMARY:")[0] == "SUMMARY:0700.HK 腾讯控股 Q3 财报 [预测]"
-    assert "Company: 腾讯控股" in body
+    # Issue #97: the body follows the summary's language, so the label is 公司.
+    assert "公司：腾讯控股" in body
     assert "TENCENT" not in body
 
 

@@ -126,7 +126,9 @@ def test_chinese_long_description_parses_rfc5545():
     ev = _events(cal)[0]
     # Verify the description survived round-trip without corruption
     desc = str(ev["DESCRIPTION"])
-    assert "Company:" in desc
+    # Issue #97: a zh feed writes Chinese labels, so the round-trip check has to
+    # look for the localized one (the full-width colon is part of the format).
+    assert "公司：" in desc
     # Verify CRLF folding: each raw line ≤ 75 UTF-8 bytes
     for raw_line in ics.split("\r\n"):
         assert len(raw_line.encode("utf-8")) <= 75, f"Line too long: {raw_line[:60]}"

@@ -464,7 +464,8 @@ class FeedAndUiTests(TestCase):
         self.assertIn("Comparability: unavailable (currency undeclared; currency_unknown)", flat)
         # The summary language also switches the comparability wording.
         zh = self._flat(generate_ical([dict(TSM_ROW, report_date=date(2026, 7, 15))], title_lang="zh"))
-        self.assertIn("Comparability: unavailable (币种不同; currency_mismatch)", zh)
+        # Issue #97: the surrounding phrase is localized too, not just the reason.
+        self.assertIn("对比：不可用（币种不同；currency_mismatch）", zh)
 
     def test_comparable_row_gets_no_comparability_warning(self):
         ics = generate_ical([dict(LONGBRIDGE_ROW, report_date=date(2026, 9, 22))])
