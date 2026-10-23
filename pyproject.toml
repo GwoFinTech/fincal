@@ -18,6 +18,10 @@ dev = [
     # installed ad hoc in one venv, so a fresh clone could not even collect the
     # suite (Issue #98).
     "icalendar>=6",
+    # Test-only: `starlette.testclient` (used by the endpoint tests) refuses to
+    # import without httpx2; it was likewise present only by accident in the
+    # developer venv, so `uv sync` on a fresh clone collected nothing.
+    "httpx2>=2",
 ]
 
 [tool.pytest.ini_options]
