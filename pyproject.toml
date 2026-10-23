@@ -13,6 +13,11 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
+    # Test-only: the reference iCal parser the RFC 5545 / zh-feed checks use
+    # (tests/test_ical_rfc5545.py, tests/test_issue97_zh_description.py). It was
+    # installed ad hoc in one venv, so a fresh clone could not even collect the
+    # suite (Issue #98).
+    "icalendar>=6",
 ]
 
 [tool.pytest.ini_options]
