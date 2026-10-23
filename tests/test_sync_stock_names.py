@@ -83,6 +83,7 @@ class StageVerdictTests(TestCase):
 
         with mock.patch.object(sync_stock_names, "db_cursor", _db_cursor), \
                 mock.patch.object(sync_stock_names, "init_db", mock.MagicMock()), \
+                mock.patch("app.sync_audit.heartbeat"), \
                 mock.patch.object(sync_stock_names, "missing_name_targets", missing), \
                 mock.patch.object(sync_stock_names, "english_name_targets",
                                   mock.MagicMock(return_value=english_targets)), \

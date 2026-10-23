@@ -30,6 +30,8 @@ from pathlib import Path
 from unittest import TestCase, skipUnless
 from unittest.mock import patch
 
+import pytest
+
 from fastapi.testclient import TestClient
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -313,6 +315,7 @@ class FulfilmentTests(_NoRealDatabase):
 
 # ── opt-in: the same round-trip on real PostgreSQL ────────────────────────
 
+@pytest.mark.integration
 @skipUnless(os.environ.get("FINCAL_TEST_DB") == "1",
             "set FINCAL_TEST_DB=1 with a reachable fincal DB (the request row, "
             "the refusal and the fulfilment run against a temp table inside a "

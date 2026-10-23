@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,7 +16,20 @@ sys.path.insert(0, str(ROOT))
 
 from app.main import app
 from app.auth import get_current_user
-from app import sync_audit
+from app import audit, sync_audit
+
+
+@pytest.fixture(autouse=True)
+def _silence_admin_audit(monkeypatch):
+    """Keep the admin audit log off the database (Issue #98).
+
+    ``POST /api/admin/sync-runs/recover`` records the action through
+    ``app.audit.log_admin_action``. Only ``recover_stale_runs`` was patched, so
+    the endpoint reached the audit *write* and answered 500 on any machine
+    without the production database — the test was green only because that
+    database happened to be reachable.
+    """
+    monkeypatch.setattr(audit, "log_admin_action", lambda *a, **kw: None)
 
 
 class _FakeCursor:

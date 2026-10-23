@@ -32,6 +32,23 @@ if grep -qE 'unpkg\.com|cdn\.tailwindcss\.com' "$INDEX_HTML"; then
 fi
 echo "Frontend assets OK"
 
+# Test gate (Issue #98): the suite is the only regression defence for the
+# #37–#97 fixes, and it used to depend on the production database being
+# reachable — so a change that broke, say, the iCal body or the comparison
+# attribution could still print "deployed and ready". The default collection is
+# fully offline (tests/conftest.py refuses real connections), so this runs
+# before the rsync and a red suite never reaches /opt. Real-database checks are
+# opt-in (`--run-integration`) and are not part of the deploy path.
+TEST_PY="$SRC/.venv/bin/python"
+echo "=== Test gate (Issue #98) ==="
+if [ ! -x "$TEST_PY" ]; then
+    echo "FAIL: $TEST_PY not found — cannot run the test gate"; exit 1
+fi
+if ! ( cd "$SRC" && "$TEST_PY" -m pytest -q ); then
+    echo "FAIL: pytest failed — not deploying"; exit 1
+fi
+echo "tests OK"
+
 echo "=== Syncing: $SRC → $DST ==="
 rsync -av --delete \
   --exclude='.env' \

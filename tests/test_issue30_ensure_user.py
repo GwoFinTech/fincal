@@ -46,9 +46,10 @@ def _db_reachable():
         return False
 
 
-pytestmark = pytest.mark.skipif(
-    not _db_reachable(), reason="local fincal PostgreSQL not available"
-)
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skipif(not _db_reachable(), reason="local fincal PostgreSQL not available"),
+]
 
 # Test-only portal_user_id range, far away from real forwardAuth ids.
 PORTAL_BASE = 987_654_000

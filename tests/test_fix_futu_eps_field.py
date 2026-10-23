@@ -305,6 +305,7 @@ class CliTests(TestCase):
             yield False
 
         with patch.object(fix_fix, "init_db"), \
+             _db_mock(_RecordingCursor(row={"n": 0})), \
              patch.object(fix_fix, "advisory_lock", busy_lock), \
              patch.object(fix_fix, "retract") as retract, process_args(["--apply"]):
             code = fix_fix.main()

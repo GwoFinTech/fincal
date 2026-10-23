@@ -14,3 +14,8 @@ dependencies = [
 dev = [
     "pytest>=9.1.1",
 ]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: exercises the real PostgreSQL instance; omitted from the default run, opt in with --run-integration (Issue #98)",
+]

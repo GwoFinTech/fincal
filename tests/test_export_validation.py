@@ -12,14 +12,16 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from app.main import app
-from app import db
+from app import db, universe
 from app.auth import get_current_user
+from app.watchlist.base import WatchlistSource
 
 
 class _FakeCursor:
@@ -57,6 +59,30 @@ class _FakeConn:
 
     def __exit__(self, *a):
         pass
+
+
+class _FakeSource(WatchlistSource):
+    """A watchlist source with no database behind it."""
+
+    def fetch_symbols(self):
+        return ["AAPL.US", "MSFT.US", "0700.HK"]
+
+
+@pytest.fixture(autouse=True)
+def _offline_boundaries(monkeypatch):
+    """Fake the two database boundaries these endpoint tests cross (Issue #98).
+
+    ``/api/export`` calls ``ensure_user`` (a ``db.db_cursor`` write) and reads the
+    default symbol universe, whose tsummt source opens its *own*
+    ``psycopg2.connect`` — so neither the per-test ``patch.object(db,
+    "db_cursor")`` nor the universe's own error fallback was covering it. The
+    tests were green only on a host where the production database was readable.
+    """
+    monkeypatch.setattr(db, "db_cursor", lambda: _FakeConn())
+    monkeypatch.setattr(
+        universe, "_universe",
+        universe.SymbolUniverse(source_factory=lambda: _FakeSource()),
+    )
 
 
 def _client():

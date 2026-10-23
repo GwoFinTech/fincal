@@ -293,6 +293,7 @@ def _db_reachable():
         return False
 
 
+@pytest.mark.integration
 @pytest.mark.skipif(not _db_reachable(), reason="local fincal PostgreSQL not available")
 def test_one_row_per_symbol_on_a_real_database():
     """Two spellings of one symbol are one candidate, named by the newest row.

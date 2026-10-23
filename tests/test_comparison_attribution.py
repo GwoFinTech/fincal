@@ -268,6 +268,7 @@ class LongbridgeAttributionWriteTests(TestCase):
 
         with patch.object(sync_earnings, "fetch_calendar", side_effect=fake_fetch), \
              patch.object(sync_earnings, "check_cancelled"), \
+             patch("app.sync_audit.heartbeat"), \
              patch.object(sync_earnings, "_flush_batch", side_effect=fake_flush):
             stats = sync_earnings.SyncStats()
             sync_earnings.sync_earnings(1, stats)
@@ -419,6 +420,7 @@ class FutuAttributionWriteTests(TestCase):
         cursor = MagicMock()
         cursor.fetchall.return_value = []
         with patch.object(sync_futu, "check_cancelled"), \
+             patch("app.sync_audit.heartbeat"), \
              patch.object(sync_futu, "db_cursor", return_value=MagicMock(
                  __enter__=MagicMock(return_value=cursor), __exit__=MagicMock(return_value=False))):
             sync_futu.sync_actuals(ctx, 1, ["TSM.US"])

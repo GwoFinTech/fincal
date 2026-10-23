@@ -31,6 +31,8 @@ from contextlib import contextmanager
 from unittest import TestCase, skipUnless
 from unittest.mock import patch
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
@@ -316,6 +318,7 @@ class StageScriptsDoNotMaskTheWarningTests(TestCase):
 
 # ── opt-in: the writer, the column and the reaper on real PostgreSQL ───────
 
+@pytest.mark.integration
 @skipUnless(os.environ.get("FINCAL_TEST_DB") == "1",
             "set FINCAL_TEST_DB=1 with a reachable fincal DB (start_run's INSERT "
             "and the reaper's UPDATE run against a temp table inside a "

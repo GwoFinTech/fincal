@@ -582,6 +582,7 @@ class RunAccountingTests(TestCase):
 
         with self._fetch(pages), \
              mock.patch.object(sync_earnings, "check_cancelled"), \
+             mock.patch("app.sync_audit.heartbeat"), \
              mock.patch.object(sync_earnings, "flush_batch", side_effect=fake_flush), \
              mock.patch.object(sync_earnings, "db_cursor", return_value=_fake_db_cursor(_FakeCursor())):
             stats = sync_earnings.sync_earnings(42)
@@ -602,6 +603,7 @@ class RunAccountingTests(TestCase):
 
         with self._fetch(pages), \
              mock.patch.object(sync_earnings, "check_cancelled"), \
+             mock.patch("app.sync_audit.heartbeat"), \
              mock.patch.object(sync_earnings, "flush_batch", side_effect=fake_flush), \
              mock.patch.object(sync_earnings, "db_cursor", return_value=_fake_db_cursor(_FakeCursor())):
             stats = sync_earnings.sync_earnings(42)

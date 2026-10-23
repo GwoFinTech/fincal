@@ -275,6 +275,7 @@ def test_db_py_declares_the_column_in_both_places():
     assert "ALTER TABLE stock_names ADD COLUMN IF NOT EXISTS company_name_en" in source
 
 
+@pytest.mark.integration
 @pytest.mark.skipif(not _db_reachable(), reason="local fincal PostgreSQL not available")
 def test_init_db_adds_the_english_name_columns_idempotently():
     """Acceptance 1: running ``init_db()`` twice must not raise or drop data."""

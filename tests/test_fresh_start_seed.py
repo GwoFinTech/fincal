@@ -35,6 +35,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from unittest import TestCase, mock, skipUnless
 
+import pytest
+
 from psycopg2 import errors
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -220,6 +222,7 @@ class SeedIsBestEffortTests(TestCase):
 SCHEMA = "fincal_issue74_selftest"
 
 
+@pytest.mark.integration
 @skipUnless(os.environ.get("FINCAL_TEST_DB") == "1",
             "set FINCAL_TEST_DB=1 with a reachable fincal DB (writes only to a "
             "throwaway schema inside a rolled-back transaction)")

@@ -255,6 +255,14 @@ See [docs/watchlist-source.md](docs/watchlist-source.md) for configuration and h
 # Install dependencies
 uv sync
 
+# Tests (Issue #98): the default collection is fully offline — no PostgreSQL
+# needed, so the same command is valid on a fresh clone, in CI and in a container
+uv run python -m pytest -q
+
+# Opt-in real-database checks (temp tables/throwaway schemas, rolled back):
+# needs a reachable fincal DB. FINCAL_TEST_DB=1 enables the opt-in self-tests.
+uv run python -m pytest -q --run-integration
+
 # Run locally (requires PostgreSQL)
 DB_HOST=localhost uv run uvicorn app.main:app --reload
 

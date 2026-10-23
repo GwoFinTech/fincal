@@ -37,6 +37,8 @@ from pathlib import Path
 from unittest import TestCase, skipUnless
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
@@ -47,11 +49,23 @@ SPEC.loader.exec_module(sync_futu)
 
 
 def _db_mock(cursor):
-    """A ``db_cursor`` replacement whose ``with`` block yields ``cursor``."""
+    """A ``db_cursor`` replacement whose ``with`` block yields ``cursor``.
+
+    Issue #98: the module under test is not the only writer. ``HeartbeatThrottle``
+    sends its progress beat through ``app.sync_audit``, which calls
+    ``app.db.db_cursor`` directly — a path ``patch.object(sync_futu,
+    "db_cursor")`` cannot cover. With only the module patched, every stage test
+    opened a real connection for the heartbeat and was red on any machine
+    without the production database. The beat is silenced here; the SQL these
+    tests assert on is the stage's own write path, which stays recorded.
+    """
     ctx = MagicMock()
     ctx.__enter__.return_value = cursor
     ctx.__exit__.return_value = False
-    return patch.object(sync_futu, "db_cursor", return_value=ctx)
+    stack = contextlib.ExitStack()
+    stack.enter_context(patch.object(sync_futu, "db_cursor", return_value=ctx))
+    stack.enter_context(patch("app.sync_audit.heartbeat"))
+    return stack
 
 
 class _RecordingCursor:
@@ -501,6 +515,7 @@ class FutuIdempotencyRecoveryTests(TestCase):
     Opt in with ``FINCAL_TEST_DB=1`` plus reachable DB_* settings.
     """
 
+    @pytest.mark.integration
     @skipUnless(os.environ.get("FINCAL_TEST_DB") == "1",
                 "set FINCAL_TEST_DB=1 with a reachable fincal DB")
     def test_interrupted_run_does_not_block_next_start(self):

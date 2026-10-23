@@ -144,9 +144,10 @@ def test_sync_earnings_polls_cancellation_during_run():
 
     with patch.object(sync_earnings, "check_cancelled", side_effect=fake_check):
         with patch.object(sync_earnings, "fetch_calendar", return_value=[{"infos": []}]):
-            with patch.object(sync_earnings, "db_cursor") as db_cursor_mock:
-                db_cursor_mock.return_value.__enter__.return_value = MagicMock()
-                stats = sync_earnings.sync_earnings(42)
+            with patch("app.sync_audit.heartbeat"):
+                with patch.object(sync_earnings, "db_cursor") as db_cursor_mock:
+                    db_cursor_mock.return_value.__enter__.return_value = MagicMock()
+                    stats = sync_earnings.sync_earnings(42)
 
     # Issue #52: the run reports its counters instead of a bare record total;
     # with no provider rows it fetched and wrote nothing.
