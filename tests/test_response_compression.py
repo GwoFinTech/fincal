@@ -472,6 +472,39 @@ def test_ical_feed_wire_size_drops_below_the_issue_budget():
     assert len(raw) * 8 < len(ident_raw)
 
 
+def test_cached_feed_is_not_rewritten_by_the_coding_layer():
+    """A cache hit must be immune to what the coding layer does to the message.
+
+    The cached entry used to be the ``Response`` object itself, and a
+    ``Response`` hands its ``raw_headers`` list to the ASGI server by reference.
+    The gzip layer rewrites that list in place (adds ``content-encoding``, drops
+    ``content-length``), so from the second request on the process served the
+    *uncompressed* feed labelled ``gzip`` and no calendar client could read it.
+    """
+    from app.routers.ical import _ical_cache
+
+    client, patchers = _feed_client(_feed_events())
+    try:
+        _, _, cold = _wire(client, FEED_URL, accept_encoding="identity")
+        # Two coded requests: the first one compresses the cold response, the
+        # second is served from the cache (that is where the corruption showed).
+        _, _, first_gz = _wire(client, FEED_URL, accept_encoding="gzip")
+        status, headers, second_gz = _wire(client, FEED_URL, accept_encoding="gzip")
+        _, ident_headers, ident = _wire(client, FEED_URL, accept_encoding="identity")
+    finally:
+        for p in patchers:
+            p.stop()
+
+    assert status == 200
+    assert headers["content-encoding"] == "gzip"
+    assert gzip.decompress(first_gz) == cold
+    assert gzip.decompress(second_gz) == cold, "the cached feed must still be coded on a hit"
+    assert ident == cold, "an identity client must never receive a coded body"
+    assert "content-encoding" not in ident_headers
+    # The stored entry is data, not a live response object.
+    assert all(not hasattr(entry, "raw_headers") for entry in _ical_cache.values())
+
+
 def test_ical_304_carries_the_negotiation_and_a_weak_validator():
     """The conditional answer must describe the same negotiation as the body did."""
     client, patchers = _feed_client(_feed_events())

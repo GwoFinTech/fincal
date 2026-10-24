@@ -4,7 +4,7 @@ from fastapi import APIRouter, Request, Response, Query
 from hashlib import sha256
 from email.utils import formatdate, parsedate_to_datetime
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, NamedTuple
 import logging
 
 logger = logging.getLogger(__name__)
@@ -88,7 +88,22 @@ router = APIRouter(tags=["ical"])
 FEED_CACHE_NAME = "ical"
 
 # Cache iCal feeds per token + options for 1 hour.
-_ical_cache = TTLCache(maxsize=512, ttl=3600)
+#
+# Entries are *immutable* (``_CachedFeed``), never live ``Response`` objects.
+# A cached ``Response`` hands its own ``raw_headers`` list to the ASGI server by
+# reference, and any layer that re-codes the message mutates that list in place:
+# the gzip layer added ``content-encoding: gzip`` to the stored 200 and dropped
+# its ``content-length`` (Issue #99), so every later request served the
+# uncompressed body labelled as gzip — calendar clients could not read it at
+# all. Keeping the payload and its validators in a frozen record means each
+# request builds a fresh response from data nothing else can touch.
+class _CachedFeed(NamedTuple):
+    content: str
+    etag: str
+    last_modified: str
+
+
+_ical_cache: TTLCache[Any, _CachedFeed] = TTLCache[Any, _CachedFeed](maxsize=512, ttl=3600)
 # Hit/miss counting for this cache is reported to app.metrics (Issue #83) — the
 # feed is the most frequently polled entry point, so "cache works" has to be
 # measurable. `_content_versions` below is bookkeeping for Last-Modified, not a
@@ -158,12 +173,15 @@ def ical_feed(
         # counters stay aggregate on purpose — the key carries the subscription
         # token, which must never become a metric label.
         metrics.record_cache_hit(FEED_CACHE_NAME)
-        cached_response = cached  # TTLCache stores FastAPI Response objects.
-        etag = cached_response.headers.get("etag", "")
-        last_modified = cached_response.headers.get("last-modified", formatdate(946684800, usegmt=True))
-        if _not_modified(request, etag, last_modified):
-            return _not_modified_response(etag, last_modified)
-        return cached_response
+        if _not_modified(request, cached.etag, cached.last_modified):
+            return _not_modified_response(cached.etag, cached.last_modified)
+        # A fresh response per request: the stored record is immutable, so no
+        # outgoing codec can rewrite the entry (see ``_CachedFeed``).
+        return Response(
+            content=cached.content,
+            media_type="text/calendar; charset=utf-8",
+            headers=_feed_headers(cached.etag, cached.last_modified),
+        )
 
     with db.db_cursor() as cur:
         cur.execute("SELECT id, email, name FROM users WHERE ical_token = %s", (token,))
@@ -241,10 +259,12 @@ def ical_feed(
         # defeat conditional requests and make clients refresh forever.
         latest_dt = datetime(2000, 1, 1, tzinfo=timezone.utc)
     last_modified = formatdate(_feed_last_modified(cache_key, etag, latest_dt).timestamp(), usegmt=True)
-    headers = _feed_headers(etag, last_modified)
     if _not_modified(request, etag, last_modified):
         return _not_modified_response(etag, last_modified)
-    response = Response(content=ical_content, media_type="text/calendar; charset=utf-8", headers=headers)
 
-    _ical_cache[cache_key] = response
-    return response
+    _ical_cache[cache_key] = _CachedFeed(ical_content, etag, last_modified)
+    return Response(
+        content=ical_content,
+        media_type="text/calendar; charset=utf-8",
+        headers=_feed_headers(etag, last_modified),
+    )
