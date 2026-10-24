@@ -56,6 +56,22 @@ def _feed_headers(etag: str, last_modified: str) -> dict[str, str]:
         "ETag": etag,
         "Last-Modified": last_modified,
     }
+
+
+def _not_modified_response(etag: str, last_modified: str) -> Response:
+    """The feed's 304, carrying the negotiation the stored 200 was selected by.
+
+    Issue #99: the body leaves through the app's gzip layer, so the
+    representation depends on ``Accept-Encoding``, and that layer stamps
+    ``Vary`` on the 200 it rewrites — but never on a 304, there is no body to
+    compress. This feed is ``Cache-Control: public``, so a shared cache holding
+    the gzip variant would be free to hand it to a client that never asked for
+    it (RFC 7234 §4.1: Vary belongs to the stored response). The 200 does not
+    need the header twice, hence only the conditional answer declares it here.
+    """
+    headers = _feed_headers(etag, last_modified)
+    headers["Vary"] = "Accept-Encoding"
+    return Response(status_code=304, headers=headers)
 from .. import db, config
 from ..metrics import metrics
 from ..symbol import normalize
@@ -146,7 +162,7 @@ def ical_feed(
         etag = cached_response.headers.get("etag", "")
         last_modified = cached_response.headers.get("last-modified", formatdate(946684800, usegmt=True))
         if _not_modified(request, etag, last_modified):
-            return Response(status_code=304, headers=_feed_headers(etag, last_modified))
+            return _not_modified_response(etag, last_modified)
         return cached_response
 
     with db.db_cursor() as cur:
@@ -208,7 +224,11 @@ def ical_feed(
             content={"error": "calendar generation timed out, retry shortly"},
             headers={"Retry-After": "30"},
         )
-    etag = '"' + sha256(ical_content.encode("utf-8")).hexdigest() + '"'
+    # Weak validator (Issue #99): the same stored feed is served identity and
+    # gzip depending on Accept-Encoding, so a strong ETag would be a false claim
+    # of byte identity. ``_etag_matches`` already compares weakly (RFC 7232
+    # §3.2), so conditional requests keep working across both codings.
+    etag = 'W/"' + sha256(ical_content.encode("utf-8")).hexdigest() + '"'
     # ``earnings`` has no ``created_at`` column, so the old fallback was dead code
     # (Issue #73): the feed's validator is the row's write timestamp or nothing.
     timestamps = [e.get("updated_at") for e in earnings]
@@ -223,7 +243,7 @@ def ical_feed(
     last_modified = formatdate(_feed_last_modified(cache_key, etag, latest_dt).timestamp(), usegmt=True)
     headers = _feed_headers(etag, last_modified)
     if _not_modified(request, etag, last_modified):
-        return Response(status_code=304, headers=headers)
+        return _not_modified_response(etag, last_modified)
     response = Response(content=ical_content, media_type="text/calendar; charset=utf-8", headers=headers)
 
     _ical_cache[cache_key] = response

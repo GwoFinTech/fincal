@@ -119,6 +119,22 @@ def test_public_endpoints_keep_their_validator_and_answer_304():
     assert "content-type" not in conditional.headers
 
 
+def test_conditional_answer_declares_the_content_coding_negotiation():
+    """Issue #99: a 304 must carry ``Vary`` even though nothing compresses it.
+
+    ``GZipMiddleware`` stamps ``Vary: Accept-Encoding`` on the 200 it rewrites
+    and never sees a bodyless 304, so the conditional branch has to declare the
+    negotiation itself — a shared cache would otherwise be free to answer a
+    gzip-incapable client with the coded variant it stored.
+    """
+    client = _build_client()
+    first = client.get("/api/search")
+    conditional = client.get("/api/search", headers={"if-none-match": first.headers["etag"]})
+
+    assert conditional.status_code == 304
+    assert "accept-encoding" in conditional.headers["vary"].lower()
+
+
 def test_cacheable_whitelist_still_excludes_writes_and_errors():
     from starlette.requests import Request as StarletteRequest
 

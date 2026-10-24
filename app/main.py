@@ -3,6 +3,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from . import db
@@ -42,13 +43,44 @@ async def lifespan(app: FastAPI):
         stop_timeout_reaper()
 
 
+def install_middleware(app: FastAPI) -> None:
+    """Register the HTTP stack in its one correct order.
+
+    Starlette prepends on registration and then wraps in reverse, so the *last*
+    registration is the outermost layer. Compression therefore has to come last:
+    the bytes it codes are exactly the bytes the validators above produced, and
+    the ETag/Last-Modified describe one uncompressed representation that both
+    content-codings are derived from (Issue #99).
+
+    Kept as a function so the tests can build a probe app with the production
+    order instead of a copy of it.
+    """
+    # Error handling middleware (Issue #9)
+    app.middleware("http")(error_middleware)
+
+    # ETag middleware (Issue #10)
+    app.middleware("http")(etag_middleware)
+
+    # Response compression (Issue #99). Everything this service emits is text —
+    # JSON, iCalendar, HTML/JS/CSS — and the two hot outlets are big: the month
+    # view was 93 KiB on the wire and a ``scope=all`` feed 182 KiB, per poll,
+    # per subscriber (measured 2026-10-24).
+    #
+    # ``minimum_size`` only applies to a body that arrives in one message: true
+    # for the endpoints the ETag layer re-serializes (small ones stay identity,
+    # with their ``Content-Length``), false for the streamed ones — both
+    # middlewares above are ``BaseHTTPMiddleware``, which re-emits every response
+    # as a body *stream*, so those are coded regardless of size and go out
+    # chunked (tests/test_response_compression.py pins both cases).
+    #
+    # Do not add Traefik ``compress`` on top of this: the edge would either
+    # recode an already-coded body or skip it, a redundant layer either way
+    # (README, "API Endpoints").
+    app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
+
+
 app = FastAPI(title="FinCal", lifespan=lifespan)
-
-# Error handling middleware (Issue #9)
-app.middleware("http")(error_middleware)
-
-# ETag middleware (Issue #10)
-app.middleware("http")(etag_middleware)
+install_middleware(app)
 
 # iCal feed (no auth — token-based, must be before catch-all SPA)
 app.include_router(ical_router.router)

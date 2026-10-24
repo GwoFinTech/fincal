@@ -29,6 +29,24 @@ def test_feed_headers_include_text_calendar_content_type():
 
 # ── 304 Not Modified: If-None-Match ───────────────────────────────────────
 
+def test_not_modified_response_declares_the_coding_negotiation():
+    """Issue #99: the feed's 304 carries ``Vary`` — nothing compresses a 304.
+
+    ``GZipMiddleware`` stamps ``Vary: Accept-Encoding`` on the coded 200 it
+    rewrites, but a conditional answer has no body to compress, so the router
+    must declare the negotiation on the 304 or a shared cache holding this
+    ``public`` feed could hand the gzip variant to a client that never asked.
+    """
+    from app.routers.ical import _not_modified_response
+
+    response = _not_modified_response('W/"e"', "Mon, 01 Aug 2026 08:00:00 GMT")
+
+    assert response.status_code == 304
+    assert response.headers["vary"] == "Accept-Encoding"
+    assert response.headers["etag"] == 'W/"e"'
+    assert "content-encoding" not in response.headers
+
+
 def test_not_modified_if_none_match_matches():
     """If-None-Match matching ETag → 304."""
     class FakeRequest:

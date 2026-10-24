@@ -249,6 +249,24 @@ See [docs/watchlist-source.md](docs/watchlist-source.md) for configuration and h
 | `GET` | `/api/popular` | Yes | Default popular stocks |
 | `GET` | `/ical/{token}` | No | iCal subscription feed |
 
+**Compression (Issue #99).** Responses are gzipped by the application
+(`GZipMiddleware`, `minimum_size=1024`, `compresslevel=6`) as the outermost
+layer, so validators (`ETag`, `Last-Modified`) keep describing one uncompressed
+representation — they are emitted as weak validators (`W/"…"`) because one
+resource now has two content-codings. Do **not** also add Traefik
+`compress@docker`: the edge would either recode an already-coded body or skip
+it, a redundant layer either way. Two consequences worth knowing:
+
+- The whitelisted JSON endpoints (`/api/search`, `/api/popular`,
+  `/api/export`, …) are re-serialized by the ETag middleware as a single body,
+  so they keep `Content-Length` and small ones (< 1 KiB) stay identity.
+- Streamed paths (month view, iCal feed, health probe) reach the gzip layer as
+  body chunks — both middlewares are `BaseHTTPMiddleware`, which re-emits every
+  response as a stream — so `minimum_size` cannot fire there and the coded
+  response is sent chunked (no `Content-Length`). 304 answers carry
+  `Vary: Accept-Encoding` explicitly, since nothing compresses a bodyless
+  response.
+
 ## Development
 
 ```bash
