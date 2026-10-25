@@ -216,3 +216,12 @@ def invalidate_symbol_universe() -> None:
         invalidate_calendar_caches()
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("derived cache invalidation failed: %s", exc)
+    try:
+        # ``scope=all`` in the iCal feed is generated from this universe, so a
+        # feed served from cache would keep the old symbol set until the 3600 s
+        # TTL. No token: every feed embeds it (Issue #100).
+        from .routers.ical import invalidate_ical_cache
+
+        invalidate_ical_cache()
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("ical feed cache invalidation failed: %s", exc)

@@ -26,7 +26,9 @@ For single-user or local-only setups, leave `AUTH_LOGIN_URL` empty to run withou
 ### Subscription tokens
 
 `GET /ical/{token}` is public by design: the token *is* the credential, and with
-`scope=all` it reads the whole earnings universe. Two consequences are baked in:
+`scope=all` it reads the whole **system universe** (`app.universe.popular_stocks()`
+— the same 112-symbol list the calendar, `/api/export` and the read-only
+「系统自选范围」 page use, Issue #100). Two consequences are baked in:
 
 - **Tokens never reach a log line.** `app/log_redaction.py` installs a filter on
   `uvicorn.access` (at `import app.main`, so plain `uvicorn app.main:app` is
@@ -248,6 +250,23 @@ See [docs/watchlist-source.md](docs/watchlist-source.md) for configuration and h
 | `GET` | `/api/export` | Yes | Export as CSV/JSON |
 | `GET` | `/api/popular` | Yes | Default popular stocks |
 | `GET` | `/ical/{token}` | No | iCal subscription feed |
+
+**Subscription scope (Issue #100).** `scope=all` means *the system universe*,
+not "every symbol the sync ever wrote": the feed reads the same
+`app.universe.popular_stocks()` accessor as the calendar, `/api/export` and
+`/api/universe`, filtered by the `markets` parameter. Before this change the
+feed ran `SELECT DISTINCT symbol, market FROM earnings` and a production
+subscriber received 2,544 symbols / 3,177 events — 86% of them for symbols no
+screen in the app could show or explain. **This is a behavior change**: events
+for symbols outside the universe (ADRs, small caps, unsynced HK codes) no longer
+appear in an existing `scope=all` subscription. The system universe itself is
+editable (`/api/admin/watchlist`), and an admin change invalidates every cached
+feed, so a symbol added there is in the next poll rather than after the TTL.
+
+The feed cache is bounded in **bytes of feed text**, not slots
+(`FEED_CACHE_MAX_BYTES = 16 MiB`, plus a 512-entry ceiling): the key is
+token + 5 options, so one subscriber can legitimately mint 12 keys, and a slot
+count said nothing about memory.
 
 **Compression (Issue #99).** Responses are gzipped by the application
 (`GZipMiddleware`, `minimum_size=1024`, `compresslevel=6`) as the outermost

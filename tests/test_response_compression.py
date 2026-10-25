@@ -416,7 +416,12 @@ class _FakeConn:
 
 
 def _feed_client(events):
-    """The real app (real middleware order) with DB and earnings stubbed out."""
+    """The real app (real middleware order) with DB and earnings stubbed out.
+
+    ``scope=all`` reads ``app.universe.popular_stocks()`` (Issue #100), so the
+    universe accessor is stubbed too — these tests are about the wire bytes, and
+    the patched ``fetch_earnings_from_db`` already ignores the symbol list.
+    """
     from app import db
     from app import earnings as earnings_mod
     from app.main import app
@@ -428,6 +433,7 @@ def _feed_client(events):
     patchers = [
         patch.object(db, "db_cursor", lambda: _FakeConn(cursor)),
         patch.object(earnings_mod, "fetch_earnings_from_db", lambda **kw: list(events)),
+        patch("app.universe.popular_stocks", lambda **kw: (["AAPL", "MSFT"], ["0700.HK"])),
     ]
     for p in patchers:
         p.start()

@@ -102,8 +102,61 @@ class _CachedFeed(NamedTuple):
     etag: str
     last_modified: str
 
+    @property
+    def nbytes(self) -> int:
+        """Concrete size of the only thing this record keeps alive."""
+        return len(self.content.encode("utf-8"))
 
-_ical_cache: TTLCache[Any, _CachedFeed] = TTLCache[Any, _CachedFeed](maxsize=512, ttl=3600)
+
+# Capacity is measured in **bytes of feed text**, not in slots (Issue #100).
+# Keyed by token + 5 options, one subscriber alone can mint 12 legitimate keys
+# (lang 2 × scope 2 × predicted 2 × markets 3), so a slot count says nothing
+# about memory: with the old ``maxsize=512`` and a 1.26 MiB ``scope=all`` feed
+# the worst case was ~645 MiB of resident strings. ``getsizeof`` makes the bound
+# mean what it says, measured against the current universe-scoped feed
+# (~190 KiB): 16 MiB ≈ 86 feeds, while the shipped 6 subscribers × 12 keys
+# ≈ 13.7 MiB still fit. ``maxsize`` is therefore a byte budget, and a single
+# entry that would not fit is served but not cached (see ``_store_feed``).
+FEED_CACHE_MAX_BYTES = 16 * 1024 * 1024
+
+#: Slot ceiling for the same cache, so a flood of tiny feeds cannot turn the
+#: byte budget into unbounded key bookkeeping (empty feeds are a few hundred
+#: bytes each).
+FEED_CACHE_MAX_ENTRIES = 512
+
+
+def _feed_size(feed: _CachedFeed) -> int:
+    return feed.nbytes
+
+
+def _make_feed_cache(max_bytes: int = FEED_CACHE_MAX_BYTES) -> TTLCache[Any, _CachedFeed]:
+    """A feed cache whose ``maxsize`` is a byte budget (see ``FEED_CACHE_MAX_BYTES``)."""
+    return TTLCache[Any, _CachedFeed](maxsize=max_bytes, ttl=3600, getsizeof=_feed_size)
+
+
+_ical_cache: TTLCache[Any, _CachedFeed] = _make_feed_cache()
+
+
+def _store_feed(cache_key: tuple, feed: _CachedFeed, cache: TTLCache[Any, _CachedFeed] | None = None) -> None:
+    """Cache a feed, honouring both the byte budget and the slot ceiling.
+
+    ``TTLCache`` evicts the least recently used entry when ``maxsize`` (bytes)
+    would be exceeded, but it raises ``ValueError`` for an entry larger than the
+    whole budget. That must not become a 500 on the feed that is being served
+    right now, so an oversized feed is logged and simply not cached — the
+    response still goes out, the next request regenerates it.
+    """
+    target = _ical_cache if cache is None else cache
+    budget = target.maxsize
+    if feed.nbytes > budget:
+        logger.warning(
+            "ical feed not cached: %d B exceeds the %d B budget",
+            feed.nbytes, budget,
+        )
+        return
+    while len(target) >= FEED_CACHE_MAX_ENTRIES and cache_key not in target:
+        target.popitem()
+    target[cache_key] = feed
 # Hit/miss counting for this cache is reported to app.metrics (Issue #83) — the
 # feed is the most frequently polled entry point, so "cache works" has to be
 # measurable. `_content_versions` below is bookkeeping for Last-Modified, not a
@@ -120,7 +173,13 @@ _content_versions: TTLCache[Any, tuple[str, datetime]] = TTLCache[Any, tuple[str
 
 
 def invalidate_ical_cache(token: str | None = None) -> None:
-    """Invalidate one user's feed, or all feeds when token is omitted."""
+    """Invalidate one user's feed, or all feeds when token is omitted.
+
+    Called with no argument whenever the *symbol universe* changes (Issue
+    #100): ``scope=all`` now reads ``app.universe.popular_stocks()``, so an
+    admin add/rename/remove has to drop every feed, otherwise a subscriber
+    keeps the old symbol set for up to the 3600 s TTL.
+    """
     if token is None:
         _ical_cache.clear()
     else:
@@ -194,21 +253,32 @@ def ical_feed(
         watchlist = cur.fetchall()
 
     from ..earnings import fetch_earnings_from_db
+    from ..universe import popular_stocks_by_market
 
     selected_markets = [markets] if markets != "all" else ["US", "HK"]
 
     def _generate():
         if scope == "all":
-            with db.db_cursor() as cur:
-                cur.execute(
-                    "SELECT DISTINCT symbol, market FROM earnings WHERE market = ANY(%s)",
-                    (selected_markets,),
-                )
-                syms = [normalize(r["symbol"], r["market"]) for r in cur.fetchall()]
+            # The subscription's "all" scope is the *system universe*, the same
+            # accessor the calendar, /api/export and /api/universe read (Issue
+            # #100). It used to be ``SELECT DISTINCT symbol, market FROM
+            # earnings``: in production that fed 2,544 symbols / 3,177 events
+            # into one subscriber's calendar while the app showed 112 symbols /
+            # ~453 events, so 86% of the events could not be reconciled with
+            # anything the UI knew about. Reading the live universe also drops
+            # the 9,932-parameter ``IN`` list from this path.
+            universe = popular_stocks_by_market()
+            syms = [
+                symbol
+                for market in selected_markets
+                for symbol in universe.get(market, [])
+            ]
         else:
             syms = [normalize(r["symbol"], r["market"]) for r in watchlist if r["market"] in selected_markets]
-            if not syms:
-                return generate_ical([], user.get("email", ""), title_lang=lang), []
+        # Same guard for both scopes: an empty symbol set must produce a valid
+        # empty VCALENDAR, never an unfiltered full-database read (Issue #25).
+        if not syms:
+            return generate_ical([], user.get("email", ""), title_lang=lang), []
         # The window is the shared calendar horizon (config.CALENDAR_FORWARD_DAYS,
         # default = predictor MAX_FUTURE_DAYS), not a local literal: the feed is a
         # subscription, so an event outside the window has no other path to the
@@ -262,7 +332,7 @@ def ical_feed(
     if _not_modified(request, etag, last_modified):
         return _not_modified_response(etag, last_modified)
 
-    _ical_cache[cache_key] = _CachedFeed(ical_content, etag, last_modified)
+    _store_feed(cache_key, _CachedFeed(ical_content, etag, last_modified))
     return Response(
         content=ical_content,
         media_type="text/calendar; charset=utf-8",

@@ -2,7 +2,7 @@
 
 ``/ical/{token}`` is the only credential of the iCal feed: ``app/auth.py``
 generates it once, ``app/routers/ical.py`` accepts it without any header, and
-``scope=all`` returns the whole earnings universe. It still leaked through three
+``scope=all`` returns the whole system universe. It still leaked through three
 unrelated exits — uvicorn's access log (the request path verbatim), the feed
 timeout warning, and provider URLs logged with their query string — while the
 repo already declared "no token in a metric label" (``app/schemas.py``) and
