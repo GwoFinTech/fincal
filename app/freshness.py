@@ -241,3 +241,17 @@ def health_snapshot(summary: dict | None = None) -> dict:
     """
     summary = check_freshness() if summary is None else summary
     return {key: summary.get(key) for key in AGGREGATE_KEYS}
+
+
+def unavailable_snapshot(now: datetime | None = None) -> dict:
+    """The same projection without touching the database (Issue #101).
+
+    ``check_freshness`` already answers ``unknown`` when PostgreSQL cannot be
+    read; this builds that answer directly, so ``/api/admin/health`` does not pay
+    a second ``connect_timeout`` to learn what its own PostgreSQL probe just
+    reported.
+    """
+    summary = _unavailable(
+        _as_utc(now) or datetime.now(timezone.utc), stale_after_hours()
+    )
+    return health_snapshot(summary)

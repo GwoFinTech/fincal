@@ -250,10 +250,12 @@ def health_check():
     from ..version import get_version
     checks = {}
 
-    # PostgreSQL
+    # PostgreSQL — bounded probe (Issue #101). A plain ``SELECT 1`` on the shared
+    # pool hung when the database was unreachable or every slot was checked out,
+    # so this endpoint could not answer ``not_ready`` while monitoring waited:
+    # "hanging" was indistinguishable from "down".
     try:
-        with db.db_cursor() as cur:
-            cur.execute("SELECT 1")
+        db.ping()
         checks["postgresql"] = {"status": "healthy"}
     except Exception as exc:
         checks["postgresql"] = {"status": "not_ready", "error": type(exc).__name__}
@@ -290,9 +292,17 @@ def health_check():
     # Sync stage / derived data freshness (Issue #53). Aggregate only: this
     # endpoint has no application-level auth, so it must not leak per-stage
     # timestamps, SQL or credentials.
+    #
+    # Issue #101: the freshness summary is read from PostgreSQL, so when the
+    # PostgreSQL probe just failed there is nothing to read — asking anyway cost a
+    # second ``connect_timeout`` to produce the very same ``unknown`` verdict and
+    # would push this endpoint past its own budget.
     try:
-        from ..freshness import check_freshness, health_snapshot
-        checks["sync_freshness"] = health_snapshot(check_freshness())
+        from ..freshness import check_freshness, health_snapshot, unavailable_snapshot
+        if checks["postgresql"]["status"] == "healthy":
+            checks["sync_freshness"] = health_snapshot(check_freshness())
+        else:
+            checks["sync_freshness"] = unavailable_snapshot()
     except Exception as exc:
         checks["sync_freshness"] = {
             "status": "unknown",
@@ -320,10 +330,13 @@ def readiness_check():
     """Readiness probe (Issue #14). Returns 200 only when core deps are OK.
 
     Core: PostgreSQL must be healthy. External providers are optional.
+
+    The probe is bounded (Issue #101): a database that hangs must answer 503
+    ``not_ready`` within the probe budget instead of holding the readiness gate
+    (and therefore every deployment) open.
     """
     try:
-        with db.db_cursor() as cur:
-            cur.execute("SELECT 1")
+        db.ping()
         return {"status": "ready"}
     except Exception:
         from fastapi.responses import JSONResponse

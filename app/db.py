@@ -1,33 +1,281 @@
+import math
+import os
+import sys
+import threading
+import time
+
 import psycopg2
 import psycopg2.extras
 import psycopg2.pool
 import logging
 from contextlib import contextmanager
 from . import config
+from .errors import AppError
 
 logger = logging.getLogger(__name__)
 
+#: Two database budgets (Issue #101). A request must fail fast and degrade; the
+#: weekly sync stages run bulk upserts/reconciles that legitimately take minutes.
+API_ROLE = "api"
+SYNC_ROLE = "sync"
+ROLES = (API_ROLE, SYNC_ROLE)
+
+#: Role the resident connection pool belongs to. ``_pool`` stays the public
+#: singleton for the API role (tests/conftest.py resets it between tests);
+#: scripts get their own pool under the same lazily-created rule.
 _pool = None
+_sync_pool = None
+_pool_lock = threading.Lock()
+
+#: A dependency that just refused a connection is remembered for a short window
+#: (Issue #101). Without it, an endpoint that performs three independent reads
+#: (``/api/universe``: universe, managed codes, names) paid ``connect_timeout``
+#: three times for the *same* outage, so the bounded failure grew with the number
+#: of reads instead of staying one budget. Only connection establishment failures
+#: trip this: a slow statement is a different problem and must not be masked.
+_connect_failures: dict[str, float] = {}
+_failure_lock = threading.Lock()
 
 
-def _get_pool():
-    global _pool
-    if _pool is None:
-        _pool = psycopg2.pool.ThreadedConnectionPool(
-            minconn=2,
-            maxconn=10,
-            host=config.DB_HOST,
-            port=config.DB_PORT,
-            database=config.DB_NAME,
-            user=config.DB_USER,
-            password=config.DB_PASSWORD,
-        )
-    return _pool
+def _in_connect_cooldown(role: str) -> bool:
+    with _failure_lock:
+        until = _connect_failures.get(role)
+    return until is not None and time.monotonic() < until
+
+
+def _note_connect_failure(role: str) -> None:
+    with _failure_lock:
+        _connect_failures[role] = time.monotonic() + config.DB_CONNECT_FAILURE_COOLDOWN_SECONDS
+
+
+def _note_connect_success(role: str) -> None:
+    with _failure_lock:
+        _connect_failures.pop(role, None)
+
+
+def reset_connection_cooldowns() -> None:
+    """Forget cached connect failures (tests, operator recovery)."""
+    with _failure_lock:
+        _connect_failures.clear()
+
+
+def _budget(role: str) -> dict[str, float]:
+    """Timeout budget of ``role``: connect, per-session statement/lock/idle."""
+    if role == SYNC_ROLE:
+        return {
+            "connect_timeout": config.DB_SYNC_CONNECT_TIMEOUT_SECONDS,
+            "statement_timeout": config.DB_SYNC_STATEMENT_TIMEOUT_SECONDS,
+            "lock_timeout": config.DB_SYNC_LOCK_TIMEOUT_SECONDS,
+            "idle_in_transaction_session_timeout": (
+                config.DB_SYNC_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS
+            ),
+            "acquire_timeout": config.DB_SYNC_POOL_ACQUIRE_TIMEOUT_SECONDS,
+        }
+    return {
+        "connect_timeout": config.DB_CONNECT_TIMEOUT_SECONDS,
+        "statement_timeout": config.DB_STATEMENT_TIMEOUT_SECONDS,
+        "lock_timeout": config.DB_LOCK_TIMEOUT_SECONDS,
+        "idle_in_transaction_session_timeout": (
+            config.DB_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS
+        ),
+        "acquire_timeout": config.DB_POOL_ACQUIRE_TIMEOUT_SECONDS,
+    }
+
+
+def _entry_point_is_script() -> bool:
+    """True when this process was started as a repository script (``scripts/…``).
+
+    The database budget belongs to the *process*, not to the call: a request
+    handler must never inherit a stage's multi-minute budget and vice versa.
+    ``FINCAL_DB_ROLE`` overrides the detection for anything unusual (a wrapper
+    that runs a stage from elsewhere, a REPL, …).
+    """
+    main = sys.modules.get("__main__")
+    path = getattr(main, "__file__", None) or ""
+    return "/scripts/" in f"/{path.replace(chr(92), '/')}"
+
+
+def resolve_role(role: str | None = None) -> str:
+    """Resolve the budget role for this call: explicit → env → entry point."""
+    if role is not None:
+        if role not in ROLES:
+            raise ValueError(f"unknown database role {role!r}; expected one of {ROLES}")
+        return role
+    configured = (os.getenv("FINCAL_DB_ROLE") or "").strip().lower()
+    if configured in ROLES:
+        return configured
+    return SYNC_ROLE if _entry_point_is_script() else API_ROLE
+
+
+def _milliseconds(seconds: float) -> int:
+    return int(math.ceil(float(seconds) * 1000))
+
+
+def _session_options(budget: dict[str, float]) -> str:
+    """``options`` libpq passes as ``-c name=value`` session settings.
+
+    ``statement_timeout`` bounds one statement, ``lock_timeout`` how long it may
+    wait for a lock, and ``idle_in_transaction_session_timeout`` reaps a session
+    that opened a transaction and stopped talking — without the last one a single
+    abandoned transaction holds a pool slot forever (restart was the only cure).
+    """
+    return " ".join(
+        f"-c {name}={_milliseconds(budget[name])}"
+        for name in ("statement_timeout", "lock_timeout", "idle_in_transaction_session_timeout")
+    )
+
+
+def connect_kwargs(
+    role: str | None = None,
+    *,
+    database: str | None = None,
+    connect_timeout: float | None = None,
+    statement_timeout: float | None = None,
+) -> dict:
+    """Connection parameters with the timeout contract applied (Issue #101).
+
+    The single place that builds ``psycopg2.connect`` arguments. ``role`` picks
+    the budget (API vs sync); ``database``/``connect_timeout``/
+    ``statement_timeout`` narrow it for a specific caller (the cross-DB watchlist
+    source, a bounded probe).
+    """
+    resolved = resolve_role(role)
+    budget = _budget(resolved)
+    if connect_timeout is not None:
+        budget = {**budget, "connect_timeout": connect_timeout}
+    if statement_timeout is not None:
+        budget = {**budget, "statement_timeout": statement_timeout}
+    # libpq treats ``connect_timeout=1`` as 2 s and 0 as "wait forever"; never
+    # emit 0, since that is exactly the 131 s bug this function exists to stop.
+    timeout_seconds = max(2, int(round(float(budget["connect_timeout"]))))
+    return {
+        "host": config.DB_HOST,
+        "port": config.DB_PORT,
+        "database": config.DB_NAME if database is None else database,
+        "user": config.DB_USER,
+        "password": config.DB_PASSWORD,
+        "connect_timeout": timeout_seconds,
+        "application_name": f"fincal-{resolved}",
+        "options": _session_options(budget),
+    }
+
+
+def _db_busy(details: str, *, retry_after: int = 2) -> AppError:
+    """503 the error contract can render (Issue #9): busy is not an internal error."""
+    return AppError("db_busy", details, 503, headers={"Retry-After": str(retry_after)})
+
+
+def _db_unavailable(details: str) -> AppError:
+    return AppError("db_unavailable", details, 503, headers={"Retry-After": "5"})
+
+
+class _WaitedPool:
+    """``ThreadedConnectionPool`` that *waits* for a slot instead of raising.
+
+    ``psycopg2``'s pool raises ``PoolError("connection pool exhausted")`` the
+    moment ``maxconn`` connections are checked out (pool.py:91). With 40 request
+    threads and 10 slots that turned ordinary concurrency into a 500. The
+    semaphore makes the eleventh caller queue, bounded by
+    ``DB_POOL_ACQUIRE_TIMEOUT_SECONDS``, and an exhausted budget degrades to a
+    503 ``db_busy`` with ``Retry-After`` instead of an internal error.
+    """
+
+    def __init__(self, inner, *, maxconn: int, acquire_timeout: float, role: str = API_ROLE):
+        self._inner = inner
+        self._role = role
+        self._slots = threading.BoundedSemaphore(maxconn)
+        self._acquire_timeout = float(acquire_timeout)
+
+    # -- psycopg2 pool surface used by this module --------------------------
+    def getconn(self, *, timeout: float | None = None):
+        if _in_connect_cooldown(self._role):
+            # Same outage, already bounded once: do not pay connect_timeout again.
+            raise _db_unavailable("database unreachable (connect cool-down)")
+        budget = self._acquire_timeout if timeout is None else float(timeout)
+        if not self._slots.acquire(timeout=max(0.0, budget)):
+            logger.warning("database pool saturated: no slot within %.1fs", budget)
+            raise _db_busy("connection pool saturated")
+        conn = None
+        try:
+            conn = self._inner.getconn()
+            _note_connect_success(self._role)
+            return conn
+        except psycopg2.pool.PoolError as exc:
+            self._slots.release()
+            logger.warning("database pool exhausted: %s", exc)
+            raise _db_busy("connection pool exhausted") from exc
+        except psycopg2.OperationalError as exc:
+            self._slots.release()
+            _note_connect_failure(self._role)
+            # Connection establishment failed (connect_timeout, host down,
+            # server not accepting). Not an internal error: the dependency is
+            # unavailable, and the contract says 503 + Retry-After.
+            logger.warning("database connect failed: %s", exc)
+            raise _db_unavailable("database unreachable") from exc
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def putconn(self, conn, close: bool = False):
+        try:
+            self._inner.putconn(conn, close=close)
+        finally:
+            # ``BoundedSemaphore.release`` raises if the count already equals the
+            # initial value, which would turn a double-put into a crash: guard it.
+            try:
+                self._slots.release()
+            except ValueError:  # pragma: no cover - double release
+                logger.warning("database pool slot released twice")
+
+    def closeall(self):
+        self._inner.closeall()
+
+
+def _make_pool(role: str) -> _WaitedPool:
+    budget = _budget(role)
+    # ``ThreadedConnectionPool`` opens ``minconn`` connections *during
+    # construction* — and it holds an internal lock while doing so, so with a
+    # black-holed host every caller queued behind the same 3 s connect and then
+    # paid its own (measured 6 s for the first request). Build the pool empty and
+    # only restore the retention floor: ``putconn`` keeps a connection while
+    # ``len(idle) < minconn``, so the two warm connections appear as the first
+    # requests succeed, and an outage costs exactly one ``connect_timeout``.
+    inner = psycopg2.pool.ThreadedConnectionPool(
+        minconn=0,
+        maxconn=config.DB_POOL_MAX_CONN,
+        **connect_kwargs(role),
+    )
+    inner.minconn = config.DB_POOL_MIN_CONN
+    return _WaitedPool(
+        inner,
+        maxconn=config.DB_POOL_MAX_CONN,
+        acquire_timeout=budget["acquire_timeout"],
+        role=role,
+    )
+
+
+def _get_pool(role: str | None = None):
+    """Lazily created pool for ``role`` (API by default)."""
+    global _pool, _sync_pool
+    resolved = resolve_role(role)
+    with _pool_lock:
+        if resolved == SYNC_ROLE:
+            if _sync_pool is None:
+                _sync_pool = _make_pool(SYNC_ROLE)
+            return _sync_pool
+        if _pool is None:
+            _pool = _make_pool(API_ROLE)
+        return _pool
 
 
 @contextmanager
-def db_cursor():
-    pool = _get_pool()
+def db_cursor(role: str | None = None):
+    """Yield a pooled cursor; every acquisition carries the timeout contract.
+
+    ``role`` picks the budget (``api`` / ``sync``) and defaults to the process's
+    own role, so a request handler and a sync stage never share a budget.
+    """
+    pool = _get_pool(role)
     conn = pool.getconn()
     cur = None
     try:
@@ -44,7 +292,7 @@ def db_cursor():
 
 
 @contextmanager
-def db_connection():
+def db_connection(role: str | None = None):
     """Yield a dedicated (non-pooled) connection, closed on exit.
 
     Needed for session-scoped state that must live on a single connection for
@@ -54,22 +302,59 @@ def db_connection():
     actually free. Holding one fresh connection for the full duration avoids
     that class of bug entirely.
     """
-    conn = psycopg2.connect(
-        host=config.DB_HOST,
-        port=config.DB_PORT,
-        database=config.DB_NAME,
-        user=config.DB_USER,
-        password=config.DB_PASSWORD,
-    )
+    resolved = resolve_role(role)
+    if _in_connect_cooldown(resolved):
+        raise _db_unavailable("database unreachable (connect cool-down)")
+    try:
+        conn = psycopg2.connect(**connect_kwargs(resolved))
+    except psycopg2.OperationalError as exc:
+        _note_connect_failure(resolved)
+        logger.warning("database connect failed: %s", exc)
+        raise _db_unavailable("database unreachable") from exc
+    _note_connect_success(resolved)
     try:
         yield conn
     finally:
         conn.close()
 
 
+def ping(timeout: float | None = None) -> None:
+    """Probe PostgreSQL with a hard wall-clock budget (Issue #101).
+
+    Raises on failure *or* timeout. The probe runs on its own thread and the
+    caller stops waiting at ``timeout``: ``connect_timeout`` bounds a connect, but
+    a pool that is fully checked out (or a server that accepted the socket and
+    then went silent) would otherwise keep ``/api/admin/health`` hanging — which
+    is precisely the state the probe exists to report as ``not_ready``.
+    """
+    budget = config.DB_HEALTH_PROBE_TIMEOUT_SECONDS if timeout is None else float(timeout)
+    outcome: dict[str, BaseException] = {}
+
+    def _probe() -> None:
+        try:
+            with db_cursor() as cur:
+                cur.execute("SELECT 1")
+        except BaseException as exc:  # noqa: BLE001 - reported to the caller
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=_probe, name="db-probe", daemon=True)
+    worker.start()
+    worker.join(budget)
+    if worker.is_alive():
+        raise TimeoutError(f"database probe exceeded {budget:.1f}s")
+    if "error" in outcome:
+        raise outcome["error"]
+
+
+
 def init_db():
-    """Create tables if not exist."""
-    with db_cursor() as cur:
+    """Create tables if not exist.
+
+    Schema work runs on the sync budget (Issue #101): a migration statement is
+    not a request, and the 5 s API ``statement_timeout`` would abort an index
+    build on a large installation.
+    """
+    with db_cursor(SYNC_ROLE) as cur:
         cur.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id SERIAL PRIMARY KEY,
@@ -340,7 +625,7 @@ def ensure_fiscal_identity_index() -> bool:
     from psycopg2 import errors
 
     try:
-        with db_cursor() as cur:
+        with db_cursor(SYNC_ROLE) as cur:
             cur.execute("""
                 SELECT count(*) AS groups FROM (
                     SELECT 1 FROM earnings

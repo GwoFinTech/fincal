@@ -17,11 +17,18 @@ logger = logging.getLogger(__name__)
 
 
 class AppError(Exception):
-    """Application error with stable code and HTTP status."""
-    def __init__(self, code: str, details: str = "", status_code: int = 400):
+    """Application error with stable code and HTTP status.
+
+    ``headers`` carries response metadata the code implies — e.g. the
+    ``Retry-After`` a 503 ``db_busy`` must send (Issue #101) — so the mapping
+    stays in one place instead of being re-derived at every raise site.
+    """
+    def __init__(self, code: str, details: str = "", status_code: int = 400,
+                 headers: dict[str, str] | None = None):
         self.code = code
         self.details = details
         self.status_code = status_code
+        self.headers = dict(headers or {})
         super().__init__(details)
 
 
@@ -59,6 +66,7 @@ async def error_middleware(request: Request, call_next):
         return JSONResponse(
             status_code=exc.status_code,
             content={"error": {"code": exc.code, "details": exc.details}},
+            headers=exc.headers or None,
         )
     except Exception as exc:
         logger.exception("unhandled error on %s %s", request.method, request.url.path)

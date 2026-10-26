@@ -218,6 +218,22 @@ All configuration is via environment variables. See [`.env.example`](.env.exampl
 | `DB_NAME` | `fincal` | Database name |
 | `DB_USER` | `postgres` | Database user |
 | `DB_PASSWORD` | *(empty)* | Database password |
+| `DB_CONNECT_TIMEOUT_SECONDS` | `3` | `connect_timeout` of every request-path connection (Issue #101). Without it a dropped SYN held a thread for 131 s |
+| `DB_STATEMENT_TIMEOUT_SECONDS` | `5` | Per-statement `statement_timeout` of the API role |
+| `DB_LOCK_TIMEOUT_SECONDS` | `2` | `lock_timeout` of the API role |
+| `DB_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS` | `15` | Reaps an abandoned transaction so it cannot hold a pool slot forever |
+| `DB_SYNC_CONNECT_TIMEOUT_SECONDS` | `10` | `connect_timeout` for `scripts/…` (sync role) |
+| `DB_SYNC_STATEMENT_TIMEOUT_SECONDS` | `300` | `statement_timeout` for the sync role — bulk upserts must not be killed |
+| `DB_SYNC_LOCK_TIMEOUT_SECONDS` | `10` | `lock_timeout` for the sync role |
+| `DB_SYNC_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS` | `600` | Idle-transaction timeout for the sync role |
+| `DB_POOL_MIN_CONN` | `2` | Idle connections kept warm |
+| `DB_POOL_MAX_CONN` | `20` | Pool slots; callers queue (bounded) instead of raising `PoolError` |
+| `DB_POOL_ACQUIRE_TIMEOUT_SECONDS` | `5` | How long a request waits for a slot before `503 db_busy` + `Retry-After` |
+| `DB_SYNC_POOL_ACQUIRE_TIMEOUT_SECONDS` | `60` | Same, for the sync role |
+| `DB_HEALTH_PROBE_TIMEOUT_SECONDS` | `1.5` | Budget of the `/api/admin/health` + `/ready` PostgreSQL probe |
+| `DB_CONNECT_FAILURE_COOLDOWN_SECONDS` | `5` | After a failed connect, other reads fail fast instead of paying `connect_timeout` again |
+| `FINCAL_DB_ROLE` | *(auto)* | Overrides the budget role (`api`/`sync`); detected from the entry point otherwise |
+| `UNIVERSE_REQUEST_WAIT_SECONDS` | `1` | How long a request waits for a universe refresh before serving the current snapshot |
 | `WATCHLIST_SOURCE` | `tsummt` | `tsummt` or `http` ([docs](docs/watchlist-source.md)) |
 | `KURUMI_API_URL` | `http://localhost:8000` | Base URL of the Kurumi/tsummt API used for company names. **Must be set inside the container** — the default is FinCal's own port, so the dependency probe reports `dependency_not_configured` instead of a false `healthy` (Issue #70) |
 | `KURUMI_API_TIMEOUT` | `5` | Kurumi request timeout (seconds) |

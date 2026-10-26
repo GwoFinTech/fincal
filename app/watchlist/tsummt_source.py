@@ -5,11 +5,16 @@ the watchlist table that the tsummt-web application manages.
 
 Issue #4: raises on failure instead of returning empty, so
 stale-while-error can preserve previous data.
+
+Issue #101: the connection goes through ``app.db.connect_kwargs`` so this
+cross-database read carries the same ``connect_timeout`` / ``statement_timeout``
+contract as every other database access — it used to be a bare
+``psycopg2.connect`` with no upper bound at all.
 """
 import logging
 import psycopg2
 from .base import WatchlistSource
-from .. import config
+from .. import config, db
 
 logger = logging.getLogger(__name__)
 
@@ -18,13 +23,7 @@ class TsummtWatchlistSource(WatchlistSource):
     """Read symbols from ``tsummt.watchlist`` table."""
 
     def fetch_symbols(self) -> list[str]:
-        conn = psycopg2.connect(
-            host=config.DB_HOST,
-            port=config.DB_PORT,
-            database=config.TSUMMT_DB,
-            user=config.DB_USER,
-            password=config.DB_PASSWORD,
-        )
+        conn = psycopg2.connect(**db.connect_kwargs(database=config.TSUMMT_DB))
         try:
             cur = conn.cursor()
             cur.execute("SELECT code FROM watchlist ORDER BY id")

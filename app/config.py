@@ -29,6 +29,72 @@ DB_PASSWORD=os.getenv("DB_PASSWORD", "")
 # External DB for shared watchlist (only used when WATCHLIST_SOURCE=tsummt)
 TSUMMT_DB = os.getenv("TSUMMT_DB", "tsummt")
 
+# Database access budgets (Issue #101).
+#
+# Neither the connection pool nor the cross-DB watchlist source had any timeout,
+# so a dependency that *drops* packets instead of answering with RST held a
+# request thread for as long as the kernel kept retrying (measured: 131 s for a
+# single libpq connect), and every concurrent request burned its own 30 s budget
+# behind it. These values are the contract `app/db.py` enforces at the only
+# place where a connection is opened, so no call site has to remember them.
+#
+# Two budgets on purpose: the request path must fail fast and degrade, while the
+# weekly sync stages run bulk upserts / reconciles that legitimately take minutes
+# — a single API-sized statement_timeout would kill them.
+#
+# ``connect_timeout`` is API 3 s: a slow-but-healthy cross-DB read must not be
+# misread as an outage, and 3 s still keeps the worst case of a request path
+# reload inside the 5 s degradation budget.
+DB_CONNECT_TIMEOUT_SECONDS = float(os.getenv("DB_CONNECT_TIMEOUT_SECONDS", "3"))
+DB_STATEMENT_TIMEOUT_SECONDS = float(os.getenv("DB_STATEMENT_TIMEOUT_SECONDS", "5"))
+DB_LOCK_TIMEOUT_SECONDS = float(os.getenv("DB_LOCK_TIMEOUT_SECONDS", "2"))
+DB_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS = float(
+    os.getenv("DB_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS", "15")
+)
+# Script-role budgets: a stage is already wrapped in ``timeout`` by
+# scripts/sync_all.sh, so the session budgets only need to be generous enough to
+# never cut a healthy bulk statement.
+DB_SYNC_CONNECT_TIMEOUT_SECONDS = float(os.getenv("DB_SYNC_CONNECT_TIMEOUT_SECONDS", "10"))
+DB_SYNC_STATEMENT_TIMEOUT_SECONDS = float(os.getenv("DB_SYNC_STATEMENT_TIMEOUT_SECONDS", "300"))
+DB_SYNC_LOCK_TIMEOUT_SECONDS = float(os.getenv("DB_SYNC_LOCK_TIMEOUT_SECONDS", "10"))
+DB_SYNC_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS = float(
+    os.getenv("DB_SYNC_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS", "600")
+)
+
+# Pool sizing (Issue #101). FastAPI's sync endpoints run on a 40-thread limiter,
+# and the pool used to cap at 10 *without waiting*: the 11th concurrent request
+# raised ``PoolError: connection pool exhausted``, which the error contract
+# reported as a 500. The pool is now the same order as the thread limit and
+# ``db_cursor`` waits for a slot instead of failing (see ``db.getconn``);
+# production PostgreSQL has max_connections=100 with ~27 in use, so 20 stays
+# well inside the remaining headroom.
+#
+# ``DB_POOL_MIN_CONN`` is the number of idle connections kept warm. The pool is
+# built empty and warmed on a daemon thread: ``ThreadedConnectionPool`` otherwise
+# opens ``minconn`` connections *during construction*, so with a black-holed host
+# whoever creates the pool paid ``minconn × connect_timeout`` before the first
+# caller could report a degraded answer.
+DB_POOL_MIN_CONN = int(os.getenv("DB_POOL_MIN_CONN", "2"))
+DB_POOL_MAX_CONN = int(os.getenv("DB_POOL_MAX_CONN", "20"))
+# How long a request thread may wait for a pool slot before it degrades to
+# 503 db_busy (+ Retry-After) instead of queueing forever.
+DB_POOL_ACQUIRE_TIMEOUT_SECONDS = float(os.getenv("DB_POOL_ACQUIRE_TIMEOUT_SECONDS", "5"))
+DB_SYNC_POOL_ACQUIRE_TIMEOUT_SECONDS = float(
+    os.getenv("DB_SYNC_POOL_ACQUIRE_TIMEOUT_SECONDS", "60")
+)
+# Health/readiness probe budget (Issue #101). The probe used to be a plain
+# ``SELECT 1`` on the same pool: with the database unreachable it hung instead of
+# answering ``postgresql: not_ready``, so monitoring could not tell "hanging"
+# from "down".
+DB_HEALTH_PROBE_TIMEOUT_SECONDS = float(os.getenv("DB_HEALTH_PROBE_TIMEOUT_SECONDS", "1.5"))
+# Cool-down after a *failed connection*, not a failed statement (Issue #101).
+# One outage must cost at most one ``connect_timeout``: an endpoint with three
+# independent reads used to pay it three times in a row. Kept short so recovery
+# needs no restart; a successful connect clears it immediately.
+DB_CONNECT_FAILURE_COOLDOWN_SECONDS = float(
+    os.getenv("DB_CONNECT_FAILURE_COOLDOWN_SECONDS", "5")
+)
+
 # Watchlist data source: hybrid (tsummt DB + local fallback), tsummt, local, or http
 WATCHLIST_SOURCE = os.getenv("WATCHLIST_SOURCE", "hybrid")
 WATCHLIST_HTTP_URL = os.getenv("WATCHLIST_HTTP_URL", "")
@@ -44,6 +110,15 @@ UNIVERSE_CACHE_TTL_SECONDS = float(os.getenv("UNIVERSE_CACHE_TTL_SECONDS", "120"
 # source is retried after this bounded backoff — so recovery needs no restart,
 # and an outage does not become one source query per request.
 UNIVERSE_ERROR_RETRY_SECONDS = float(os.getenv("UNIVERSE_ERROR_RETRY_SECONDS", "15"))
+# How long a caller on the request path may wait for a reload it did not start
+# (Issue #101). The reload runs on its own thread so a hanging cross-DB source
+# can never hold a request thread: the caller waits at most this long, then gets
+# the current snapshot and the refresh lands when it lands. 1 s is ~100x a normal
+# (local, indexed) watchlist read, so a healthy source is indistinguishable from
+# the old synchronous behaviour, while the worst case of an endpoint that performs
+# several reads stays well inside the 5 s degradation budget. The DB layer bounds
+# the reload itself via connect_timeout + the connect cool-down.
+UNIVERSE_REQUEST_WAIT_SECONDS = float(os.getenv("UNIVERSE_REQUEST_WAIT_SECONDS", "1"))
 
 # Futu OpenD connection (optional - used for earnings date sync)
 FUTU_HOST = os.getenv("FUTU_HOST", "127.0.0.1")

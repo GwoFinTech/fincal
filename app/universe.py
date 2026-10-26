@@ -19,6 +19,13 @@ A failed read keeps the last known (or fallback) universe, exposes the error in
 ``/api/admin/diagnostics`` and is retried after a short bounded backoff rather
 than being cached for the full TTL: recovery needs no restart, and an outage
 does not turn into one source query per request.
+
+Issue #101: the read itself runs on a worker thread, and a caller on the request
+path waits for it at most ``UNIVERSE_REQUEST_WAIT_SECONDS``. The cross-database
+read used to run *on the request thread* through a singleflight whose 30 s budget
+only constrained the waiters, so an unreachable tsummt database held the leader
+for 131 s while every other request waited its full 30 s — 40 occupied threads
+took the whole service down, including ``/api/me`` and the health probe.
 """
 from __future__ import annotations
 
@@ -28,7 +35,6 @@ import time
 from datetime import datetime, timezone
 
 from . import config
-from .singleflight import Singleflight
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +67,7 @@ class SymbolUniverse:
         *,
         ttl_seconds: float | None = None,
         error_retry_seconds: float | None = None,
+        request_wait_seconds: float | None = None,
         fallback_us: list[str] | None = None,
         fallback_hk: list[str] | None = None,
         source_factory=None,
@@ -69,11 +76,16 @@ class SymbolUniverse:
         self._error_retry = float(
             config.UNIVERSE_ERROR_RETRY_SECONDS if error_retry_seconds is None else error_retry_seconds
         )
+        self._request_wait = float(
+            config.UNIVERSE_REQUEST_WAIT_SECONDS if request_wait_seconds is None else request_wait_seconds
+        )
         self._fallback_us = list(FALLBACK_US if fallback_us is None else fallback_us)
         self._fallback_hk = list(FALLBACK_HK if fallback_hk is None else fallback_hk)
         self._source_factory = source_factory
-        self._flight = Singleflight()
-        self._flight_key = f"symbol-universe:{id(self)}"
+        # Set while a reload is in flight, so concurrent callers join one read
+        # instead of queueing behind each other's timeouts (replaces the old
+        # singleflight, whose budget only applied to waiters — Issue #101).
+        self._refresh: threading.Event | None = None
         self._mutex = threading.Lock()
 
         self._us = list(self._fallback_us)
@@ -91,14 +103,31 @@ class SymbolUniverse:
 
     # -- public API --------------------------------------------------------
     def get(self, *, force_refresh: bool = False) -> tuple[list[str], list[str]]:
-        """Return ``(US, HK)``, reading the source at most once per TTL."""
+        """Return ``(US, HK)``, reading the source at most once per TTL.
+
+        The read happens on a worker thread; this call waits for it at most
+        ``request_wait_seconds`` and otherwise returns the current snapshot. That
+        keeps a healthy source indistinguishable from the old synchronous read
+        (a normal read finishes in milliseconds) while a hanging cross-database
+        source can no longer occupy a request thread (Issue #101).
+        """
         with self._mutex:
             if not force_refresh and time.monotonic() < self._expires_at:
                 return list(self._us), list(self._hk)
-        try:
-            self._flight.do(self._flight_key, self._reload)
-        except Exception as exc:  # pragma: no cover - _reload swallows failures
-            logger.warning("symbol universe refresh failed: %s", exc)
+            pending = self._refresh
+            started = pending is None
+            if started:
+                pending = self._refresh = threading.Event()
+        if started:
+            threading.Thread(
+                target=self._reload_in_background,
+                args=(pending,),
+                name="universe-refresh",
+                daemon=True,
+            ).start()
+        # Bounded, and never a second read: a caller that arrives while the
+        # refresh is in flight joins the same wait instead of starting another.
+        pending.wait(self._request_wait)
         with self._mutex:
             return list(self._us), list(self._hk)
 
@@ -126,6 +155,18 @@ class SymbolUniverse:
             self._expires_at = 0.0
 
     # -- internals ---------------------------------------------------------
+    def _reload_in_background(self, done: threading.Event) -> None:
+        """Run :meth:`_reload` on a worker thread and release the waiters."""
+        try:
+            self._reload()
+        except BaseException as exc:  # pragma: no cover - _reload swallows its own
+            logger.warning("symbol universe refresh failed: %s", exc)
+        finally:
+            with self._mutex:
+                if self._refresh is done:
+                    self._refresh = None
+            done.set()
+
     def _source_obj(self):
         if self._source_factory is not None:
             return self._source_factory()
