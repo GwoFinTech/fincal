@@ -19,6 +19,26 @@ HEADER_USER_ROLE = "X-User-Role"
 # Leave empty to hide login button (single-user setups)
 AUTH_LOGIN_URL=os.getenv("AUTH_LOGIN_URL", "")
 
+# Identity trust boundary (Issue #102).
+#
+# The four ``X-User-*`` headers are *assertions about who the caller is*; they
+# are only meaningful when Traefik's forwardAuth produced them. Every container
+# on the shared ``traefik_traefik-net`` bridge can also reach this service
+# directly, and a request that skips the proxy carries whatever headers the
+# caller wrote — so "authenticated" was a property of the network, not of the
+# request (measured: a forged ``X-User-Role: admin`` from a co-tenant container
+# answered 200 on ``/api/admin/overview``).
+#
+# ``AUTH_TRUST_SECRET`` (empty = today's behaviour: trust the headers, for
+# single-user / trusted-network deployments) makes the proxy's word verifiable:
+# the proxy injects it as ``AUTH_TRUST_HEADER``, the app compares it with
+# ``hmac.compare_digest`` before it believes any ``X-User-*`` header. Empty on
+# purpose as the default — turning it on is a *paired* change with the Traefik
+# label in ``docker-compose.yml``, and ``scripts/check_auth_trust.py`` fails the
+# deploy when only one side is configured.
+AUTH_TRUST_SECRET = os.getenv("AUTH_TRUST_SECRET", "")
+AUTH_TRUST_HEADER = os.getenv("AUTH_TRUST_HEADER", "X-Fincal-Proxy")
+
 # Database
 DB_HOST = os.getenv("DB_HOST", "localhost")
 DB_PORT = int(os.getenv("DB_PORT", "5432"))

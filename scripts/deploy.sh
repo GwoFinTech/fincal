@@ -198,4 +198,13 @@ echo "=== Service self-report gate (Issue #79) ==="
 # The gate re-derives the aggregate from the probes and exits 1 on a mismatch.
 python3 "$DST/scripts/check_service_health.py" --container fincal --expected-version "$COMMIT" || exit 1
 
+echo "=== Identity trust boundary gate (Issue #102) ==="
+# The header-identity boundary is fail-closed: AUTH_TRUST_SECRET is only useful
+# when the Traefik `fincal-identity` middleware injects the same value, and a
+# half-configured pair turns every authenticated request into a 401. Both sides
+# are read here (container env + container labels) and one browser session is
+# the only thing left to a human — the gate says so explicitly instead of
+# shipping a silent 401 wall.
+python3 "$DST/scripts/check_auth_trust.py" --container fincal || exit 1
+
 echo "=== Done — fincal $COMMIT deployed and ready ==="

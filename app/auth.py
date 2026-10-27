@@ -1,16 +1,91 @@
-from fastapi import Request, HTTPException
-from urllib.parse import unquote
-from . import config, db
+"""Identity extraction from forwardAuth headers.
+
+The whole authentication model of the service is "the proxy told us who the
+caller is": ``X-User-Id`` / ``X-User-Email`` / ``X-User-Name`` / ``X-User-Role``
+are assertions, and ``role == admin`` is what ``require_admin`` believes.
+
+That is only sound while nothing else can *write* those headers. Production runs
+this container on the shared ``traefik_traefik-net`` bridge next to a dozen other
+containers, all of which can address ``http://fincal:8000`` directly and send any
+header they like (Issue #102). Two things therefore happen here:
+
+* When ``AUTH_TRUST_SECRET`` is configured, a request must also carry the proxy's
+  shared secret (``AUTH_TRUST_HEADER``, injected by the Traefik ``headers``
+  middleware in ``docker-compose.yml``) before any ``X-User-*`` header is
+  believed. Empty secret = unchanged behaviour (single-user / trusted-network
+  deployments).
+* The id is *validated*, not merely parsed: a non-numeric or non-positive
+  ``X-User-Id`` answers ``401 invalid_identity`` instead of falling out of
+  ``int()`` as a 500 ``internal_error`` with a stack trace — a malformed header
+  is a client error and must not read like a code defect in the logs.
+"""
+import hmac
 import secrets
+from urllib.parse import unquote
+
+from fastapi import HTTPException, Request
+
+from . import config, db
+from .errors import AppError
+
+#: ``users.portal_user_id`` is ``INTEGER`` (int4); see ``_parse_user_id``.
+_MAX_PORTAL_USER_ID = 2_147_483_647
+
+
+def _require_trusted_proxy(request: Request) -> None:
+    """Reject the request unless it carries the proxy's shared secret.
+
+    ``hmac.compare_digest`` on bytes: constant time (the value is a credential),
+    and it cannot raise ``TypeError`` on a non-ASCII header the way the ``str``
+    form does — an unparseable header must be a 401, never a 500.
+    """
+    secret = config.AUTH_TRUST_SECRET
+    if not secret:
+        return
+    presented = request.headers.get(config.AUTH_TRUST_HEADER, "") or ""
+    if not hmac.compare_digest(
+        presented.encode("utf-8", "surrogateescape"),
+        secret.encode("utf-8", "surrogateescape"),
+    ):
+        raise AppError(
+            "untrusted_proxy",
+            "request did not come from the trusted proxy",
+            401,
+        )
+
+
+def _parse_user_id(raw: str) -> int:
+    """Return a positive integer user id, or raise 401 ``invalid_identity``.
+
+    Bounded to what ``users.portal_user_id`` can hold (``INTEGER``, i.e. int4):
+    an id outside that range cannot name a user, and letting it through would
+    turn a forged header into a database error — a 500 again, one layer down.
+    """
+    try:
+        user_id = int(str(raw).strip())
+    except (TypeError, ValueError):
+        raise AppError(
+            "invalid_identity",
+            "user id must be a positive integer",
+            401,
+        ) from None
+    if user_id <= 0 or user_id > _MAX_PORTAL_USER_ID:
+        raise AppError(
+            "invalid_identity",
+            "user id must be a positive integer",
+            401,
+        )
+    return user_id
 
 
 def get_current_user(request: Request) -> dict:
     """Extract user from forwardAuth headers. Raises 401 if not authenticated."""
+    _require_trusted_proxy(request)
     user_id = request.headers.get(config.HEADER_USER_ID)
     if not user_id:
         raise HTTPException(status_code=401, detail="Not authenticated")
     return {
-        "id": int(user_id),
+        "id": _parse_user_id(user_id),
         "email": request.headers.get(config.HEADER_USER_EMAIL, ""),
         "name": unquote(request.headers.get(config.HEADER_USER_NAME, "")),
         "role": request.headers.get(config.HEADER_USER_ROLE, "user"),

@@ -23,6 +23,46 @@ Any forwardAuth-compatible service works — set `AUTH_MIDDLEWARE` to your middl
 
 For single-user or local-only setups, leave `AUTH_LOGIN_URL` empty to run without authentication.
 
+### Identity trust boundary
+
+The four `X-User-*` headers are an *assertion*, and only Traefik can be trusted
+to make it. Any container on the same Docker network can reach
+`http://fincal:8000` directly and write those headers itself — on a shared
+`traefik_traefik-net` bridge that means every co-tenant service, a stray
+`docker run`, or a compromised container could send `X-User-Role: admin` and be
+treated as an administrator (Issue #102). Three rules follow:
+
+1. **Nothing outside the proxy's chain should be able to reach the container on
+   a shared network without a verified assertion.** Set `AUTH_TRUST_SECRET` (a
+   random ASCII string, 32+ chars) and the app refuses any request that does not
+   carry it in `AUTH_TRUST_HEADER` (`X-Fincal-Proxy` by default) — `401
+   untrusted_proxy` _before_ it reads any identity header. `docker-compose.yml`
+   already ships the matching `fincal-identity` headers middleware on the main
+   route, so the secret only has to be set in `.env`: it is read by both the
+   label and the container.
+2. **The two sides must be configured as a pair.** Env without the middleware
+   (or a middleware whose value differs) is fail-closed: every authenticated
+   request answers 401. `scripts/deploy.sh` therefore runs
+   `scripts/check_auth_trust.py`, which reads the value Traefik will inject from
+   the container's own labels, asks the container whether it accepts exactly
+   that value, replays a forged request (must be 401 `untrusted_proxy`), and
+   fails the deploy on any disagreement. Secrets are never printed. Leaving the
+   secret empty keeps the old behaviour and is the right choice for a
+   single-user deployment on a private network.
+3. **Malformed identity is a client error.** `X-User-Id: abc`, `0` or `-1`
+   answers `401 invalid_identity`; it used to fall out of `int()` as a 500
+   `internal_error` with a stack trace. `/ical/{token}` (the token is the
+   credential) and `/api/config` never consult the boundary, and
+   `/api/admin/health` stays unauthenticated by design (aggregate probe data
+   only, Issue #79) — a request that skips the proxy can still read dependency
+   health, which is why network isolation (a dedicated bridge shared only with
+   Traefik) remains the long-term fix.
+
+Enabling or rotating the secret requires recreating the container
+(`docker compose up -d` / `scripts/deploy.sh`), because both the label and the
+env are fixed at that point. Rotate it together with the iCal tokens if a
+co-tenant container is ever suspected of being compromised.
+
 ### Subscription tokens
 
 `GET /ical/{token}` is public by design: the token *is* the credential, and with
@@ -213,6 +253,8 @@ All configuration is via environment variables. See [`.env.example`](.env.exampl
 | `DOMAIN` | — | Public domain (Traefik routing) |
 | `AUTH_MIDDLEWARE` | — | Traefik forwardAuth middleware name |
 | `AUTH_LOGIN_URL` | *(empty)* | Auth login page URL (empty = no login button) |
+| `AUTH_TRUST_SECRET` | *(empty)* | Proxy shared secret; when set, `X-User-*` headers are only believed if the request carries it (`401 untrusted_proxy`). Empty keeps the pre-#102 behaviour. Must be paired with the `fincal-identity` label |
+| `AUTH_TRUST_HEADER` | `X-Fincal-Proxy` | Header the proxy injects the secret in (renaming it also renames the Compose label key) |
 | `DB_HOST` | `localhost` | PostgreSQL host |
 | `DB_PORT` | `5432` | PostgreSQL port |
 | `DB_NAME` | `fincal` | Database name |

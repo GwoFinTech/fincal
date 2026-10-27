@@ -22,7 +22,16 @@ services:
       - "traefik.http.routers.fincal.rule=Host(`${DOMAIN}`)"
       - "traefik.http.routers.fincal.entrypoints=websecure"
       - "traefik.http.routers.fincal.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.fincal.middlewares=${AUTH_MIDDLEWARE}"
+      # Identity trust boundary (Issue #102): the app only believes the
+      # X-User-* headers when the request also carries this shared secret, which
+      # only the proxy can add. `fincal-identity` runs *after* forwardAuth in the
+      # same chain, so the value is stamped on the request the app receives.
+      # The placeholder keeps the label non-empty while AUTH_TRUST_SECRET is
+      # unset (the app ignores the header entirely in that mode); compose
+      # interpolates the real value in when the env is configured, and
+      # scripts/check_auth_trust.py fails the deploy if the two sides disagree.
+      - "traefik.http.middlewares.fincal-identity.headers.customrequestheaders.X-Fincal-Proxy=${AUTH_TRUST_SECRET:-fincal-identity-unset}"
+      - "traefik.http.routers.fincal.middlewares=${AUTH_MIDDLEWARE},fincal-identity"
       - "traefik.http.routers.fincal.priority=10"
       - "traefik.http.routers.fincal.service=fincal-svc"
       # Shared service
