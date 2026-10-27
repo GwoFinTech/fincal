@@ -226,7 +226,11 @@ def evaluate(report: dict, labels: dict) -> list[str]:
                 f"{dep.get('code')!r} — the value Traefik injects is not accepted"
             )
         http = report.get("http_trusted") or {}
-        if http.get("status") != 200:
+        if http.get("status") == 401:
+            # Already a failure (pair mismatch / value not accepted); saying
+            # "identity accepted" here would contradict the FAIL lines above.
+            pass
+        elif http.get("status") != 200:
             # Not a boundary problem: the identity was accepted, the read behind
             # it may legitimately be degraded (db_busy / dependency view down).
             print(f"WARN: trusted HTTP probe answered {http.get('status')} "

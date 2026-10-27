@@ -29,7 +29,9 @@ Covered here:
   pair is configured (env without the Traefik label, or a label whose value is
   not the required secret).
 """
+import contextlib
 import importlib.util
+import io
 import json
 import logging
 import sys
@@ -340,8 +342,27 @@ class DeployGate(TestCase):
 
     def test_a_degraded_data_read_is_not_a_boundary_failure(self):
         report = self.enforced_report(http_trusted={"status": 503, "code": "db_busy"})
+        out = io.StringIO()
 
-        self.assertEqual(self.gate.evaluate(report, self.labels()), [])
+        with contextlib.redirect_stdout(out):
+            problems = self.gate.evaluate(report, self.labels())
+
+        self.assertEqual(problems, [])
+        self.assertIn("identity accepted", out.getvalue())
+
+    def test_a_rejected_trust_header_is_never_reported_as_accepted(self):
+        """The 401 case already FAILs; the WARN must not claim the opposite."""
+        report = self.enforced_report(
+            http_trusted={"status": 401, "code": "untrusted_proxy"},
+            dependency_trusted={"ok": False, "code": "untrusted_proxy", "status": 401},
+        )
+        out = io.StringIO()
+
+        with contextlib.redirect_stdout(out):
+            problems = self.gate.evaluate(report, self.labels())
+
+        self.assertTrue(any("trusted dependency call failed" in p for p in problems), problems)
+        self.assertNotIn("identity accepted", out.getvalue())
 
     def test_the_inert_default_passes(self):
         report = {
