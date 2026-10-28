@@ -187,6 +187,33 @@ def from_lb_counter_id(counter_id: str) -> tuple[str, str]:
     return (symbol, market)
 
 
+def from_lb_calendar_info(info: dict) -> tuple[str, str]:
+    """Resolve one Longbridge finance-calendar event to ``(symbol, market)``.
+
+    Issue #104: the calendar used to identify a counter only by
+    ``counter_id`` (``"ST/US/AAPL"``).  ``longbridge`` 0.31.0 (installed
+    2026-10-26) dropped that field: an event now carries ``symbol``
+    (``"AAPL.US"`` / ``"1081.HK"``) plus ``market``.  Reading only
+    ``counter_id`` therefore resolved *nothing*, so the whole stage fetched its
+    pages, wrote no rows, and still reported success.
+
+    ``symbol`` is the primary source now and ``counter_id`` stays as the
+    fallback for older payloads, so either shape works.  The bare ticker goes
+    through :func:`normalize` (never string surgery): HK codes arrive as
+    ``"763.HK"`` and must become the 4-digit canonical ``"0763.HK"`` the rest of
+    the system keys on, or the same company would split into two symbols.
+    """
+    raw = str(info.get("symbol") or "").strip()
+    market = str(info.get("market") or "").strip().upper()
+    if raw:
+        _, _, suffix = raw.rpartition(".")
+        if suffix.upper() in ("US", "HK"):
+            return normalize(raw, suffix.upper()), suffix.upper()
+        if market in ("US", "HK"):
+            return normalize(raw, market), market
+    return from_lb_counter_id(str(info.get("counter_id") or ""))
+
+
 # ── Dirty (non-canonical) HK codes ─────────────────────────────────
 
 def is_dirty_hk_5digit(code: str) -> bool:

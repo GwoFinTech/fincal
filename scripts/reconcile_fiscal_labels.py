@@ -33,7 +33,7 @@ from sync_earnings import (  # noqa: E402
     _VALID_PERIOD_TYPES,
     _raw_fiscal_period,
     fetch_calendar,
-    from_lb_counter_id,
+    from_lb_calendar_info,
     parse_report_date,
 )
 
@@ -103,7 +103,7 @@ def release_events(pages: Iterable[dict]) -> list[Release]:
     result: dict[tuple, Release] = {}
     for page in pages:
         for info in page.get("infos", []):
-            symbol, market = from_lb_counter_id(info.get("counter_id", ""))
+            symbol, market = from_lb_calendar_info(info)
             report_date = parse_report_date(info.get("date", ""))
             if not symbol or not market or not report_date:
                 continue

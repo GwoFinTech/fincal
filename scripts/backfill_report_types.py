@@ -52,7 +52,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app import fiscal  # noqa: E402
 from app.db import db_cursor  # noqa: E402
-from app.symbol import from_lb_counter_id  # noqa: E402
+from app.symbol import from_lb_calendar_info  # noqa: E402
 from sync_earnings import fetch_calendar, parse_report_date  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -75,7 +75,7 @@ def provider_report_types(start: str, end: str, markets=MARKETS) -> dict[tuple[s
         logger.info("  %s pages: %d", market, len(pages))
         for page in pages:
             for info in page.get("infos", []) or []:
-                symbol, mkt = from_lb_counter_id(info.get("counter_id", ""))
+                symbol, mkt = from_lb_calendar_info(info)
                 if not symbol:
                     continue
                 report_date = parse_report_date(info.get("date", ""))

@@ -46,7 +46,7 @@ from app.db import db_cursor  # noqa: E402
 from app.provenance import (  # noqa: E402
     UNKNOWN_ATTRIBUTION, normalize_basis, normalize_currency,
 )
-from app.symbol import from_lb_counter_id  # noqa: E402
+from app.symbol import from_lb_calendar_info  # noqa: E402
 import sync_earnings  # noqa: E402
 import sync_futu  # noqa: E402
 
@@ -79,7 +79,7 @@ def longbridge_currency_map(days_back: int, days_forward: int) -> tuple[dict, di
         pages = sync_earnings.fetch_calendar(market, start, end)
         for page in pages:
             for info in page.get("infos", []):
-                symbol, mkt = from_lb_counter_id(info.get("counter_id", ""))
+                symbol, mkt = from_lb_calendar_info(info)
                 if not symbol:
                     continue
                 currency = normalize_currency(info.get("currency"))

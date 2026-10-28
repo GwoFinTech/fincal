@@ -57,7 +57,7 @@ from datetime import date, timedelta
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.db import db_cursor
-from app.symbol import from_lb_counter_id, normalize
+from app.symbol import from_lb_calendar_info, normalize
 from app.config import stage_timeout
 from app.sync_audit import check_cancelled, SyncCancelledError, HeartbeatThrottle
 from app.sync_quality import SyncQuality
@@ -432,7 +432,7 @@ def build_fiscal_period_index(pages: list[dict]) -> dict[tuple[str, str], list[d
     index: dict[tuple[str, str], list[dict]] = {}
     for page in pages:
         for info in page.get("infos", []):
-            symbol, market = from_lb_counter_id(info.get("counter_id", ""))
+            symbol, market = from_lb_calendar_info(info)
             report_date = parse_report_date(info.get("date", ""))
             if not symbol or not report_date:
                 continue
@@ -817,7 +817,7 @@ def sync_earnings(run_id: int, stats: SyncStats | None = None) -> SyncStats:
             beats.maybe(run_id, phase=f"calendar-{market.lower()}",
                         current=run_stats.fetched)
             for info in page.get("infos", []):
-                symbol, mkt = from_lb_counter_id(info.get("counter_id", ""))
+                symbol, mkt = from_lb_calendar_info(info)
                 if not symbol:
                     continue
 
