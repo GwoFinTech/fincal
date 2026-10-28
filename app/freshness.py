@@ -63,11 +63,16 @@ STAGE_SCRIPTS: dict[str, str] = {
 # pending set is empty and would report ``stale`` forever on a perfectly
 # healthy pipeline.  Its observability comes from its own ``sync_runs`` stage
 # entry instead.
+# ``earnings`` now fails (2) as well, by design: since Issue #103
+# ``updated_at`` is the row's revision counter and only moves when a value
+# changes, so a week in which the provider re-serves everything unchanged would
+# have reported the calendar as ``sync_data_stale`` — a false alarm that fails
+# the deploy gate.  The calendar's freshness comes from the ``longbridge`` stage
+# entry, which every run writes whether or not it wrote a row.
 DERIVED_TABLES: tuple[tuple[str, str], ...] = (
     ("earnings_consensus", "fetched_at"),
     ("earnings_forecast_eps", "fetched_at"),
     ("earnings_institution_ratings", "fetched_at"),
-    ("earnings", "updated_at"),
 )
 
 # 8 days = weekly schedule + 1 day of grace (matches the default of

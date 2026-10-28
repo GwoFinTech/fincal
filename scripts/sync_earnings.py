@@ -69,6 +69,111 @@ logger = logging.getLogger(__name__)
 
 BATCH_SIZE = 200
 
+# ── Revision stamps (Issue #103) ────────────────────────────────────────────
+#: Columns a client can see.  ``updated_at`` may only move when one of them
+#: changes: the flush used to write ``updated_at = NOW()`` on every re-delivery,
+#: so one weekly run stamped 25,875 unchanged rows with a single batch time and
+#: the 497 events of the feed collapsed into 12 ``SEQUENCE`` values.
+#:
+#: Provider provenance (``date_source``/``date_status``/``estimate_source``/
+#: ``actual_source``) is deliberately *absent*: both sync stages rewrite it on
+#: every run, so counting it would restore exactly the churn being fixed.
+_REVISION_COLUMNS = (
+    "company_name", "fiscal_year", "fiscal_quarter",
+    "eps_estimate", "eps_actual", "revenue_estimate", "revenue_actual",
+    "before_after", "estimate_currency", "actual_currency",
+    "estimate_basis", "actual_basis", "is_predicted",
+)
+
+#: Issue #73: ``estimate_as_of``/``actual_as_of`` say when *that* number changed,
+#: so each side follows only its own values and labels.
+_ESTIMATE_STAMP_COLUMNS = (
+    "eps_estimate", "revenue_estimate", "estimate_currency", "estimate_basis",
+)
+_ACTUAL_STAMP_COLUMNS = (
+    "eps_actual", "revenue_actual", "actual_currency", "actual_basis",
+)
+
+#: How a re-delivered Longbridge row updates a stored one, column by column.
+#: Rendered into the conflict clause below; :func:`fiscal.revision_predicate`
+#: reuses these very expressions, so "what a write changes" and "what bumps the
+#: stamp" cannot drift apart (Issue #103).
+_LONGBRIDGE_UPSERT: dict[str, str] = {
+    "company_name": "EXCLUDED.company_name",
+    "fiscal_year": "CASE WHEN earnings.fiscal_year IS NULL THEN EXCLUDED.fiscal_year ELSE earnings.fiscal_year END",
+    "fiscal_quarter": "CASE WHEN earnings.fiscal_quarter IS NULL THEN EXCLUDED.fiscal_quarter ELSE earnings.fiscal_quarter END",
+    "eps_estimate": "COALESCE(EXCLUDED.eps_estimate, earnings.eps_estimate)",
+    "eps_actual": "COALESCE(EXCLUDED.eps_actual, earnings.eps_actual)",
+    "revenue_estimate": "COALESCE(EXCLUDED.revenue_estimate, earnings.revenue_estimate)",
+    "revenue_actual": "COALESCE(EXCLUDED.revenue_actual, earnings.revenue_actual)",
+    "before_after": "COALESCE(EXCLUDED.before_after, earnings.before_after)",
+    # Issue #61 / #89: a label is evidence, so it is never wiped and never
+    # downgraded.  It is written when the row carries none (or only the
+    # ``unknown`` marker) and the new value is a real declaration; the estimate
+    # side only accepts it for an estimate Longbridge owns
+    # (``estimate_source`` longbridge/unattributed) — the same rule the one-time
+    # backfill uses, because a predictor-owned estimate is not Longbridge's
+    # figure and must not inherit the calendar's currency.
+    "estimate_currency": (
+        "CASE\n"
+        "                WHEN earnings.estimate_currency IS NOT NULL\n"
+        "                     AND LOWER(earnings.estimate_currency) <> 'unknown'\n"
+        "                    THEN earnings.estimate_currency\n"
+        "                WHEN LOWER(COALESCE(earnings.estimate_source, '')) IN ('', 'longbridge')\n"
+        "                     AND EXCLUDED.estimate_currency IS NOT NULL\n"
+        "                     AND LOWER(EXCLUDED.estimate_currency) <> 'unknown'\n"
+        "                    THEN EXCLUDED.estimate_currency\n"
+        "                ELSE earnings.estimate_currency END"
+    ),
+    "estimate_basis": "COALESCE(earnings.estimate_basis, EXCLUDED.estimate_basis)",
+    # Issue #89/#91: the label describes *this* provider's number, so it may
+    # never outlive the value it was written for.  A declaration from the writer
+    # always wins; a re-sync by the same writer keeps what is stored; a
+    # *different* writer that declares nothing resets the label to `unknown`
+    # instead of leaving Futu's TWD/EUR/CNY sitting on a USD-converted
+    # Longbridge figure.
+    "actual_currency": (
+        "CASE\n"
+        "                WHEN EXCLUDED.eps_actual IS NULL AND EXCLUDED.revenue_actual IS NULL\n"
+        "                    THEN earnings.actual_currency\n"
+        "                WHEN EXCLUDED.actual_currency IS NOT NULL\n"
+        "                     AND LOWER(EXCLUDED.actual_currency) <> 'unknown'\n"
+        "                    THEN EXCLUDED.actual_currency\n"
+        "                WHEN LOWER(COALESCE(earnings.actual_source, '')) = 'longbridge'\n"
+        "                    THEN earnings.actual_currency\n"
+        "                ELSE 'unknown' END"
+    ),
+    "actual_basis": (
+        "CASE\n"
+        "                WHEN EXCLUDED.eps_actual IS NULL AND EXCLUDED.revenue_actual IS NULL\n"
+        "                    THEN earnings.actual_basis\n"
+        "                WHEN EXCLUDED.actual_basis IS NOT NULL\n"
+        "                     AND LOWER(EXCLUDED.actual_basis) <> 'unknown'\n"
+        "                    THEN EXCLUDED.actual_basis\n"
+        "                WHEN LOWER(COALESCE(earnings.actual_source, '')) = 'longbridge'\n"
+        "                    THEN earnings.actual_basis\n"
+        "                ELSE 'unknown' END"
+    ),
+    "is_predicted": fiscal.IDENTITY_PROMOTION_VALUE,
+}
+
+#: The INSERT's parameter layout: one VALUES field per batch tuple, in the order
+#: :func:`sync_earnings` builds them, with the type each field must be read as.
+#: The cast is not cosmetic: in ``INSERT ... SELECT`` the target column does not
+#: coerce the select list, and a column whose values are all NULL in a batch (a
+#: calendar page where no event carries an actual) arrives as ``unknown`` and is
+#: read as text — which a ``numeric`` target rejects.
+_BATCH_VALUE_CASTS = {
+    "symbol": "text", "market": "text", "company_name": "text",
+    "report_date": "date", "report_type": "text",
+    "fiscal_year": "integer", "fiscal_quarter": "integer",
+    "eps_estimate": "numeric", "eps_actual": "numeric",
+    "revenue_estimate": "numeric", "revenue_actual": "numeric",
+    "before_after": "text", "estimate_currency": "text",
+    "actual_currency": "text", "estimate_basis": "text", "actual_basis": "text",
+}
+_BATCH_VALUE_COLUMNS = tuple(_BATCH_VALUE_CASTS)
+
 
 @dataclass
 class FlushStats:
@@ -567,74 +672,53 @@ def flush_batch(cur, rows: list[tuple]) -> FlushStats:
             move["from"], move["to"], move["id"],
         )
     from psycopg2.extras import execute_values
+    columns = ", ".join(_BATCH_VALUE_COLUMNS)
+    selected = ", ".join(
+        f"v.{column}::{_BATCH_VALUE_CASTS[column]}" for column in _BATCH_VALUE_COLUMNS
+    )
+    assigned = ",\n            ".join(
+        f"{column} = {expression}" for column, expression in _LONGBRIDGE_UPSERT.items()
+    )
+    revision = fiscal.revision_predicate(_LONGBRIDGE_UPSERT, _REVISION_COLUMNS)
+    estimate_moved = fiscal.revision_predicate(_LONGBRIDGE_UPSERT, _ESTIMATE_STAMP_COLUMNS)
+    actual_moved = fiscal.revision_predicate(_LONGBRIDGE_UPSERT, _ACTUAL_STAMP_COLUMNS)
+    # Issue #103: the three stamps are conditional.  ``updated_at`` moves only
+    # when a value a client can see moved, and each ``*_as_of`` only when its own
+    # side did — a provider that re-serves the calendar must not announce a
+    # revision (RFC 5545 ``SEQUENCE``) or a new collection time for a row whose
+    # numbers are the same.
     insert_sql = f"""INSERT INTO earnings (symbol, market, company_name, report_date, report_type,
            fiscal_year, fiscal_quarter,
            eps_estimate, eps_actual, revenue_estimate, revenue_actual, before_after,
-           estimate_currency, actual_currency, estimate_basis, actual_basis)
-        VALUES %s
+           estimate_currency, actual_currency, estimate_basis, actual_basis,
+           estimate_as_of, actual_as_of)
+        SELECT {selected},
+               -- A first write *is* when the number was first seen; the conflict
+               -- branch below only moves these when the number changes.
+               CASE WHEN v.eps_estimate IS NOT NULL OR v.revenue_estimate IS NOT NULL
+                    THEN NOW() END,
+               CASE WHEN v.eps_actual IS NOT NULL OR v.revenue_actual IS NOT NULL
+                    THEN NOW() END
+        FROM (VALUES %s) AS v({columns})
         ON CONFLICT (symbol, market, report_date, report_type)
         DO UPDATE SET
-            company_name = EXCLUDED.company_name,
-            fiscal_year = CASE WHEN earnings.fiscal_year IS NULL THEN EXCLUDED.fiscal_year ELSE earnings.fiscal_year END,
-            fiscal_quarter = CASE WHEN earnings.fiscal_quarter IS NULL THEN EXCLUDED.fiscal_quarter ELSE earnings.fiscal_quarter END,
-            eps_estimate = COALESCE(EXCLUDED.eps_estimate, earnings.eps_estimate),
-            eps_actual = COALESCE(EXCLUDED.eps_actual, earnings.eps_actual),
-            revenue_estimate = COALESCE(EXCLUDED.revenue_estimate, earnings.revenue_estimate),
-            revenue_actual = COALESCE(EXCLUDED.revenue_actual, earnings.revenue_actual),
-            before_after = COALESCE(EXCLUDED.before_after, earnings.before_after),
-            -- Issue #61 / #89: a label is evidence, so it is never wiped and never
-            -- downgraded.  It is written when the row carries none (or only the
-            -- ``unknown`` marker) and the new value is a real declaration; the
-            -- estimate side only accepts it for an estimate Longbridge owns
-            -- (``estimate_source`` longbridge/unattributed) — the same rule the
-            -- one-time backfill uses, because a predictor-owned estimate is not
-            -- Longbridge's figure and must not inherit the calendar's currency.
-            estimate_currency = CASE
-                WHEN earnings.estimate_currency IS NOT NULL
-                     AND LOWER(earnings.estimate_currency) <> 'unknown'
-                    THEN earnings.estimate_currency
-                WHEN LOWER(COALESCE(earnings.estimate_source, '')) IN ('', 'longbridge')
-                     AND EXCLUDED.estimate_currency IS NOT NULL
-                     AND LOWER(EXCLUDED.estimate_currency) <> 'unknown'
-                    THEN EXCLUDED.estimate_currency
-                ELSE earnings.estimate_currency END,
-            estimate_basis = COALESCE(earnings.estimate_basis, EXCLUDED.estimate_basis),
-            -- Issue #89/#91: the label describes *this* provider's number, so it
-            -- may never outlive the value it was written for.  A declaration from
-            -- the writer always wins; a re-sync by the same writer keeps what is
-            -- stored; a *different* writer that declares nothing resets the label
-            -- to `unknown` instead of leaving Futu's TWD/EUR/CNY sitting on a
-            -- USD-converted Longbridge figure.
-            actual_currency = CASE
-                WHEN EXCLUDED.eps_actual IS NULL AND EXCLUDED.revenue_actual IS NULL
-                    THEN earnings.actual_currency
-                WHEN EXCLUDED.actual_currency IS NOT NULL
-                     AND LOWER(EXCLUDED.actual_currency) <> 'unknown'
-                    THEN EXCLUDED.actual_currency
-                WHEN LOWER(COALESCE(earnings.actual_source, '')) = 'longbridge'
-                    THEN earnings.actual_currency
-                ELSE 'unknown' END,
-            actual_basis = CASE
-                WHEN EXCLUDED.eps_actual IS NULL AND EXCLUDED.revenue_actual IS NULL
-                    THEN earnings.actual_basis
-                WHEN EXCLUDED.actual_basis IS NOT NULL
-                     AND LOWER(EXCLUDED.actual_basis) <> 'unknown'
-                    THEN EXCLUDED.actual_basis
-                WHEN LOWER(COALESCE(earnings.actual_source, '')) = 'longbridge'
-                    THEN earnings.actual_basis
-                ELSE 'unknown' END,
-            {fiscal.CONFIRM_IDENTITY_PROMOTION},
-            updated_at = NOW()
+            {assigned},
+            estimate_as_of = CASE WHEN {estimate_moved} THEN NOW() ELSE earnings.estimate_as_of END,
+            actual_as_of = CASE WHEN {actual_moved} THEN NOW() ELSE earnings.actual_as_of END,
+            updated_at = CASE WHEN {revision} THEN NOW() ELSE earnings.updated_at END
         """
     written_rows, identity_skipped = _insert_earnings_rows(cur, insert_sql, rows)
     rows = written_rows
     keys = [(r[0], r[1], r[3]) for r in rows]
+    # Provenance and status still converge on every run (Issue #89/#91: a label
+    # may not outlive its value, a row with actuals must read ``reported``), but
+    # they no longer carry a timestamp: the upsert above owns the revision
+    # stamps, and rewriting them here would put the run clock back on the row
+    # (Issue #103).
     execute_values(cur, """UPDATE earnings AS e SET
         date_source = 'longbridge', date_status = CASE WHEN e.eps_actual IS NOT NULL OR e.revenue_actual IS NOT NULL THEN 'reported' ELSE 'scheduled' END,
         estimate_source = CASE WHEN e.eps_estimate IS NOT NULL OR e.revenue_estimate IS NOT NULL THEN 'longbridge' ELSE e.estimate_source END,
-        estimate_as_of = CASE WHEN e.eps_estimate IS NOT NULL OR e.revenue_estimate IS NOT NULL THEN NOW() ELSE e.estimate_as_of END,
-        actual_source = CASE WHEN e.eps_actual IS NOT NULL OR e.revenue_actual IS NOT NULL THEN 'longbridge' ELSE e.actual_source END,
-        actual_as_of = CASE WHEN e.eps_actual IS NOT NULL OR e.revenue_actual IS NOT NULL THEN NOW() ELSE e.actual_as_of END
+        actual_source = CASE WHEN e.eps_actual IS NOT NULL OR e.revenue_actual IS NOT NULL THEN 'longbridge' ELSE e.actual_source END
         FROM (VALUES %s) AS v(symbol, market, report_date)
         WHERE (e.symbol,e.market,e.report_date)=(v.symbol,v.market,(v.report_date)::date)""", keys)
     execute_values(cur, """INSERT INTO earnings_estimate_snapshots (earning_id, source, eps_estimate, revenue_estimate, payload)

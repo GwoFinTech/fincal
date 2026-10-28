@@ -575,11 +575,34 @@ _IDENTITY_LOOKUP_PAGE = 200
 #: rejected by ``idx_earnings_fiscal_identity``.  Sharing the fragment keeps the
 #: two paths from drifting apart again (the incident report notes the Longbridge
 #: path carries the same pattern).
-CONFIRM_IDENTITY_PROMOTION = (
-    "is_predicted = CASE WHEN earnings.fiscal_year IS NOT DISTINCT FROM EXCLUDED.fiscal_year"
+IDENTITY_PROMOTION_VALUE = (
+    "CASE WHEN earnings.fiscal_year IS NOT DISTINCT FROM EXCLUDED.fiscal_year"
     " AND earnings.fiscal_quarter IS NOT DISTINCT FROM EXCLUDED.fiscal_quarter"
     " THEN FALSE ELSE earnings.is_predicted END"
 )
+
+CONFIRM_IDENTITY_PROMOTION = f"is_predicted = {IDENTITY_PROMOTION_VALUE}"
+
+
+def revision_predicate(assignments: dict[str, str], columns, alias: str = "earnings") -> str:
+    """SQL predicate: "the incoming row's effective values differ from the stored ones".
+
+    Issue #103: ``earnings.updated_at`` is a *revision counter*, not a write
+    clock — ``app/ical.py`` derives the event's ``SEQUENCE`` and ``LAST-MODIFIED``
+    from it, ``app/routers/ical.py`` uses it as the feed ``Last-Modified`` floor,
+    and #73's ``estimate_as_of``/``actual_as_of`` answer "when did this number
+    last change".  A sync that re-serves an unchanged row must therefore leave
+    all of them alone, which means the write path needs to say what it changed.
+
+    ``assignments`` maps a column to the expression the upsert writes for it, so
+    the comparison uses the *effective* value (``COALESCE``/``CASE``) rather than
+    the raw incoming field: a re-delivery that carries no value for a column must
+    not read as a change.  ``IS DISTINCT FROM`` is NULL-safe, so "nothing before,
+    nothing after" is not a change either.
+    """
+    incoming = ", ".join(f"({assignments[column]})" for column in columns)
+    stored = ", ".join(f"{alias}.{column}" for column in columns)
+    return f"({incoming}) IS DISTINCT FROM ({stored})"
 
 
 @dataclass

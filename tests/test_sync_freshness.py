@@ -294,11 +294,24 @@ class OnDemandCacheFreshnessTests(TestCase):
         query = freshness._derived_query()
         self.assertEqual(
             sorted({table for table, _ in DERIVED_TABLES}),
-            ["earnings", "earnings_consensus", "earnings_forecast_eps",
+            ["earnings_consensus", "earnings_forecast_eps",
              "earnings_institution_ratings"],
         )
         for table, column in DERIVED_TABLES:
             self.assertIn(f"SELECT '{table}' AS name, MAX({column})", query)
+
+    def test_earnings_is_judged_by_its_stage_not_by_updated_at(self):
+        """Issue #103: ``earnings.updated_at`` is a revision counter now.
+
+        It only moves when a value changes, so ``MAX(updated_at)`` has stopped
+        meaning "last successful run" — the second condition of the Issue #67
+        rule above.  The calendar's freshness comes from the ``longbridge``
+        stage row, which every run writes whether or not it wrote a row.
+        """
+        self.assertNotIn("earnings", {table for table, _ in DERIVED_TABLES})
+        self.assertNotIn("MAX(updated_at)", freshness._derived_query())
+        self.assertIn("longbridge", SYNC_STAGES)
+        self.assertEqual(STAGE_SCRIPTS["longbridge"], "scripts/sync_earnings.py")
 
     def test_stock_names_is_still_a_monitored_stage(self):
         """Coverage must not shrink: its own sync_runs row is the only signal."""

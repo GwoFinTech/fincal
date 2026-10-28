@@ -361,7 +361,13 @@ class LongbridgeAttributionWriteTests(TestCase):
                          "the period's estimate may still be labelled by this event")
 
     def test_insert_columns_match_the_batch_width(self):
-        """The batch layout and the INSERT column list are one contract (Issue #61)."""
+        """The batch layout and the INSERT column list are one contract (Issue #61).
+
+        Issue #103 moved the INSERT onto ``SELECT … FROM (VALUES %s)`` so the two
+        ``*_as_of`` stamps can be computed for a first write (a bound value cannot
+        be a SQL expression).  The contract is unchanged: every batch field is a
+        VALUES column of the same name and lands in the column of that name.
+        """
         cursor = MagicMock()
         cursor.fetchall.return_value = []
         recorder = _RecordingExecuteValues()
@@ -369,10 +375,14 @@ class LongbridgeAttributionWriteTests(TestCase):
              patch.object(sync_earnings, "db_cursor", return_value=_fake_db_cursor(cursor)):
             sync_earnings.flush_batch(cursor, [sync_earnings_tuple()])
         call = [call for call in recorder.calls if "INSERT INTO earnings " in call["sql"]][0]
-        columns = re.findall(r"\(([^()]*)\)\s*VALUES", call["sql"], re.S)[0]
-        column_count = len([c for c in columns.split(",") if c.strip()])
-        self.assertEqual(column_count, len(call["rows"][0]),
-                         "flush_batch must pass exactly one value per INSERT column")
+        alias = re.search(r"FROM \(VALUES %s\) AS v\(([^)]*)\)", call["sql"], re.S).group(1)
+        names = [name.strip() for name in alias.split(",")]
+        self.assertEqual(len(names), len(call["rows"][0]),
+                         "flush_batch must pass exactly one value per batch field")
+        columns = re.search(r"INSERT INTO earnings \(([^)]*)\)", call["sql"], re.S).group(1)
+        self.assertEqual([column.strip() for column in columns.split(",")],
+                         names + ["estimate_as_of", "actual_as_of"],
+                         "the two stamps are computed, not bound")
 
 
 def _insert_sql(recorder) -> str:

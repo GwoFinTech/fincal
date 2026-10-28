@@ -406,6 +406,40 @@ whole process and strands a `running` audit row that would block every later
 sync. The audited run is also wrapped in a `finally` that forces a terminal
 state on any exit path.
 
+### Revision stamps: `updated_at`, `estimate_as_of`, `actual_as_of` (Issue #103)
+
+`earnings.updated_at` is not a write clock. It is the row's **revision counter**,
+and three consumers read it as one:
+
+* `app/ical.py` derives the VEVENT `SEQUENCE` (RFC 5545 §3.8.7.4) and
+  `LAST-MODIFIED` from it — a client treats a larger `SEQUENCE` as "this event was
+  revised, replace your copy";
+* `app/routers/ical.py::_feed_last_modified` uses `max(updated_at)` as the feed's
+  `Last-Modified` floor, so an advance without a content change makes
+  `If-Modified-Since`-only clients download the feed again;
+* `app/fiscal.authority_key` uses it as the tie-break between rows of one period.
+
+`estimate_as_of` / `actual_as_of` (Issue #73) answer the narrower question "when
+did *this* number last change".
+
+Both sync stages therefore write these columns **only when a value changes**.
+The conflict branch of the Longbridge upsert and the Futu date/actual upserts
+compare the row's effective values (`COALESCE`/`CASE` applied, so a re-delivery
+carrying no value is not a change) with `IS DISTINCT FROM` (NULL-safe) and stamp
+`NOW()` only on a real difference; a first write still stamps the numbers it
+inserts. Provider provenance (`date_source` / `date_status` / `estimate_source` /
+`actual_source`) is deliberately **not** part of that comparison: both stages
+rewrite it on every run and it would put the run clock back on the row.
+
+Consequences worth knowing:
+
+* rows whose content never changes keep an old `updated_at` — that is the point;
+* the historical damage is not repaired: 26k rows were stamped by past runs, and
+  a real "when did it change" time cannot be reconstructed, so `SEQUENCE` values
+  only spread out as rows are genuinely revised from now on;
+* a provenance-only change (e.g. Futu re-confirming a date Longbridge wrote) is
+  visible in the calendar body but does not bump `SEQUENCE`.
+
 ### Sync-run timeout reaper (Issue #33)
 
 `sync_runs.timeout_seconds` is written for every run by
@@ -457,9 +491,11 @@ declared stage last succeed, and how old is the data it derives?*
 - Derived tables are checked too, but only ones that are **rendered to users
   and rewritten on every successful run** — that is the condition for
   `MAX(<time column>)` to mean "last successful run" (`earnings_consensus`,
-  `earnings_forecast_eps`, `earnings_institution_ratings` on `MAX(fetched_at)`,
-  `earnings` on `MAX(updated_at)`), so a fresh stage with stale output still
-  shows up.
+  `earnings_forecast_eps`, `earnings_institution_ratings` on `MAX(fetched_at)`),
+  so a fresh stage with stale output still shows up. The calendar table itself
+  is judged by its `longbridge` stage row: since Issue #103 `earnings.updated_at`
+  is a revision counter that deliberately does **not** move when a re-delivery
+  changes nothing, so `MAX(updated_at)` no longer means "last successful run".
 - On-demand caches are deliberately **not** judged this way: `stock_names` only
   writes when a missing name is resolved, so its `MAX(fetched_at)` freezes as
   soon as the pending set is empty (Issue #67). Its verdict comes from its own
@@ -492,7 +528,7 @@ DB_HOST=localhost uv run python scripts/check_sync_freshness.py
 # consensus                        stage    stale      1113.11  2026-08-02T09:27:43+00:00
 # prediction                       stage    fresh        90.44  2026-09-14T00:08:00+00:00
 # earnings_consensus               derived  stale      1113.11  2026-08-02T09:27:41+00:00
-# earnings                         derived  fresh        47.69  2026-09-15T18:53:22+00:00
+# earnings_forecast_eps            derived  fresh        47.69  2026-09-15T18:53:22+00:00
 # …
 # STALE: stage 'consensus' last succeeded at 2026-08-02T09:27:43+00:00 (1113.11h ago)
 # exit=1

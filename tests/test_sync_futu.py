@@ -224,7 +224,12 @@ class FutuActualsProvenanceTests(TestCase):
             )
 
     def test_futu_updates_higher_priority_actuals_and_records_timestamp(self):
-        """Issue #45: Futu must replace Longbridge actuals, not only fill NULL."""
+        """Issue #45: Futu must replace Longbridge actuals, not only fill NULL.
+
+        Issue #103: the timestamp is still written, but only when this statement
+        actually changes the value — a re-fetched statement that carries the same
+        EPS, currency and basis must not restamp ``actual_as_of``/``updated_at``.
+        """
         with patch.object(sync_futu, "check_cancelled"), \
              _db_mock(self._cursor):
             sync_futu.sync_actuals(self.ctx, 1, ["AAPL.US"])
@@ -233,7 +238,9 @@ class FutuActualsProvenanceTests(TestCase):
                    if sql.strip().startswith("UPDATE earnings")]
         assert len(updates) >= 2
         for sql in updates:
-            assert "actual_as_of = NOW()" in sql
+            assert "actual_as_of = CASE WHEN" in sql
+            assert "THEN NOW() ELSE actual_as_of END" in sql
+            assert "updated_at = CASE WHEN" in sql
             assert "COALESCE(actual_source, 'unknown') IN" in sql
             assert "'longbridge'" in sql
             assert "IS NULL" not in sql

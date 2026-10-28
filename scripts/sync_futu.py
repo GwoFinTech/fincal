@@ -91,6 +91,25 @@ _KEEP_SAME_PROVIDER_PAIR_SQL = """
         AND LOWER(actual_source) = LOWER(estimate_source)
     )"""
 
+#: One actual-side update (EPS or revenue).  Issue #103: ``actual_as_of`` answers
+#: "when did *this* number change" (#73) and ``updated_at`` is the feed's revision
+#: counter, so both are conditional — a statement re-fetched unchanged must not
+#: restamp the row.  The comparison reads the *stored* value, which in an UPDATE
+#: is what an unqualified column name refers to.
+_ACTUAL_UPDATE_SQL = f"""UPDATE earnings SET {{column}} = %s, date_status = 'reported',
+   actual_source = 'futu',
+   actual_as_of = CASE WHEN {{column}} IS DISTINCT FROM %s::numeric
+                       THEN NOW() ELSE actual_as_of END,
+   actual_currency = %s, actual_basis = %s,
+   updated_at = CASE WHEN ({{column}}, actual_currency, actual_basis)
+                          IS DISTINCT FROM (%s::numeric, %s::text, %s::text)
+                     THEN NOW() ELSE updated_at END
+WHERE symbol = %s AND market = %s AND fiscal_year = %s
+AND fiscal_quarter = %s
+AND COALESCE(actual_source, 'unknown') IN {_REPLACEABLE_SOURCES_SQL}
+{_KEEP_SAME_PROVIDER_PAIR_SQL}
+"""
+
 
 @dataclass(frozen=True)
 class StatementField:
@@ -649,19 +668,40 @@ _DATE_ROW_SAVEPOINT = "fincal_futu_row"
 #: The date upsert.  ``is_predicted`` is *not* a bare ``FALSE``: a provider row
 #: may only confirm a row that carries its own fiscal identity
 #: (``fiscal.CONFIRM_IDENTITY_PROMOTION``, Issue #81).
+#:
+#: Issue #103: ``updated_at`` is the feed's revision counter (``SEQUENCE`` /
+#: ``LAST-MODIFIED`` in ``app/ical.py``, and ``authority_key``'s tie-break), so a
+#: re-delivered date moves it only when one of these columns actually changes.
+#: ``date_source``/``date_status`` are rewritten unconditionally — they are
+#: provenance, and the Longbridge stage rewrites them back on every run, so
+#: counting them would bump the stamp twice a week for no content change.
+_FUTU_DATE_UPSERT: dict[str, str] = {
+    "fiscal_year": "CASE WHEN earnings.fiscal_year IS NULL THEN EXCLUDED.fiscal_year ELSE earnings.fiscal_year END",
+    "fiscal_quarter": "CASE WHEN earnings.fiscal_quarter IS NULL THEN EXCLUDED.fiscal_quarter ELSE earnings.fiscal_quarter END",
+    "before_after": "COALESCE(EXCLUDED.before_after, earnings.before_after)",
+    "is_predicted": fiscal.IDENTITY_PROMOTION_VALUE,
+    "company_name": "CASE WHEN earnings.company_name = '' THEN EXCLUDED.company_name ELSE earnings.company_name END",
+}
+
+#: Every column above is content (nothing in the conflict branch is provenance),
+#: so the revision predicate covers the whole mapping.
+_DATE_REVISION_COLUMNS = tuple(_FUTU_DATE_UPSERT)
+
+#: Rendered SET list, one assignment per line.
+_DATE_ASSIGNMENTS = ",\n    ".join(
+    f"{column} = {expression}" for column, expression in _FUTU_DATE_UPSERT.items()
+)
+
 _DATE_UPSERT_SQL = f"""INSERT INTO earnings (symbol, market, company_name, report_date, report_type,
    fiscal_year, fiscal_quarter, before_after, date_source, date_status)
 VALUES %s
 ON CONFLICT (symbol, market, report_date, report_type)
 DO UPDATE SET
-    fiscal_year = CASE WHEN earnings.fiscal_year IS NULL THEN EXCLUDED.fiscal_year ELSE earnings.fiscal_year END,
-    fiscal_quarter = CASE WHEN earnings.fiscal_quarter IS NULL THEN EXCLUDED.fiscal_quarter ELSE earnings.fiscal_quarter END,
-    before_after = COALESCE(EXCLUDED.before_after, earnings.before_after),
-    {fiscal.CONFIRM_IDENTITY_PROMOTION},
-    company_name = CASE WHEN earnings.company_name = '' THEN EXCLUDED.company_name ELSE earnings.company_name END,
+    {_DATE_ASSIGNMENTS},
     date_source = 'futu',
     date_status = CASE WHEN earnings.eps_actual IS NOT NULL OR earnings.revenue_actual IS NOT NULL THEN 'reported' ELSE 'scheduled' END,
-    updated_at = NOW()
+    updated_at = CASE WHEN {fiscal.revision_predicate(_FUTU_DATE_UPSERT, _DATE_REVISION_COLUMNS)}
+                      THEN NOW() ELSE earnings.updated_at END
 """
 
 
@@ -875,28 +915,18 @@ def sync_actuals(ctx, run_id: int, symbols: list[str],
                     if eps.value is not None:
                         with db_cursor() as cur:
                             cur.execute(
-                                f"""UPDATE earnings SET eps_actual = %s, date_status = 'reported',
-                                   actual_source = 'futu', actual_as_of = NOW(),
-                                   actual_currency = %s, actual_basis = %s, updated_at = NOW()
-                                WHERE symbol = %s AND market = %s AND fiscal_year = %s
-                                AND fiscal_quarter = %s
-                                AND COALESCE(actual_source, 'unknown') IN {_REPLACEABLE_SOURCES_SQL}
-                                {_KEEP_SAME_PROVIDER_PAIR_SQL}
-                                """,
-                                (eps.value, currency, basis, symbol, market, fy, fq),
+                                _ACTUAL_UPDATE_SQL.format(column="eps_actual"),
+                                (eps.value, eps.value, currency, basis,
+                                 eps.value, currency, basis,
+                                 symbol, market, fy, fq),
                             )
                     if revenue.value is not None:
                         with db_cursor() as cur:
                             cur.execute(
-                                f"""UPDATE earnings SET revenue_actual = %s, date_status = 'reported',
-                                   actual_source = 'futu', actual_as_of = NOW(),
-                                   actual_currency = %s, actual_basis = %s, updated_at = NOW()
-                                WHERE symbol = %s AND market = %s AND fiscal_year = %s
-                                AND fiscal_quarter = %s
-                                AND COALESCE(actual_source, 'unknown') IN {_REPLACEABLE_SOURCES_SQL}
-                                {_KEEP_SAME_PROVIDER_PAIR_SQL}
-                                """,
-                                (revenue.value, currency, basis, symbol, market, fy, fq),
+                                _ACTUAL_UPDATE_SQL.format(column="revenue_actual"),
+                                (revenue.value, revenue.value, currency, basis,
+                                 revenue.value, currency, basis,
+                                 symbol, market, fy, fq),
                             )
         except Exception as e:
             outcome = merge_outcome(outcome, OUTCOME_FAILED)
