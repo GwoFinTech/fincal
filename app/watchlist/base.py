@@ -47,18 +47,29 @@ def group_symbols_by_market_with_skipped(codes: list[str]) -> tuple[dict[str, li
     returned in ``skipped`` so the read path cannot offer a symbol the sync path
     skips every week (Issue #66).  The market decision itself lives in
     :func:`app.symbol.market_of`, shared with the sync path.
+
+    Different spellings of one code collapse to the single canonical entry
+    (``700`` / ``0700`` / ``0700.HK`` → one ``0700.HK``): they used to occupy
+    separate universe slots, so the same company could burn three of them and
+    only the suffixed one had data (Issue #105).
     """
     result: dict[str, list[str]] = {"US": [], "HK": []}
+    seen: set[tuple[str, str]] = set()
     skipped: list[str] = []
     for code in codes:
         raw = str(code).strip().upper()
         market = market_of(raw)
         if market == "HK":
-            result["HK"].append(normalize(bare_ticker(raw), "HK"))
+            canonical = normalize(bare_ticker(raw), "HK")
         elif market == "US":
-            result["US"].append(bare_ticker(raw))
+            canonical = bare_ticker(raw)
         else:
             skipped.append(raw)
+            continue
+        if (market, canonical) in seen:
+            continue
+        seen.add((market, canonical))
+        result[market].append(canonical)
     if skipped:
         logger.info(
             "%d watchlist code(s) dropped (no US/HK market): %s",
@@ -201,7 +212,11 @@ class WatchlistSource(ABC):
             raw = str(code).strip().upper()
             market = market_of(raw)
             if market == "HK":
-                symbols.append(normalize(bare_ticker(raw), "HK"))
+                canonical = normalize(bare_ticker(raw), "HK")
+                # ``700`` / ``0700`` / ``0700.HK`` are one code (Issue #105): a
+                # duplicate here means the same Futu request three times.
+                if canonical not in symbols:
+                    symbols.append(canonical)
             elif raw.endswith(".US"):
                 symbols.append(raw)
             elif market == "US" and "." not in raw:

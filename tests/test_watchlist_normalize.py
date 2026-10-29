@@ -247,3 +247,108 @@ def test_add_watchlist_rejects_a_code_that_is_not_the_requested_market():
             assert client.post("/api/watchlist?symbol=700&market=HK").status_code == 200
     finally:
         app.dependency_overrides = {}
+
+
+# ── Issue #105: a bare numeric code is an HK code, not a US one ──────────
+
+def test_market_of_reads_a_bare_numeric_code_as_hk():
+    """The admin form's own placeholder (``0700``) is a valid HK code."""
+    for code in ("1", "700", "0700", "00700", "08233", "82333"):
+        assert market_of(code) == "HK", code
+    # Spellings of the same company stay HK, so the universe can collapse them.
+    assert market_of("0700.HK") == "HK"
+    assert market_of("HK.00700") == "HK"
+
+
+def test_market_of_refuses_to_guess_a_market_for_a_bare_six_digit_code():
+    """``159326`` / ``512890`` are Shenzhen funds whose suffix was pasted off."""
+    for code in ("159326", "512890", "1234567"):
+        assert market_of(code) is None, code
+    # The US contract and class shares are untouched.
+    assert market_of("AAPL") == "US"
+    assert market_of("BRK.A") == "US"
+    assert market_of("AAPL.US") == "US"
+    assert market_of("000651.SZ") is None
+
+
+def test_group_symbols_by_market_collapses_the_spellings_of_one_hk_code():
+    """``700`` / ``0700`` / ``0700.HK`` used to occupy three universe slots."""
+    by_market, skipped = group_symbols_by_market_with_skipped(["700", "0700", "0700.HK"])
+
+    assert by_market["US"] == [], by_market
+    assert by_market["HK"] == ["0700.HK"], by_market
+    assert skipped == []
+
+
+def test_group_symbols_by_market_sends_bare_numbers_to_hk_and_drops_funds():
+    by_market, skipped = group_symbols_by_market_with_skipped(
+        ["0700", "82333", "AAPL", "159326", "BRK.A"]
+    )
+
+    # No numeric code may be bucketed as US any more.
+    assert by_market["US"] == ["AAPL", "BRK.A"], by_market
+    # The 5-digit 8xxxx RMB counter keeps its own canonical spelling (#54).
+    assert by_market["HK"] == ["0700.HK", "82333.HK"], by_market
+    # A bare six-digit fund code reaches the reported skip channel (a class
+    # share is skipped by the Futu sync, not by the universe).
+    assert skipped == ["159326"], skipped
+
+
+def test_futu_sync_routes_a_bare_numeric_code_to_hk():
+    """``0700`` used to be suffixed ``.US`` and fail on every Futu run."""
+    src = FakeSource(["0700", "700", "0700.HK", "AAPL", "159326"])
+    symbols, skipped = src.get_futu_symbols_with_skipped(force_refresh=True)
+
+    assert symbols == ["0700.HK", "AAPL.US"], symbols
+    assert skipped == ["159326"], skipped
+
+
+def test_normalize_never_fabricates_a_numeric_us_symbol():
+    import pytest
+
+    with pytest.raises(ValueError, match="symbol_market_mismatch"):
+        normalize("0700", "US")
+    # The HK branch is unchanged, padding to the canonical four digits.
+    assert normalize("0700", "HK") == "0700.HK"
+    assert normalize("700", "HK") == "0700.HK"
+    assert normalize("82333", "HK") == "82333.HK"
+
+
+def test_managed_symbol_accepts_the_bare_hk_placeholder():
+    import pytest
+
+    assert normalize_managed_symbol("0700", "HK") == ("0700.HK", "HK")
+    assert normalize_managed_symbol("700", "HK") == ("0700.HK", "HK")
+    for symbol, market in (("0700", "US"), ("159326", "US"), ("159326", "HK")):
+        with pytest.raises(ValueError, match="symbol_market_mismatch"):
+            normalize_managed_symbol(symbol, market)
+
+
+def test_write_paths_refuse_a_bare_numeric_code_as_us():
+    """Both write paths reject it before touching the database (Issue #105)."""
+    executed: list[str] = []
+    app.dependency_overrides = {get_current_user: lambda: {"id": 1, "email": "t@t.com", "name": "T", "role": "user"}}
+    try:
+        with patch.object(db, "db_cursor", lambda: _RecordingConn(executed)):
+            client = TestClient(app, raise_server_exceptions=False)
+
+            rejected = client.post("/api/watchlist?symbol=0700&market=US")
+            assert rejected.status_code == 400, rejected.text
+            assert rejected.json()["error"]["code"] == "symbol_market_mismatch"
+            assert not [s for s in executed if "INSERT INTO watchlist" in s], executed
+
+            # The same code under HK is accepted, canonicalized to 0700.HK.
+            assert client.post("/api/watchlist?symbol=0700&market=HK").status_code == 200
+    finally:
+        app.dependency_overrides = {}
+
+    app.dependency_overrides = {get_current_user: lambda: {"id": 1, "email": "t@t.com", "name": "T", "role": "admin"}}
+    try:
+        with patch.object(db, "db_cursor", lambda: _RecordingConn([])):
+            client = TestClient(app, raise_server_exceptions=False)
+
+            rejected = client.post("/api/admin/watchlist", json={"symbol": "0700", "market": "US"})
+            assert rejected.status_code == 422, rejected.text
+            assert rejected.json()["error"]["code"] == "symbol_market_mismatch"
+    finally:
+        app.dependency_overrides = {}

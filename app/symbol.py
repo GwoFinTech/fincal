@@ -75,6 +75,14 @@ def normalize(symbol: str, market: str) -> str:
         s = s[3:]
     if s.endswith(".US"):
         s = s[:-3]
+    if s.isdigit():
+        # A numeric code is an HK ticker, never a US one (Issue #105):
+        # ``normalize('0700', 'US')`` used to hand back a bare ``'0700'`` that no
+        # earnings row can ever match, so the write paths could store a ghost
+        # symbol.  ``market_mismatch`` refuses those writes first and ``db.py``
+        # converges the legacy spellings, so no stored row reaches this branch —
+        # an explicit error beats silently inventing a second spelling.
+        raise ValueError("symbol_market_mismatch")
     return s
 
 
@@ -84,6 +92,15 @@ def normalize(symbol: str, market: str) -> str:
 # sync and the iCal feed all key on US and HK.  A code from any other exchange
 # has no calendar behind it, so it must never be presented as one of these.
 SERVED_MARKETS = ("US", "HK")
+
+# HKEX codes are numeric; the longest in use is the five-digit ``8xxxx`` RMB
+# counter series (``82333`` = the RMB counter of ``2333.HK``, Issue #54).
+HK_TICKER_MAX_DIGITS = 5
+
+
+def _is_hk_ticker(ticker: str) -> bool:
+    """True when ``ticker`` is a bare HK code (1–5 digits, no suffix)."""
+    return ticker.isdigit() and len(ticker) <= HK_TICKER_MAX_DIGITS
 
 
 def bare_ticker(code: str) -> str:
@@ -114,12 +131,18 @@ def market_of(code: str) -> str | None:
     universe offered 25 A-share codes that can never have an earnings row
     (Issue #66).
 
-    * ``.HK`` → HK; ``.US`` or no suffix → US (the historical bare-ticker
-      contract);
+    * ``.HK`` → HK; ``.US`` → US; a code with *no* suffix is decided by its own
+      shape (Issue #105): 1–5 digits → HK (``1`` / ``700`` / ``0700`` /
+      ``82333``), anything with a letter → US (``AAPL``, the historical
+      bare-ticker contract);
     * a single-letter suffix is a class share / unit / similar spelling of a US
       listing (``BRK.A``, ``BF.B``, ``MKC.V``, ``ETSS.U``) → US;
     * any other suffix belongs to an exchange FinCal does not serve
-      (``.SZ``/``.SH``/``.SS``/``.BJ``, ``.TW``, …) → ``None``.
+      (``.SZ``/``.SH``/``.SS``/``.BJ``, ``.TW``, …) → ``None``, and so does a
+      suffix-less code of six or more digits: that is a Shenzhen fund/ETF
+      (``159326``, ``512890``) whose suffix was pasted off, and guessing HK
+      would invent a nonexistent ``159326.HK``.  ``None`` sends it to the
+      ``skipped`` channel that ``/api/universe`` reports.
     """
     s = str(code).strip().upper()
     if not s:
@@ -128,6 +151,12 @@ def market_of(code: str) -> str | None:
         if s.startswith(prefix) and len(s) > len(prefix):
             return prefix[:-1]
     if "." not in s:
+        # No suffix, so the ticker's shape is the only evidence there is.  A
+        # bare numeric code is an HK code — the admin form's own placeholder
+        # ("0700") produced a US symbol that never had an earnings row and
+        # could never be reported (Issue #105).
+        if s.isdigit():
+            return "HK" if _is_hk_ticker(s) else None
         return "US"
     head, tail = s.rsplit(".", 1)
     if not head:
@@ -157,8 +186,11 @@ def market_mismatch(symbol: str, market: str) -> bool:
         return False
     if m == "HK":
         # HK tickers are numeric and may be pasted bare (700 / 0700 / 00700) or
-        # with the suffix; anything else is another market's code.
-        return not (s.endswith(".HK") or ("." not in s and s.isdigit()))
+        # with the suffix; anything else is another market's code.  The same
+        # 1–5 digit bound as :func:`market_of` applies, so a suffix-less
+        # six-digit Shenzhen fund code (``159326``) is not accepted as HK
+        # either — it belongs to the ``skipped`` channel, not to a guess.
+        return not (s.endswith(".HK") or ("." not in s and _is_hk_ticker(s)))
     if m == "US":
         return market_of(s) != "US"
     return False
