@@ -357,12 +357,18 @@ class SyncFreshnessCheck(BaseModel):
 
     Returned on the unauthenticated ``/api/admin/health``: stage names and
     statuses only — never SQL, timestamps per stage or credentials.
+
+    ``failed_stages`` (Issue #104) names the stages whose **most recent run**
+    failed: the stage ran, and refreshed nothing.  It is separate from
+    ``stale_stages`` because the last success may still be inside the
+    threshold — that was exactly the case while the calendar was frozen.
     """
     status: str
     error_code: str | None = None
     threshold_hours: float | None = None
     stale_stages: list[str] = []
     never_run_stages: list[str] = []
+    failed_stages: list[str] = []
     stale_data: list[str] = []
     checked_at: str | None = None
 
@@ -374,6 +380,11 @@ class FreshnessEntry(BaseModel):
     age_hours: float | None = None
     status: str
     error_code: str | None = None
+    #: Most recent run of the stage, whatever its status (Issue #104).  ``status``
+    #: is ``failed`` when that run failed; derived entries leave these empty.
+    last_run_at: str | None = None
+    last_run_status: str | None = None
+    last_run_error_code: str | None = None
 
 class FreshnessResponse(BaseModel):
     status: str
@@ -382,6 +393,7 @@ class FreshnessResponse(BaseModel):
     checked_at: str | None = None
     stale_stages: list[str] = []
     never_run_stages: list[str] = []
+    failed_stages: list[str] = []
     stale_data: list[str] = []
     entries: list[FreshnessEntry] = []
 

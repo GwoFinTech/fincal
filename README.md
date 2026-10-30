@@ -182,6 +182,14 @@ The entrypoint runs the pipeline and then the freshness gate:
    table, and `tests/test_issue78_stage_timeouts.py` fails when one side is
    changed alone.
 
+   A stage records what it really did (Issue #52, #104). `longbridge` writes
+   `status=failed` with `error_code=longbridge_batch_failed` when every batch
+   died, and with `error_code=longbridge_no_rows` when the provider returned
+   calendar pages but **no event could be resolved** (identity or date
+   unparseable — the shape of the 2026-10-29 CLI change). Both carry
+   `details.unresolved` and exit non-zero, so the scheduled run fails loudly
+   instead of logging a `success` that wrote 0 rows; the later stages still run.
+
 2. `scripts/check_sync_freshness.py` — the hard gate, run **after** the stages
    so a first catch-up run is judged on the data it just wrote. Its non-zero
    exit (a stage that stopped running, or a derived table that is stale) plus
@@ -488,6 +496,13 @@ declared stage last succeed, and how old is the data it derives?*
 - Staleness is decided from the **most recent success** per stage
   (`sync_runs.status='success'`), never from a fixed window; a stage with no
   successful run at all is reported as `never`.
+- A stage is also judged by its **most recent run**, whatever its status
+  (Issue #104). If that run failed, the stage is reported as `failed` with the
+  run's own error code (`longbridge_no_rows`, `stock_names_unresolved`, …) and
+  appears in `failed_stages` — waiting out the 192h threshold would have kept
+  `/api/admin/health` green for a week over a stage that refreshed nothing. The
+  aggregate `error_code` is then `sync_stage_run_failed`; a run that is still
+  `running`, or was `cancelled`/`skipped`, does not fail the stage.
 - Derived tables are checked too, but only ones that are **rendered to users
   and rewritten on every successful run** — that is the condition for
   `MAX(<time column>)` to mean "last successful run" (`earnings_consensus`,
@@ -514,24 +529,29 @@ declared stage last succeed, and how old is the data it derives?*
   `sync_runs_window` over `SYNC_RUNS_WINDOW_HOURS` (default `336` = 14 days),
   plus the full `freshness` summary with per-stage `last_success_at` / `age_hours`.
 - `scripts/check_sync_freshness.py` prints the per-stage table and exits `1`
-  when a stage or derived table is stale (`2` when the check itself cannot reach
-  the database), so wiring it into the cron wrapper turns a silent gap into a
-  next-run failure.
+  when a stage or derived table is stale, or a stage's most recent run failed
+  (`2` when the check itself cannot reach the database), so wiring it into the
+  cron wrapper turns a silent gap into a next-run failure.
 
 ```bash
 DB_HOST=localhost uv run python scripts/check_sync_freshness.py
 # sync freshness (threshold 192h, checked 2026-09-17T18:34:31+00:00)
-# name                             kind     status   age_hours  last_success_at
-# longbridge                       stage    fresh        47.82  2026-09-15T18:45:27+00:00
-# futu                             stage    fresh        47.69  2026-09-15T18:53:22+00:00
-# stock_names                      stage    stale      1088.71  2026-08-03T09:51:57+00:00
-# consensus                        stage    stale      1113.11  2026-08-02T09:27:43+00:00
-# prediction                       stage    fresh        90.44  2026-09-14T00:08:00+00:00
-# earnings_consensus               derived  stale      1113.11  2026-08-02T09:27:41+00:00
-# earnings_forecast_eps            derived  fresh        47.69  2026-09-15T18:53:22+00:00
+# name                             kind     status   age_hours  last_run   last_success_at
+# longbridge                       stage    fresh        47.82  success    2026-09-15T18:45:27+00:00
+# futu                             stage    fresh        47.69  success    2026-09-15T18:53:22+00:00
+# stock_names                      stage    stale      1088.71  success    2026-08-03T09:51:57+00:00
+# consensus                        stage    stale      1113.11  success    2026-08-02T09:27:43+00:00
+# prediction                       stage    fresh        90.44  success    2026-09-14T00:08:00+00:00
+# earnings_consensus               derived  stale      1113.11  -          2026-08-02T09:27:41+00:00
+# earnings_forecast_eps            derived  fresh        47.69  -          2026-09-15T18:53:22+00:00
 # …
 # STALE: stage 'consensus' last succeeded at 2026-08-02T09:27:43+00:00 (1113.11h ago)
 # exit=1
+
+# A stage that ran and resolved nothing reads as:
+# longbridge                       stage    failed         2.10  failed     2026-10-26T08:19:00+00:00
+# FAILED: stage 'longbridge' — its most recent run failed (longbridge_no_rows) at
+#   2026-10-29T03:02:13+00:00; last success 2026-10-26T08:19:00+00:00
 ```
 
 Timestamps are compared and printed in UTC regardless of the database session

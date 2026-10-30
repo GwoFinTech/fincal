@@ -9,7 +9,9 @@ green.
 
 Exit codes:
   0  every stage and derived table is within the freshness threshold
-  1  at least one stage/derived table is stale or never ran
+  1  at least one stage/derived table is stale or never ran, or a stage's most
+     recent run failed (Issue #104 — a run that resolves no rows is a failure,
+     not an empty-but-fine run)
   2  freshness could not be determined (database unreadable)
 
 Read-only by construction: the shared check issues ``SELECT`` statements only
@@ -37,11 +39,13 @@ EXIT_UNKNOWN = 2
 def report(summary: dict) -> None:
     threshold = summary["threshold_hours"]
     print(f"sync freshness (threshold {threshold:g}h, checked {summary['checked_at']})")
-    print(f"{'name':<32} {'kind':<8} {'status':<7} {'age_hours':>10}  last_success_at")
+    print(f"{'name':<32} {'kind':<8} {'status':<7} {'age_hours':>10}  "
+          f"{'last_run':<9}  last_success_at")
     for entry in summary["entries"]:
         age = "-" if entry["age_hours"] is None else f"{entry['age_hours']:g}"
+        run = entry.get("last_run_status") or "-"
         print(f"{entry['stage']:<32} {entry['kind']:<8} {entry['status']:<7} "
-              f"{age:>10}  {entry['last_success_at'] or '-'}")
+              f"{age:>10}  {run:<9}  {entry['last_success_at'] or '-'}")
 
 
 def main() -> int:
@@ -52,9 +56,15 @@ def main() -> int:
         print("ERROR: freshness could not be determined (database unreadable)", file=sys.stderr)
         return EXIT_UNKNOWN
 
-    if summary["stale_stages"] or summary["never_run_stages"]:
+    if summary["stale_stages"] or summary["never_run_stages"] or summary.get("failed_stages"):
         for stage in summary["never_run_stages"]:
             print(f"STALE: stage '{stage}' never recorded a successful run", file=sys.stderr)
+        for stage in summary.get("failed_stages") or []:
+            entry = next(e for e in summary["entries"]
+                         if e["kind"] == "stage" and e["stage"] == stage)
+            print(f"FAILED: stage '{stage}' — its most recent run failed "
+                  f"({entry.get('error_code')}) at {entry.get('last_run_at') or '-'}; "
+                  f"last success {entry['last_success_at'] or '-'}", file=sys.stderr)
         for stage in summary["stale_stages"]:
             entry = next(e for e in summary["entries"]
                          if e["kind"] == "stage" and e["stage"] == stage)

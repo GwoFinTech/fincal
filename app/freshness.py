@@ -21,6 +21,13 @@ freshness column is rewritten on every successful run — otherwise
 ``MAX(column)`` measures "last time there was work to do" and a healthy
 pipeline reads as ``stale`` (Issue #67).  The stage entry, which is written
 every run, carries the verdict for everything else.
+
+A stage is judged by **both** its last success and its most recent run
+(Issue #104): the Longbridge calendar ran, fetched 599 pages, resolved 0 events
+and recorded ``success``, so a last-success-only verdict called a three-day-old
+calendar healthy.  A failed most-recent run now reports the stage as
+``failed`` (carrying the run's own error code) instead of leaving the operator
+to wait out the staleness threshold.
 """
 from __future__ import annotations
 
@@ -83,9 +90,13 @@ STATUS_FRESH = "fresh"
 STATUS_STALE = "stale"
 STATUS_NEVER = "never"
 STATUS_UNKNOWN = "unknown"
+#: The stage's most recent run *failed*, so nothing was refreshed — regardless of
+#: how old the last success is (Issue #104).
+STATUS_FAILED = "failed"
 
 ERROR_STAGE_STALE = "sync_stage_stale"
 ERROR_STAGE_NEVER = "sync_stage_never_run"
+ERROR_STAGE_FAILED = "sync_stage_run_failed"
 ERROR_DATA_STALE = "sync_data_stale"
 ERROR_DATA_MISSING = "sync_data_never_fetched"
 ERROR_UNAVAILABLE = "sync_freshness_unavailable"
@@ -98,14 +109,27 @@ AGGREGATE_KEYS = (
     "threshold_hours",
     "stale_stages",
     "never_run_stages",
+    "failed_stages",
     "stale_data",
     "checked_at",
 )
 
+# One query (Issue #104): the last *success* alone cannot tell "the pipeline is
+# running and the provider silently stopped handing us rows" from "the pipeline
+# is running fine".  The run that just failed is the freshest fact about a stage,
+# so its status/error_code travel with the last success instead of costing a
+# second round trip.
 _STAGE_QUERY = """
-SELECT stage, MAX(COALESCE(finished_at, started_at)) AS last_success_at
+SELECT stage,
+       MAX(COALESCE(finished_at, started_at)) FILTER (WHERE status = 'success')
+           AS last_success_at,
+       MAX(COALESCE(finished_at, started_at)) AS last_run_at,
+       (ARRAY_AGG(status ORDER BY COALESCE(finished_at, started_at) DESC))[1]
+           AS last_run_status,
+       (ARRAY_AGG(error_code ORDER BY COALESCE(finished_at, started_at) DESC))[1]
+           AS last_run_error_code
 FROM sync_runs
-WHERE status = 'success' AND stage = ANY(%s)
+WHERE stage = ANY(%s)
 GROUP BY stage
 """
 
@@ -139,8 +163,11 @@ def _as_utc(value: datetime | None) -> datetime | None:
 
 
 def _entry(name: str, kind: str, last_at: datetime | None, now: datetime,
-           threshold_hours: float) -> dict:
+           threshold_hours: float, *, last_run_at: datetime | None = None,
+           last_run_status: str | None = None,
+           last_run_error_code: str | None = None) -> dict:
     last_at = _as_utc(last_at)
+    last_run_at = _as_utc(last_run_at)
     if last_at is None:
         status = STATUS_NEVER
         age_hours = None
@@ -152,6 +179,12 @@ def _entry(name: str, kind: str, last_at: datetime | None, now: datetime,
             error_code = ERROR_STAGE_STALE if kind == "stage" else ERROR_DATA_STALE
         else:
             error_code = None
+    # Issue #104: a stage whose most recent run failed refreshed nothing, however
+    # recent its last success still looks.  The run's own language-neutral code
+    # (``longbridge_no_rows``) is more useful than a generic one, so it wins.
+    if kind == "stage" and last_run_status == STATUS_FAILED:
+        status = STATUS_FAILED
+        error_code = last_run_error_code or ERROR_STAGE_FAILED
     return {
         "stage": name,
         "kind": kind,
@@ -159,6 +192,9 @@ def _entry(name: str, kind: str, last_at: datetime | None, now: datetime,
         "age_hours": age_hours,
         "status": status,
         "error_code": error_code,
+        "last_run_at": last_run_at.isoformat() if last_run_at else None,
+        "last_run_status": last_run_status,
+        "last_run_error_code": last_run_error_code,
     }
 
 
@@ -170,6 +206,7 @@ def _unavailable(now: datetime, threshold_hours: float) -> dict:
         "checked_at": now.isoformat(),
         "stale_stages": [],
         "never_run_stages": [],
+        "failed_stages": [],
         "stale_data": [],
         "entries": [],
     }
@@ -181,7 +218,9 @@ def check_freshness(*, now: datetime | None = None,
 
     ``fresh``/``stale``/``never`` are decided from the **most recent success**
     per stage, never from a fixed time window, so a weekly pipeline is still
-    judged correctly on the six days with no run in the last 24 hours.
+    judged correctly on the six days with no run in the last 24 hours.  A stage
+    whose **most recent run failed** is reported ``failed`` (Issue #104): it ran
+    and refreshed nothing, which the last-success age alone cannot show.
 
     Returns a dict with ``status`` (``healthy`` / ``degraded`` / ``unknown``),
     ``error_code`` (language-neutral, for the API contract), the threshold, the
@@ -194,17 +233,22 @@ def check_freshness(*, now: datetime | None = None,
     try:
         with db.db_cursor() as cur:
             cur.execute(_STAGE_QUERY, (list(SYNC_STAGES),))
-            stage_rows = {row["stage"]: row["last_success_at"] for row in cur.fetchall()}
+            stage_rows = {row["stage"]: dict(row) for row in cur.fetchall()}
             cur.execute(_derived_query())
             derived_rows = {row["name"]: row["last_at"] for row in cur.fetchall()}
     except Exception as exc:  # unreadable DB: report unknown, never crash /health
         logger.warning("sync freshness check unavailable: %s", type(exc).__name__)
         return _unavailable(now, threshold)
 
-    entries = [
-        _entry(stage, "stage", stage_rows.get(stage), now, threshold)
-        for stage in SYNC_STAGES
-    ]
+    entries = []
+    for stage in SYNC_STAGES:
+        row = stage_rows.get(stage) or {}
+        entries.append(_entry(
+            stage, "stage", row.get("last_success_at"), now, threshold,
+            last_run_at=row.get("last_run_at"),
+            last_run_status=row.get("last_run_status"),
+            last_run_error_code=row.get("last_run_error_code"),
+        ))
     entries += [
         _entry(table, "derived", derived_rows.get(table), now, threshold)
         for table, _ in DERIVED_TABLES
@@ -214,11 +258,15 @@ def check_freshness(*, now: datetime | None = None,
                     if e["kind"] == "stage" and e["status"] == STATUS_STALE]
     never_run_stages = [e["stage"] for e in entries
                         if e["kind"] == "stage" and e["status"] == STATUS_NEVER]
+    failed_stages = [e["stage"] for e in entries
+                     if e["kind"] == "stage" and e["status"] == STATUS_FAILED]
     stale_data = [e["stage"] for e in entries
                   if e["kind"] == "derived" and e["status"] != STATUS_FRESH]
 
     if never_run_stages:
         error_code = ERROR_STAGE_NEVER
+    elif failed_stages:
+        error_code = ERROR_STAGE_FAILED
     elif stale_stages:
         error_code = ERROR_STAGE_STALE
     elif stale_data:
@@ -233,6 +281,7 @@ def check_freshness(*, now: datetime | None = None,
         "checked_at": now.isoformat(),
         "stale_stages": stale_stages,
         "never_run_stages": never_run_stages,
+        "failed_stages": failed_stages,
         "stale_data": stale_data,
         "entries": entries,
     }

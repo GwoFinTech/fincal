@@ -215,6 +215,19 @@ class SyncStats:
     failed_batches: int = 0
     dropped_disclosures: int = 0
     takeovers: int = 0
+    #: Calendar pages (day buckets) the provider returned, and the events inside
+    #: them.  Both are counted even when an event cannot be resolved, so a
+    #: provider payload change reads as "25k events, 0 resolved" instead of
+    #: "0 fetched, success" — the shape of the 2026-10-29 incident (Issue #104).
+    pages: int = 0
+    events: int = 0
+    #: Events dropped because their identity (symbol/market) or their date could
+    #: not be resolved.  ``events - unresolved`` is what entered the write path.
+    unresolved: int = 0
+
+    def resolved(self) -> int:
+        """Events that carried a usable identity and date."""
+        return max(self.events - self.unresolved, 0)
 
     def quality(self) -> SyncQuality:
         return SyncQuality(
@@ -222,6 +235,7 @@ class SyncStats:
             written=self.written,
             skipped=self.skipped,
             failed=self.failed_batches,
+            unresolved=self.unresolved,
         )
 
 
@@ -775,9 +789,18 @@ def run_terminal_state(stats: SyncStats) -> tuple[str, str | None]:
     recorded as ``success``.  A run where only some batches failed stays
     ``success`` with ``details.status='partial'`` (see :meth:`SyncStats.quality`)
     so the remaining stages of ``sync_all.sh`` still run.
+
+    Issue #104: the stage can also finish having seen calendar pages but resolved
+    *no* event — what happens when the CLI changes its payload shape (0.31.0
+    dropped ``counter_id``).  Every event was skipped, ``fetched`` stayed 0 and
+    the run was still recorded ``success``, so ``/api/admin/health`` called a
+    frozen calendar healthy for three days.  Such a run is a failure with its own
+    code, not an empty-but-fine run.
     """
     if stats.failed_batches and stats.written == 0:
         return ("failed", "longbridge_batch_failed")
+    if stats.pages > 0 and stats.resolved() == 0:
+        return ("failed", "longbridge_no_rows")
     return ("success", None)
 
 
@@ -808,6 +831,7 @@ def sync_earnings(run_id: int, stats: SyncStats | None = None) -> SyncStats:
         check_cancelled(run_id)
         logger.info(f"=== Fetching {market} earnings [{start} → {end}] ===")
         pages = fetch_calendar(market, start, end)
+        run_stats.pages += len(pages)
         logger.info(f"  Total pages received: {len(pages)}")
         canonical_periods = build_fiscal_period_index(pages)
 
@@ -817,12 +841,18 @@ def sync_earnings(run_id: int, stats: SyncStats | None = None) -> SyncStats:
             beats.maybe(run_id, phase=f"calendar-{market.lower()}",
                         current=run_stats.fetched)
             for info in page.get("infos", []):
+                run_stats.events += 1
                 symbol, mkt = from_lb_calendar_info(info)
                 if not symbol:
+                    # Issue #104: never drop an event silently.  A provider that
+                    # renames its identity field turns every event into this
+                    # branch, and the run must be able to say so.
+                    run_stats.unresolved += 1
                     continue
 
                 report_date = parse_report_date(info.get("date", ""))
                 if not report_date:
+                    run_stats.unresolved += 1
                     continue
 
                 company_name = info.get("counter_name", "")
@@ -877,9 +907,22 @@ def sync_earnings(run_id: int, stats: SyncStats | None = None) -> SyncStats:
         if batch:
             _flush_batch(run_stats, batch, f"{market} final batch")
 
+    if run_stats.unresolved:
+        # Not a failure by itself (some events legitimately carry no usable
+        # date), but a payload that resolves nothing is exactly the Issue #104
+        # incident — say it in one line instead of one line per event.
+        logger.warning(
+            "%d of %d calendar events could not be resolved (symbol/date); "
+            "%d resolved across %d page(s) — details.unresolved carries the count",
+            run_stats.unresolved, run_stats.events, run_stats.resolved(),
+            run_stats.pages,
+        )
+
     logger.info(
-        "=== Sync complete: %d records fetched, %d written, %d rescheduled, "
+        "=== Sync complete: %d events in %d page(s), %d unresolved; "
+        "%d records fetched, %d written, %d rescheduled, "
         "%d reschedule conflicts, %d failed batches ===",
+        run_stats.events, run_stats.pages, run_stats.unresolved,
         run_stats.fetched, run_stats.written, run_stats.rescheduled,
         run_stats.skipped, run_stats.failed_batches,
     )
@@ -912,14 +955,21 @@ if __name__ == "__main__":
                        record_count=run_stats.written,
                        details=run_stats.quality().to_dict())
             if status == "failed":
-                # Every batch died: the stage is recorded as failed even though no
-                # exception escaped sync_earnings, while the exit code stays 0 so
-                # sync_all.sh still runs the Futu/prediction stages (Issue #52) —
-                # one broken stage must not cost the whole weekly refresh.
+                # The stage is recorded as failed even though no exception
+                # escaped sync_earnings.  It also exits non-zero: `sync_all.sh`
+                # runs every stage regardless of a predecessor's exit code (all
+                # five `run_stage` calls are unconditional), so a non-zero code
+                # costs nothing downstream and makes `cron_sync.sh` report what
+                # actually happened instead of a green pipeline over a stage
+                # that wrote nothing (Issue #52, Issue #104).
                 logger.error(
-                    "longbridge earnings sync wrote nothing (%d failed batch(es))",
+                    "longbridge earnings sync FAILED (%s): %d page(s), %d event(s), "
+                    "%d unresolved, %d written, %d failed batch(es)",
+                    error_code, run_stats.pages, run_stats.events,
+                    run_stats.unresolved, run_stats.written,
                     run_stats.failed_batches,
                 )
+                sys.exit(1)
             elif run_stats.failed_batches:
                 # A partial run is not a green run: the details carry
                 # status='partial' (SyncQuality.classify) for the admin.
