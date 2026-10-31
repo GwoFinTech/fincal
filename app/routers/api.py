@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from datetime import date, timedelta
 from ..auth import get_current_user, ensure_user
 from .. import db, config
-from ..symbol import normalize, sort_key, market_mismatch
+from ..symbol import normalize, sort_key, market_mismatch, resolve_stored_rows
 from ..layer_cache import LayerCache
 from ..errors import AppError, NotFoundError, ForbiddenError
 from ..schemas import (
@@ -155,12 +155,31 @@ def api_remove_watchlist(symbol: str, market: str = "US", user=Depends(get_curre
     """Remove a stock from watchlist."""
     fincal_user = ensure_user(user["id"], user["email"], user["name"])
     market = market.strip().upper()
+    # Same guard order as api_add_watchlist (Issues #66/#108): a request that
+    # cannot name a stored row is a client error (400), not a 500 from
+    # ``normalize()`` raising ``ValueError``, and not a silent 200 either.
+    if market not in ("US", "HK"):
+        raise AppError("invalid_market", "market must be US or HK", 400)
+    if not symbol.strip():
+        raise AppError("symbol_required", "symbol is required", 400)
+    if market_mismatch(symbol, market):
+        raise AppError(
+            "symbol_market_mismatch",
+            "symbol suffix does not match the requested market",
+            400,
+        )
     normalized = normalize(symbol, market)
     with db.db_cursor() as cur:
         cur.execute(
             "DELETE FROM watchlist WHERE user_id = %s AND symbol = %s AND market = %s",
             (fincal_user["id"], normalized, market),
         )
+        # ``rowcount`` decides the answer: this used to return "removed" for a
+        # symbol that was never there, which is the same false success Issue #82
+        # removed from the UI, one layer down.
+        removed = cur.rowcount
+    if not removed:
+        raise AppError("watchlist_entry_not_found", "watchlist entry not found", 404)
     from .ical import invalidate_ical_cache
     invalidate_ical_cache(fincal_user.get("ical_token"))
     # Same reason as in api_add_watchlist: a removed symbol must not linger on
@@ -210,10 +229,13 @@ def api_earnings(
                 (fincal_user["id"],),
             )
             wl = cur.fetchall()
-        if not wl:
+        # A stored row that cannot be served is skipped (and logged once), never
+        # raised: one legacy spelling used to 500 the whole view (Issue #108).
+        resolved = resolve_stored_rows(wl, context="GET /api/earnings?watchlistOnly=true")
+        if not resolved:
             return []
-        symbols = [normalize(r["symbol"], r["market"]) for r in wl]
-        markets = list(set(r["market"] for r in wl))
+        symbols = [sym for sym, _ in resolved]
+        markets = list(dict.fromkeys(mkt for _, mkt in resolved))
         return fetch_earnings_from_db(symbols=symbols, markets=markets, start=start, end=end)
     else:
         def _fetch():
@@ -225,12 +247,13 @@ def api_earnings(
                     "SELECT symbol, market FROM watchlist WHERE user_id = %s",
                     (fincal_user["id"],),
                 )
-                for r in cur.fetchall():
-                    norm = normalize(r["symbol"], r["market"])
+                for norm, mkt in resolve_stored_rows(
+                    cur.fetchall(), context="GET /api/earnings"
+                ):
                     if norm not in all_symbols:
                         all_symbols.append(norm)
-                        if r["market"] not in all_markets:
-                            all_markets.append(r["market"])
+                    if mkt not in all_markets:
+                        all_markets.append(mkt)
             return fetch_earnings_from_db(symbols=all_symbols, markets=all_markets, start=start, end=end)
 
         data, entry = _earnings_cache.get_or_refresh(cache_key, _fetch, ttl=120.0)

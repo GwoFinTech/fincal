@@ -74,7 +74,7 @@ def _not_modified_response(etag: str, last_modified: str) -> Response:
     return Response(status_code=304, headers=headers)
 from .. import db, config
 from ..metrics import metrics
-from ..symbol import normalize
+from ..symbol import resolve_stored_rows
 from ..ical import generate_ical
 from ..log_redaction import token_fingerprint
 from datetime import date, timedelta
@@ -274,7 +274,14 @@ def ical_feed(
                 for symbol in universe.get(market, [])
             ]
         else:
-            syms = [normalize(r["symbol"], r["market"]) for r in watchlist if r["market"] in selected_markets]
+            # Stored rows are resolved through the non-throwing entry point
+            # (Issue #108): one legacy spelling must never turn a subscriber's
+            # whole feed into a 500.  Unservable rows are skipped and logged.
+            resolved = resolve_stored_rows(
+                [r for r in watchlist if str(r["market"]).strip().upper() in selected_markets],
+                context="GET /ical scope=watchlist",
+            )
+            syms = [symbol for symbol, _ in resolved]
         # Same guard for both scopes: an empty symbol set must produce a valid
         # empty VCALENDAR, never an unfiltered full-database read (Issue #25).
         if not syms:

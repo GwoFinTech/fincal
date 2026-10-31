@@ -4,6 +4,9 @@ Internal canonical format: TICKER.MARKET  (e.g. AAPL.US, 0700.HK)
 Futu API format:          MARKET.TICKER with 5-digit HK (e.g. US.AAPL, HK.00700)
 Longbridge API format:    TICKER.MARKET  (same as internal — uppercase)
 """
+import logging
+
+logger = logging.getLogger(__name__)
 
 # ── Internal → Futu ────────────────────────────────────────────────
 
@@ -79,9 +82,12 @@ def normalize(symbol: str, market: str) -> str:
         # A numeric code is an HK ticker, never a US one (Issue #105):
         # ``normalize('0700', 'US')`` used to hand back a bare ``'0700'`` that no
         # earnings row can ever match, so the write paths could store a ghost
-        # symbol.  ``market_mismatch`` refuses those writes first and ``db.py``
-        # converges the legacy spellings, so no stored row reaches this branch —
-        # an explicit error beats silently inventing a second spelling.
+        # symbol.  ``market_mismatch`` refuses those writes first, and
+        # ``db.init_db()`` rewrites the legacy ``('0700','US')`` rows it once
+        # accepted to the canonical ``('0700.HK','HK')`` (Issue #108) — so a
+        # stored row should never reach this branch.  Read paths do not call
+        # ``normalize`` directly for that reason; they use ``resolve_stored``,
+        # which answers ``None`` instead of raising.
         raise ValueError("symbol_market_mismatch")
     return s
 
@@ -194,6 +200,69 @@ def market_mismatch(symbol: str, market: str) -> bool:
     if m == "US":
         return market_of(s) != "US"
     return False
+
+
+# ── Stored (already-persisted) rows ────────────────────────────────
+
+def resolve_stored(symbol: str, market: str) -> tuple[str, str] | None:
+    """Canonical ``(symbol, market)`` for a row *read from the database*.
+
+    :func:`normalize` raises ``ValueError`` for a spelling it refuses to invent
+    a market for, which is the right contract for a write path (the caller
+    answers 400/422) but the wrong one for a read path: a single legacy row —
+    ``('0700', 'US')``, accepted by every write path before Issue #105 — would
+    turn the user's whole calendar, iCal feed and watchlist view into a 500
+    (Issue #108).
+
+    So this is the non-throwing entry point: the canonical pair when the row can
+    be served, ``None`` when it cannot.  A row is servable when its *stored*
+    market is one FinCal serves and the code belongs to that market
+    (:func:`market_mismatch`).  No market is guessed here: ``('0700','US')``
+    returns ``None`` and is skipped by the reader, because turning it into
+    ``0700.HK`` on a read would silently widen what a US-scoped feed shows.
+    Converging those rows is ``db.init_db()``'s job (it rewrites them to the
+    canonical ``0700.HK`` / ``HK`` before any request runs) — a read path must
+    not have write-shaped side effects.
+    """
+    m = str(market or "").strip().upper()
+    s = str(symbol or "").strip()
+    if m not in SERVED_MARKETS or not s:
+        return None
+    if market_mismatch(s, m):
+        return None
+    try:
+        return normalize(s, m), m
+    except ValueError:
+        # ``normalize`` refuses a few shapes ``market_mismatch`` lets through
+        # (``US.0700`` reads as market US, then normalizes to bare digits).
+        # Either way the row is not servable; never let it reach the 500 path.
+        return None
+
+
+def resolve_stored_rows(rows, *, context: str) -> list[tuple[str, str]]:
+    """``[(symbol, market), …]`` for stored rows, skipping unservable ones.
+
+    ``context`` names the caller in the single warning this may emit, so a
+    skipped row stays observable instead of silently shrinking a calendar: the
+    alternative — one exception for the whole request — is what made a single
+    legacy row an unremovable, whole-subscription outage (Issue #108).
+    """
+    resolved: list[tuple[str, str]] = []
+    skipped: list[tuple[str, str]] = []
+    for row in rows:
+        pair = resolve_stored(row["symbol"], row["market"])
+        if pair is None:
+            skipped.append((str(row["symbol"]), str(row["market"])))
+            continue
+        if pair not in resolved:
+            resolved.append(pair)
+    if skipped:
+        logger.warning(
+            "%s: skipped %d stored row(s) that cannot be served (symbol, market)=%s; "
+            "the rest of the response is unaffected",
+            context, len(skipped), skipped,
+        )
+    return resolved
 
 
 # ── Longbridge helpers ─────────────────────────────────────────────

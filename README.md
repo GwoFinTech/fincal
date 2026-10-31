@@ -302,6 +302,20 @@ fincal supports pluggable watchlist backends. The default (`tsummt`) reads from 
 
 See [docs/watchlist-source.md](docs/watchlist-source.md) for configuration and how to add custom sources.
 
+**Stored spellings (Issues #66/#105/#108).** `watchlist` rows hold the canonical
+spelling — `AAPL` / `US` for US tickers, `0700.HK` / `HK` for HK codes — and the
+write paths refuse a code from the wrong market (`400 symbol_market_mismatch`).
+`DELETE /api/watchlist` follows the same contract and answers `404
+watchlist_entry_not_found` when the row does not exist, instead of a false
+`200 removed`. Rows written by older versions are converged by `init_db()` at
+startup (`US.AAPL` / `aapl` → `AAPL`, a numeric code stored under `US` such as
+`0700` → `0700.HK` / `HK`; a six-digit Shenzhen fund code is never guessed and
+only counted in the log line `converged legacy numeric US watchlist rows`). A
+read path never raises on a stored row it cannot serve: `/api/earnings` and
+`/ical/{token}?scope=watchlist` skip it and log one warning with the
+`symbol/market` pair, so one legacy row cannot take down a whole calendar or
+subscription.
+
 ## API Endpoints
 
 | Method | Path | Auth | Description |

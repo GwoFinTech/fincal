@@ -526,6 +526,59 @@ def init_db():
                 "normalized legacy US watchlist rows: removed=%d updated=%d",
                 removed_legacy_duplicates, normalized_legacy_rows,
             )
+        # Converge the *numeric* US spellings the pre-#105 write path accepted
+        # (Issue #108): ``('0700', 'US')`` is an HK code stored under the wrong
+        # market — it never matched an earnings row, and since #105 it made every
+        # read path that touched it a 500.  The code's own shape decides the
+        # market, so the row becomes the canonical ``('0700.HK', 'HK')``.
+        # Rows that already occupy the canonical key win: the duplicate is
+        # removed first, because the UPDATE would collide on
+        # UNIQUE(user_id, symbol, market).
+        cur.execute("""
+            WITH ghosts AS (
+                SELECT id, user_id,
+                       LPAD((symbol::int)::text, 4, '0') || '.HK' AS canonical_symbol
+                FROM watchlist
+                WHERE UPPER(market) = 'US' AND symbol ~ '^[0-9]{1,5}$'
+            ), ranked AS (
+                SELECT id, user_id, canonical_symbol,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY user_id, canonical_symbol ORDER BY id
+                       ) AS duplicate_rank
+                FROM ghosts
+            )
+            DELETE FROM watchlist w
+            USING ranked r
+            WHERE w.id = r.id
+              AND (r.duplicate_rank > 1
+                   OR EXISTS (SELECT 1 FROM watchlist h
+                              WHERE h.user_id = r.user_id
+                                AND h.symbol = r.canonical_symbol
+                                AND UPPER(h.market) = 'HK'))
+        """)
+        removed_numeric_duplicates = cur.rowcount
+        cur.execute("""
+            UPDATE watchlist
+            SET symbol = LPAD((symbol::int)::text, 4, '0') || '.HK',
+                market = 'HK'
+            WHERE UPPER(market) = 'US' AND symbol ~ '^[0-9]{1,5}$'
+        """)
+        rewritten_numeric_rows = cur.rowcount
+        # A six-digit numeric code (``159326``) is a Shenzhen fund whose suffix
+        # was pasted off.  No market may be invented for it, so it is left as-is
+        # (read paths skip it, /api/universe reports it) and only counted here.
+        cur.execute("""
+            SELECT COUNT(*) AS n FROM watchlist
+            WHERE UPPER(market) = 'US' AND symbol ~ '^[0-9]{6,}$'
+        """)
+        unservable_numeric_rows = cur.fetchone()["n"]
+        if removed_numeric_duplicates or rewritten_numeric_rows or unservable_numeric_rows:
+            logger.info(
+                "converged legacy numeric US watchlist rows: "
+                "rewritten=%d removed=%d unservable=%d",
+                rewritten_numeric_rows, removed_numeric_duplicates,
+                unservable_numeric_rows,
+            )
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS managed_watchlist (
