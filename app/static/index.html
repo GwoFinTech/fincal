@@ -259,7 +259,7 @@
         <span v-if="watchlistOnly && watchlist.length === 0" class="text-amber-500 text-[11px]">⚠ 空</span>
       </label>
 
-      <button v-if="user" @click="showIcalModal = true" class="ui-btn ui-btn-outline" style="font-size:12px;padding:4px 10px;">
+      <button v-if="user" @click="openIcal()" class="ui-btn ui-btn-outline" style="font-size:12px;padding:4px 10px;">
         <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
         订阅日历
       </button>
@@ -647,9 +647,16 @@
             <option value="zh">中文公司名</option><option value="en">英文公司名</option>
           </select>
           <label class="text-[11px] block" style="color:var(--text-muted);">标的范围</label>
-          <select v-model="icalOptions.scope" class="ui-select" aria-label="标的范围">
+          <select v-model="icalOptions.scope" class="ui-select" @change="markScopeChosen" aria-label="标的范围">
             <option value="watchlist">仅自选</option><option value="all">全部系统自选标的</option>
           </select>
+          <!-- Issue #109: scope=watchlist + empty watchlist is a valid *empty*
+               feed (Issue #25), so a first-time subscriber would copy an address
+               that never yields an event. Say so where the choice is made. -->
+          <p v-if="icalOptions.scope === 'watchlist' && watchlistLoaded && watchlist.length === 0"
+             class="text-[11px] text-amber-500" aria-live="polite">
+            ⚠ 您的自选为空，此地址将订阅到 0 个事件；如需系统默认追踪的全部标的，请选「全部系统自选标的」。
+          </p>
           <label class="flex items-center gap-2 text-[12px]" style="color:var(--text-secondary);"><input class="ui-checkbox" v-model="icalOptions.predicted" type="checkbox" aria-label="接受预测日期"> 接受预测日期</label>
           <label class="text-[11px] block" style="color:var(--text-muted);">市场范围</label>
           <select v-model="icalOptions.markets" class="ui-select" aria-label="市场范围">

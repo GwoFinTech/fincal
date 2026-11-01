@@ -245,6 +245,14 @@
   // ── useWatchlist: search + CRUD + own "next earnings" source ────
   function useWatchlist(apiFetch, showToast, loadEarnings) {
     const watchlist = ref([]);
+    // Issue #109: "the watchlist is empty" and "the watchlist has not been read
+    // yet" are different answers, but both look like `length === 0`. The iCal
+    // dialog picks its default scope from this fact, so it needs the flag: an
+    // unloaded list must never be read as an empty one. Set after every attempt
+    // (success or failure) — a failed read that leaves `watchlist` empty is the
+    // first-load case, where the non-empty calendar is still the better default
+    // than the empty one this dialog used to hand out.
+    const watchlistLoaded = ref(false);
     const searchQuery = ref('');
     const searchResults = ref([]);
     const searchLoading = ref(false);
@@ -262,8 +270,14 @@
     const hkWatchlist = computed(() => watchlist.value.filter(item => item.market === 'HK'));
 
     async function loadWatchlist() {
-      const data = await apiFetch('/api/watchlist');
-      if (data) watchlist.value = data;
+      try {
+        const data = await apiFetch('/api/watchlist');
+        if (data) watchlist.value = data;
+      } finally {
+        // Both outcomes count as "we asked": the iCal dialog must not treat a
+        // slow request as an empty watchlist (Issue #109).
+        watchlistLoaded.value = true;
+      }
     }
 
     async function loadNextEarnings() {
@@ -345,7 +359,7 @@
     }
 
     return {
-      watchlist, searchQuery, searchResults, searchLoading,
+      watchlist, watchlistLoaded, searchQuery, searchResults, searchLoading,
       usWatchlist, hkWatchlist, nextEarnings, nextBySymbol,
       loadWatchlist, loadNextEarnings, doSearch, addToWatchlist, removeFromWatchlist,
       isMine, toggleWatchlist, watchlistInsight,
@@ -353,11 +367,15 @@
   }
 
   // ── useIcal: modal + URL building ───────────────────────────────
-  function useIcal(user) {
+  function useIcal(user, watchlist, watchlistLoaded) {
     const showIcalModal = ref(false);
     const icalUrl = ref('');
     const icalOptions = ref({ lang: 'zh', scope: 'watchlist', predicted: true, markets: 'all' });
     const copied = ref(false);
+    // The scope default below is a *default*: once the reader has chosen a
+    // scope by hand it must survive closing and reopening the dialog, or the
+    // URL they copy would silently contradict the choice they just made.
+    let scopeChosen = false;
 
     const popularSuggestions = [
       {symbol:'AAPL',market:'US'},{symbol:'NVDA',market:'US'},{symbol:'TSLA',market:'US'},
@@ -376,6 +394,22 @@
       icalUrl.value = url.toString();
     }
 
+    // Issue #109: `scope=watchlist` on an empty watchlist is a valid feed with
+    // zero events (Issue #25 keeps that contract), so the dialog's old hardcoded
+    // default handed a first-time subscriber an empty calendar — the exact
+    // opposite of the 491 events they had just seen in the app. The default now
+    // follows the watchlist: empty (and *known* empty) → the system universe,
+    // non-empty → 仅自选, i.e. today's address byte for byte.
+    function openIcal() {
+      if (!scopeChosen && watchlistLoaded.value) {
+        icalOptions.value.scope = watchlist.value.length === 0 ? 'all' : 'watchlist';
+      }
+      showIcalModal.value = true;
+      updateIcalUrl();
+    }
+
+    function markScopeChosen() { scopeChosen = true; }
+
     function copyIcal() {
       updateIcalUrl();
       navigator.clipboard.writeText(icalUrl.value);
@@ -383,7 +417,8 @@
       setTimeout(() => copied.value = false, 2000);
     }
 
-    return { showIcalModal, icalUrl, icalOptions, copied, popularSuggestions, updateIcalUrl, copyIcal };
+    return { showIcalModal, icalUrl, icalOptions, copied, popularSuggestions,
+             updateIcalUrl, copyIcal, openIcal, markScopeChosen };
   }
 
   // ── useAdmin: admin panel + managed watchlist ───────────────────
@@ -733,8 +768,8 @@
       const wl = useWatchlist(apiFetch, showToast, () => loadEarnings());
       cal.watchlist = wl.watchlist; // wire watchlist into calendar
 
-      // 5. iCal
-      const ical = useIcal(user);
+      // 5. iCal (its default scope follows the watchlist — Issue #109)
+      const ical = useIcal(user, wl.watchlist, wl.watchlistLoaded);
 
       // 6. Admin
       const admin = useAdmin(apiFetch, showToast);
@@ -863,6 +898,10 @@
         // iCal
         showIcalModal: ical.showIcalModal, icalUrl: ical.icalUrl, icalOptions: ical.icalOptions,
         copied: ical.copied, popularSuggestions: ical.popularSuggestions, copyIcal: ical.copyIcal,
+        // The dialog's default scope depends on the watchlist (Issue #109), and
+        // the empty-watchlist hint in the markup reads `watchlistLoaded` too.
+        openIcal: ical.openIcal, markScopeChosen: ical.markScopeChosen,
+        watchlistLoaded: wl.watchlistLoaded,
         // Admin
         showAdmin: admin.showAdmin, adminLoading: admin.adminLoading, adminSource: admin.adminSource,
         managedWatchlist: admin.managedWatchlist, syncRuns: admin.syncRuns, managedForm: admin.managedForm,
