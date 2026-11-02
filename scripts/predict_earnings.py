@@ -25,6 +25,7 @@ import statistics
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from app import fiscal
 from app.db import db_cursor
 from app.symbol import is_dirty_hk_5digit, normalize
 from app.watchlist import get_source
@@ -173,7 +174,9 @@ class PredictionStats:
     counters land in the run's ``sync_runs.details``.
     """
 
-    predicted: int = 0            # periods written (insert or in-place merge)
+    predicted: int = 0            # periods the walk handled (insert or in-place merge)
+    written: int = 0              # of those, rows the upsert actually changed (#110)
+    unchanged: int = 0            # of those, periods already holding these values (#110)
     rescheduled: int = 0          # superseded predicted rows moved onto the new date
     reschedule_skipped: int = 0   # periods left alone because the target date is taken
     restated: int = 0             # stored predictions outside the window re-applied
@@ -181,7 +184,15 @@ class PredictionStats:
 
     def details(self) -> dict:
         return {
+            # ``predicted`` is the historical name for "periods examined"; it is
+            # kept so this run's details stay comparable with the recorded runs
+            # of the weeks before #110.  ``examined`` says the same thing without
+            # the ambiguity, and ``written`` is the number that must shrink: a
+            # period whose content did not change is not a revision.
             "predicted": self.predicted,
+            "examined": self.predicted,
+            "written": self.written,
+            "unchanged": self.unchanged,
             "rescheduled": self.rescheduled,
             "reschedule_skipped": self.reschedule_skipped,
             "restated": self.restated,
@@ -270,6 +281,68 @@ def _company_name_for(cur, symbol: str, market: str) -> str:
     cur.execute(_COMPANY_NAME_SQL, (symbol, market))
     row = cur.fetchone()
     return row["company_name"] if row else ""
+
+
+# ── What a stored prediction may be rewritten to (Issue #110) ───────────────
+#
+# ``earnings.updated_at`` is a revision counter, not a write clock (#103): the
+# iCal ``SEQUENCE``/``LAST-MODIFIED``, the feed's ``Last-Modified`` floor and
+# ``fiscal.authority_key``'s tie-break all read it.  The two sync stages compare
+# a row's effective values before stamping it; this per-period prediction upsert
+# did not, so every weekly run stamped ~345 unchanged predicted rows with the run
+# clock and the same rows came back with a larger ``SEQUENCE`` (70% of a
+# 491-event feed announced as revised every week).
+#
+# The assignment table below is the single place that says what a prediction
+# write changes; ``fiscal.revision_predicate`` reuses the very same expressions,
+# so "what the write does" and "what bumps the stamp" cannot drift apart.
+_PREDICTION_UPSERT: dict[str, str] = {
+    "is_predicted": "CASE WHEN earnings.date_source = 'algorithm' THEN TRUE ELSE earnings.is_predicted END",
+    "date_source": "CASE WHEN earnings.date_source = 'algorithm' THEN 'algorithm' ELSE earnings.date_source END",
+    "date_status": "CASE WHEN earnings.date_source = 'algorithm' THEN 'predicted' ELSE earnings.date_status END",
+    "before_after": "COALESCE(EXCLUDED.before_after, earnings.before_after)",
+    "company_name": (
+        "CASE WHEN earnings.date_source = 'algorithm' AND EXCLUDED.company_name <> '' "
+        "THEN EXCLUDED.company_name ELSE earnings.company_name END"
+    ),
+}
+
+#: Only the columns this path owns *and* can change.  ``report_date`` is part of
+#: the conflict key — a corrected date is a different row and moves through
+#: :func:`move_superseded_prediction` (a real revision, stamped ``NOW()``) — and
+#: ``fiscal_year``/``fiscal_quarter`` are not assigned here at all.
+_PREDICTION_REVISION_COLUMNS = (
+    "is_predicted", "date_source", "date_status", "before_after", "company_name",
+)
+
+_PREDICTION_INSERT_SQL = f"""INSERT INTO earnings (symbol, market, company_name, report_date, report_type,
+       fiscal_year, fiscal_quarter, before_after, is_predicted, date_source, date_status)
+    VALUES (%s, %s, %s, %s, 'Q', %s, %s, %s, TRUE, 'algorithm', 'predicted')
+    ON CONFLICT (symbol, market, report_date, report_type)
+    DO UPDATE SET
+        {", ".join(f"{column} = {expression}"
+                   for column, expression in _PREDICTION_UPSERT.items())},
+        updated_at = NOW()
+    -- A period whose stored values already say what this run computed writes
+    -- nothing: no row version, no dead tuple, and above all no new SEQUENCE.
+    WHERE {fiscal.revision_predicate(_PREDICTION_UPSERT, _PREDICTION_REVISION_COLUMNS)}
+"""
+
+
+def upsert_prediction(cur, *, symbol: str, market: str, company_name: str,
+                      report_date: str, fiscal_year: int, fiscal_quarter: int,
+                      before_after) -> bool:
+    """Write one predicted period; return True when the stored row changed.
+
+    ``False`` is a *converged* period: the conflict branch's ``WHERE`` rejected
+    the update because the effective values (``COALESCE``/``CASE`` applied) equal
+    the stored ones, so ``updated_at`` — and with it the event's ``SEQUENCE`` and
+    the feed's ``Last-Modified`` — keeps its previous value (Issue #110).
+    """
+    cur.execute(_PREDICTION_INSERT_SQL, (symbol, market, company_name,
+                                         report_date, fiscal_year, fiscal_quarter,
+                                         before_after))
+    return bool(cur.rowcount and cur.rowcount > 0)
 
 
 def align_predicted_names(stats: "PredictionStats | None" = None) -> int:
@@ -453,28 +526,24 @@ def predict_for_symbol(symbol: str, market: str, stats: "PredictionStats | None"
         ba_values = [h["before_after"] for h in recent if h["before_after"]]
         pred_ba = statistics.mode(ba_values) if ba_values else None
 
-        # Upsert: if predicted row already exists for this quarter, update it
+        # Upsert: if predicted row already exists for this quarter, update it —
+        # but only when this run actually computed something different (Issue
+        # #110).  ``updated_at`` is a revision counter: an unchanged period must
+        # keep its old stamp, or every subscriber sees a fake revision.
         with db_cursor() as cur:
-            cur.execute(
-                """INSERT INTO earnings (symbol, market, company_name, report_date, report_type,
-                   fiscal_year, fiscal_quarter, before_after, is_predicted, date_source, date_status)
-                VALUES (%s, %s, %s, %s, 'Q', %s, %s, %s, TRUE, 'algorithm', 'predicted')
-                ON CONFLICT (symbol, market, report_date, report_type)
-                DO UPDATE SET
-                    is_predicted = CASE WHEN earnings.date_source = 'algorithm' THEN TRUE ELSE earnings.is_predicted END,
-                    date_source = CASE WHEN earnings.date_source = 'algorithm' THEN 'algorithm' ELSE earnings.date_source END,
-                    date_status = CASE WHEN earnings.date_source = 'algorithm' THEN 'predicted' ELSE earnings.date_status END,
-                    before_after = COALESCE(EXCLUDED.before_after, earnings.before_after),
-                    company_name = CASE WHEN earnings.date_source = 'algorithm'
-                                             AND EXCLUDED.company_name <> ''
-                                        THEN EXCLUDED.company_name ELSE earnings.company_name END,
-                    updated_at = NOW()
-                """,
-                (symbol, market, company_name, pred_date.isoformat(), next_fy, next_fq, pred_ba),
+            changed = upsert_prediction(
+                cur,
+                symbol=symbol, market=market, company_name=company_name,
+                report_date=pred_date.isoformat(), fiscal_year=next_fy,
+                fiscal_quarter=next_fq, before_after=pred_ba,
             )
         predictions_made += 1
         if stats is not None:
             stats.predicted += 1
+            if changed:
+                stats.written += 1
+            else:
+                stats.unchanged += 1
 
         # Also update our tracking
         predicted[(next_fy, next_fq)] = {
@@ -807,6 +876,9 @@ if __name__ == "__main__":
         finish_run(run_id, status="failed", error_code="prediction_failed")
         raise
     else:
-        logger.info(f"Prediction complete: {total} future earnings dates predicted")
+        logger.info(
+            f"Prediction complete: {total} period(s) examined, "
+            f"{stats.written} written, {stats.unchanged} unchanged"
+        )
         logger.info(f"Prediction row moves: {stats.details()} (Issue #60)")
         finish_run(run_id, status="success", record_count=total, details=stats.details())

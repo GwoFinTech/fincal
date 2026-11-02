@@ -444,14 +444,27 @@ and three consumers read it as one:
 `estimate_as_of` / `actual_as_of` (Issue #73) answer the narrower question "when
 did *this* number last change".
 
-Both sync stages therefore write these columns **only when a value changes**.
-The conflict branch of the Longbridge upsert and the Futu date/actual upserts
-compare the row's effective values (`COALESCE`/`CASE` applied, so a re-delivery
-carrying no value is not a change) with `IS DISTINCT FROM` (NULL-safe) and stamp
-`NOW()` only on a real difference; a first write still stamps the numbers it
-inserts. Provider provenance (`date_source` / `date_status` / `estimate_source` /
-`actual_source`) is deliberately **not** part of that comparison: both stages
-rewrite it on every run and it would put the run clock back on the row.
+Every earnings write path therefore writes these columns **only when a value
+changes**. The conflict branch of the Longbridge upsert and the Futu
+date/actual upserts compare the row's effective values (`COALESCE`/`CASE`
+applied, so a re-delivery carrying no value is not a change) with
+`IS DISTINCT FROM` (NULL-safe) and stamp `NOW()` only on a real difference; a
+first write still stamps the numbers it inserts. Provider provenance
+(`date_source` / `date_status` / `estimate_source` / `actual_source`) is
+deliberately **not** part of the Longbridge/Futu comparison: both stages rewrite
+it on every run and it would put the run clock back on the row.
+
+The weekly prediction upsert (`scripts/predict_earnings.py`) is the third write
+path and the one most of a subscription window comes from (Issue #110). Its
+`ON CONFLICT … DO UPDATE` carries a `WHERE` predicate built from the same
+assignment table it writes — `fiscal.revision_predicate()` — so a period whose
+stored values already say what the run computed writes **nothing at all**: no
+row version, no dead tuple, and no new `SEQUENCE`. Only `is_predicted`,
+`date_source`, `date_status`, `before_after` and `company_name` can make a
+prediction a revision; a corrected *date* is still a real revision and moves
+through `move_superseded_prediction()` (stamped `NOW()`). The run's
+`sync_runs.details` separates `examined` from `written` (and `unchanged`), so a
+quiet week reports `written ≈ 0` instead of one stamp per predicted row.
 
 Consequences worth knowing:
 

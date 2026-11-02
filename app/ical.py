@@ -236,10 +236,11 @@ def _event_sequence(event: dict, report_date: date) -> int:
     and consecutive estimate corrections went up and down at random, so
     subscribers silently kept a stale date (Issue #37).
 
-    Revision order now comes from the row's write timestamp, which every
-    earnings write path sets (``updated_at = NOW()`` in the sync, prediction,
-    seed and reconcile upserts), making the value monotone non-decreasing by
-    construction:
+    Revision order now comes from the row's revision stamp, ``updated_at``,
+    which every earnings write path advances when — and only when — a value it
+    shows actually changes (Issues #103 and #110; the sync upserts compare the
+    effective values, the prediction upsert skips a converged period entirely),
+    making the value monotone non-decreasing by construction:
 
     * seconds since :data:`_SEQUENCE_EPOCH` order the revisions themselves;
     * the low-order rank makes tentative → confirmed strictly greater even when
