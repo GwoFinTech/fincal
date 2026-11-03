@@ -283,3 +283,15 @@ class ReadPathTests(TestCase):
         for summary in summaries:
             self.assertIsNone(CJK_RE.search(summary), summary)
             self.assertIn("TENCENT", summary)
+
+    def test_a_chinese_feed_is_byte_identical_with_or_without_the_fallback(self):
+        """``lang=zh`` reads ``company_name`` only, so the fill must not touch it."""
+        with_fallback = generate_ical(self._fetch(_row()), title_lang="zh")
+        without_fallback = generate_ical(
+            self._fetch(_row(company_name_en="TENCENT",
+                             stock_names_company_name_en=None)),
+            title_lang="zh",
+        )
+
+        self.assertEqual(with_fallback, without_fallback)
+        self.assertIn("腾讯控股", with_fallback)
