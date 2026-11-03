@@ -736,6 +736,8 @@ class _PredictDb:
             return self._history
         if flat.startswith("SELECT company_name FROM earnings"):
             return self._company_name
+        if flat.startswith("SELECT COALESCE("):
+            return self._company_name_en
         if flat.startswith("SELECT id FROM earnings WHERE symbol = %s"):
             return self._target_holder
         if flat.startswith("UPDATE earnings SET report_date"):
@@ -763,6 +765,20 @@ class _PredictDb:
             -row["id"],
         ))
         self._result = [{"company_name": candidates[0]["company_name"]}] if candidates else []
+
+    def _company_name_en(self, params):
+        """Issue #106: ``stock_names`` first, then the newest provider row."""
+        symbol, market = params[0], params[1]
+        candidates = [row for row in self.rows
+                      if row["symbol"] == symbol and row["market"] == market
+                      and row.get("company_name_en")]
+        candidates.sort(key=lambda row: (
+            str(row.get("date_source") or "").lower() == "algorithm",
+            -row["report_date"].toordinal(),
+            -row["id"],
+        ))
+        self._result = [{"company_name_en": candidates[0]["company_name_en"]}] if candidates \
+            else [{"company_name_en": ""}]
 
     def _target_holder(self, params):
         symbol, market, report_date, report_type = params
@@ -844,7 +860,7 @@ class SupersededPredictionMoveTests(TestCase):
         # One row per period: the stale date is gone, the new one was written.
         self.assertEqual([row["report_date"] for row in db.rows_of("AAPL", "US")],
                          [date(2025, 1, 30), date(2026, 1, 29), date(2027, 1, 29)])
-        self.assertEqual([call[3] for call in db.inserts], ["2027-01-29"])
+        self.assertEqual([call[4] for call in db.inserts], ["2027-01-29"])
 
     def test_move_skips_when_another_row_owns_the_target_date(self):
         count, db, stats = _run_predict(_aapl_fixture(),

@@ -283,6 +283,33 @@ def _company_name_for(cur, symbol: str, market: str) -> str:
     return row["company_name"] if row else ""
 
 
+#: The Latin name a prediction should carry (Issue #106).  ``stock_names`` is the
+#: cache every resolved symbol lands in, so it is the first source; a provider row
+#: of the same symbol is the fallback when the cache has no English name yet.
+#: Predictions are written last in the pipeline (``sync_all.sh``), after
+#: ``stock_names`` has run, and the stage only fills *existing* rows — a prediction
+#: created here used to stay without an English name forever, so every ``lang=en``
+#: subscriber saw the Chinese name for the newest forecast quarter.
+_COMPANY_NAME_EN_SQL = (
+    "SELECT COALESCE("
+    "  (SELECT NULLIF(company_name_en, '') FROM stock_names"
+    "    WHERE symbol = %s AND market = %s),"
+    "  (SELECT NULLIF(company_name_en, '') FROM earnings"
+    "    WHERE symbol = %s AND market = %s AND COALESCE(company_name_en, '') <> ''"
+    "    ORDER BY (COALESCE(date_source, '') = 'algorithm'), report_date DESC, id DESC"
+    "    LIMIT 1),"
+    "  ''"
+    ") AS company_name_en"
+)
+
+
+def _company_name_en_for(cur, symbol: str, market: str) -> str:
+    """The Latin name one of this symbol's predictions should carry (Issue #106)."""
+    cur.execute(_COMPANY_NAME_EN_SQL, (symbol, market, symbol, market))
+    row = cur.fetchone()
+    return (row["company_name_en"] or "") if row else ""
+
+
 # ── What a stored prediction may be rewritten to (Issue #110) ───────────────
 #
 # ``earnings.updated_at`` is a revision counter, not a write clock (#103): the
@@ -305,6 +332,15 @@ _PREDICTION_UPSERT: dict[str, str] = {
         "CASE WHEN earnings.date_source = 'algorithm' AND EXCLUDED.company_name <> '' "
         "THEN EXCLUDED.company_name ELSE earnings.company_name END"
     ),
+    # Issue #106: fill-only, and only on rows this path owns.  A provider's own
+    # Latin name is never replaced, and a later run that resolved no name cannot
+    # blank an existing one — the same rule as the ``stock_names`` cache.
+    "company_name_en": (
+        "CASE WHEN earnings.date_source = 'algorithm' "
+        "AND COALESCE(earnings.company_name_en, '') = '' "
+        "AND EXCLUDED.company_name_en <> '' "
+        "THEN EXCLUDED.company_name_en ELSE earnings.company_name_en END"
+    ),
 }
 
 #: Only the columns this path owns *and* can change.  ``report_date`` is part of
@@ -313,11 +349,13 @@ _PREDICTION_UPSERT: dict[str, str] = {
 #: ``fiscal_year``/``fiscal_quarter`` are not assigned here at all.
 _PREDICTION_REVISION_COLUMNS = (
     "is_predicted", "date_source", "date_status", "before_after", "company_name",
+    "company_name_en",
 )
 
-_PREDICTION_INSERT_SQL = f"""INSERT INTO earnings (symbol, market, company_name, report_date, report_type,
+_PREDICTION_INSERT_SQL = f"""INSERT INTO earnings (symbol, market, company_name, company_name_en,
+       report_date, report_type,
        fiscal_year, fiscal_quarter, before_after, is_predicted, date_source, date_status)
-    VALUES (%s, %s, %s, %s, 'Q', %s, %s, %s, TRUE, 'algorithm', 'predicted')
+    VALUES (%s, %s, %s, %s, %s, 'Q', %s, %s, %s, TRUE, 'algorithm', 'predicted')
     ON CONFLICT (symbol, market, report_date, report_type)
     DO UPDATE SET
         {", ".join(f"{column} = {expression}"
@@ -331,15 +369,19 @@ _PREDICTION_INSERT_SQL = f"""INSERT INTO earnings (symbol, market, company_name,
 
 def upsert_prediction(cur, *, symbol: str, market: str, company_name: str,
                       report_date: str, fiscal_year: int, fiscal_quarter: int,
-                      before_after) -> bool:
+                      before_after, company_name_en: str = "") -> bool:
     """Write one predicted period; return True when the stored row changed.
 
     ``False`` is a *converged* period: the conflict branch's ``WHERE`` rejected
     the update because the effective values (``COALESCE``/``CASE`` applied) equal
     the stored ones, so ``updated_at`` — and with it the event's ``SEQUENCE`` and
     the feed's ``Last-Modified`` — keeps its previous value (Issue #110).
+
+    ``company_name_en`` is fill-only (Issue #106): it lands on an
+    algorithm-owned row whose Latin name is still empty, never overwrites a
+    provider's value and never blanks one.
     """
-    cur.execute(_PREDICTION_INSERT_SQL, (symbol, market, company_name,
+    cur.execute(_PREDICTION_INSERT_SQL, (symbol, market, company_name, company_name_en,
                                          report_date, fiscal_year, fiscal_quarter,
                                          before_after))
     return bool(cur.rowcount and cur.rowcount > 0)
@@ -476,6 +518,9 @@ def predict_for_symbol(symbol: str, market: str, stats: "PredictionStats | None"
     # converged on it by align_predicted_names() before the walk starts.
     with db_cursor() as cur:
         company_name = _company_name_for(cur, symbol, market)
+        # Issue #106: the newest predicted quarter lives in the ``lang=en`` feed
+        # under the Chinese name unless the row itself carries a Latin one.
+        company_name_en = _company_name_en_for(cur, symbol, market)
 
     # Predict forward from the latest confirmed quarter
     predictions_made = 0
@@ -534,6 +579,7 @@ def predict_for_symbol(symbol: str, market: str, stats: "PredictionStats | None"
             changed = upsert_prediction(
                 cur,
                 symbol=symbol, market=market, company_name=company_name,
+                company_name_en=company_name_en,
                 report_date=pred_date.isoformat(), fiscal_year=next_fy,
                 fiscal_quarter=next_fq, before_after=pred_ba,
             )

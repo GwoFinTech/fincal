@@ -42,9 +42,11 @@ class _Cursor:
 
     def __init__(self):
         self.executed = []
+        self.rowcount = 0
 
     def execute(self, sql, params=None):
         self.executed.append((sql, params))
+        self.rowcount = 0
 
     def fetchall(self):
         return []
@@ -212,6 +214,8 @@ class MainResultTests(TestCase):
         targets = _targets("AAPL", "MSFT", market="HK")
         cached = []
         with mock.patch.object(sync_stock_names, "init_db", mock.MagicMock()), \
+                mock.patch.object(sync_stock_names, "backfill_earnings_english_names",
+                                  mock.MagicMock()), \
                 mock.patch.object(sync_stock_names, "missing_name_targets",
                                   mock.MagicMock(return_value=targets)), \
                 mock.patch.object(sync_stock_names, "english_name_targets",

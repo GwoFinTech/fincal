@@ -60,16 +60,29 @@ def fetch_earnings_from_db(
 
         where = " AND ".join(conditions)
         cur.execute(
-            f"""SELECT e.*, c.currency AS consensus_currency, c.eps_gaap AS consensus_eps_gaap,
+            f"""SELECT e.*, sn.company_name_en AS stock_names_company_name_en,
+                   c.currency AS consensus_currency, c.eps_gaap AS consensus_eps_gaap,
                    c.eps_adjusted AS consensus_eps_adjusted, c.revenue AS consensus_revenue,
                    c.ebit AS consensus_ebit, c.net_income AS consensus_net_income,
                    c.normalized_net_income AS consensus_normalized_net_income, c.fetched_at AS consensus_fetched_at
             FROM earnings e LEFT JOIN earnings_consensus c ON c.symbol=e.symbol AND c.market=e.market
               AND c.fiscal_year=e.fiscal_year AND c.fiscal_quarter=e.fiscal_quarter AND c.source='longbridge'
+            LEFT JOIN stock_names sn ON sn.symbol=e.symbol AND sn.market=e.market
             WHERE {where} ORDER BY e.report_date, e.market, e.symbol""",
             params,
         )
         rows = [dict(row) for row in cur.fetchall()]
+
+    # Issue #106: ``earnings.company_name_en`` is filled by the write paths, but a
+    # row written by a path that does not know the Latin name (a prediction created
+    # before the symbol's name was resolved) would otherwise fall back to the
+    # Chinese name in the ``lang=en`` feed.  The name is already in
+    # ``stock_names``, so the single read entry point fills the gap from there —
+    # fill-only in memory, no write, and the row's own value always wins.
+    for row in rows:
+        fallback = str(row.pop("stock_names_company_name_en", None) or "").strip()
+        if not str(row.get("company_name_en") or "").strip() and fallback:
+            row["company_name_en"] = fallback
 
     # One fiscal period is one event: collapsing here (the single read entry point
     # of the API, the CSV/JSON export and the iCal feed) keeps the three outlets

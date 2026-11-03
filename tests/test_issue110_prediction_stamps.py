@@ -94,7 +94,7 @@ class PredictionRevisionContractTests(TestCase):
                          "a first write must take the column default, not a literal")
 
     def test_the_bound_parameters_still_match_the_insert(self):
-        self.assertEqual(self.sql.count("%s"), 7, "one placeholder per bound field")
+        self.assertEqual(self.sql.count("%s"), 8, "one placeholder per bound field")
         self.assertNotIn("%s", self.conflict, "the guard compares stored values, not new binds")
 
 
@@ -151,6 +151,8 @@ class _StampHistoryCursor(_StampCursor):
             ]
         elif flat.startswith("SELECT company_name FROM earnings"):
             self._result = [{"company_name": "Apple"}]
+        elif flat.startswith("SELECT COALESCE("):
+            self._result = [{"company_name_en": "APPLE"}]
         elif flat.startswith("INSERT INTO earnings"):
             self.rowcount = 1 if self.upsert_cursor.changed else 0
         else:
@@ -191,6 +193,7 @@ CREATE TEMP TABLE earnings (
     symbol TEXT NOT NULL,
     market TEXT NOT NULL DEFAULT 'US',
     company_name TEXT DEFAULT '',
+    company_name_en TEXT DEFAULT '',
     report_date DATE NOT NULL,
     report_type TEXT DEFAULT 'Q',
     fiscal_year INTEGER,
@@ -235,6 +238,7 @@ class PredictionStampIntegrationTests(TestCase):
 
     def _upsert(self, **overrides):
         values = dict(symbol="AAPL", market="US", company_name="Apple",
+                      company_name_en="",
                       report_date="2027-01-29", fiscal_year=2027,
                       fiscal_quarter=1, before_after="after")
         values.update(overrides)
@@ -312,6 +316,31 @@ class PredictionStampIntegrationTests(TestCase):
         self.assertEqual(after["company_name"], "Apple Inc")
         self.assertGreater(after["updated_at"], _SENTINEL)
         self.assertGreater(self._sequence(after), self._sequence(before))
+
+    def test_a_missing_latin_name_is_filled_and_is_a_revision(self):
+        """Issue #106: the first Latin name to arrive changes the event body."""
+        self._upsert(company_name_en="")
+        before = self._freeze_stamp()
+
+        self.assertTrue(self._upsert(company_name_en="APPLE"))
+
+        after = self._stored()
+        self.assertEqual(after["company_name_en"], "APPLE")
+        self.assertGreater(after["updated_at"], _SENTINEL)
+        self.assertGreater(self._sequence(after), self._sequence(before))
+
+    def test_a_stored_latin_name_is_neither_replaced_nor_blanked(self):
+        """Issue #106: fill-only in both directions, so no fake revision either."""
+        self._upsert(company_name_en="APPLE")
+        before = self._freeze_stamp()
+
+        self.assertFalse(self._upsert(company_name_en="APPLE INC"))
+        self.assertFalse(self._upsert(company_name_en=""))
+
+        after = self._stored()
+        self.assertEqual(after["company_name_en"], "APPLE")
+        self.assertEqual(after["updated_at"], _SENTINEL)
+        self.assertEqual(self._sequence(after), self._sequence(before))
 
     def test_a_provider_row_on_the_same_key_is_not_rewritten_when_nothing_changed(self):
         """The guard also protects a confirmed row the prediction date happens to hit."""

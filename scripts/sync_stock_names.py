@@ -67,7 +67,15 @@ def name_scope() -> list[dict]:
 
 
 def english_name_targets() -> list[dict]:
-    """Scope symbols whose English name is still missing (Issue #55)."""
+    """Scope symbols whose English name is still missing (Issue #55, #106).
+
+    Issue #106: the gap is judged per *row*, not per symbol.  A symbol whose older
+    rows carry a Latin name while a newly written prediction row has none would
+    otherwise never be a target again — the row would stay without a name and
+    ``lang=en`` would fall back to the Chinese one forever.  Rows that the cache
+    can already serve are filled by :func:`backfill_earnings_english_names`
+    before this runs, so a remaining gap really means "the cache has no name".
+    """
     scope = name_scope()
     if not scope:
         return []
@@ -76,11 +84,45 @@ def english_name_targets() -> list[dict]:
         cached = {(r["symbol"], r["market"]): (r["company_name_en"] or "")
                   for r in cur.fetchall()}
         cur.execute("""SELECT DISTINCT symbol, market FROM earnings
-                       WHERE company_name_en IS NOT NULL AND company_name_en <> ''""")
-        filled = {(r["symbol"], r["market"]) for r in cur.fetchall()}
+                       WHERE COALESCE(company_name_en, '') = ''""")
+        gaps = {(r["symbol"], r["market"]) for r in cur.fetchall()}
+        cur.execute("SELECT DISTINCT symbol, market FROM earnings")
+        known = {(r["symbol"], r["market"]) for r in cur.fetchall()}
     return [t for t in scope
             if not (cached.get((t["symbol"], t["market"])) or "")
-            and (t["symbol"], t["market"]) not in filled]
+            and ((t["symbol"], t["market"]) in gaps
+                 or (t["symbol"], t["market"]) not in known)]
+
+
+#: Copy the cached Latin name onto every ``earnings`` row that has none (Issue
+#: #106).  Fill-only in both directions — an existing row value is never replaced
+#: — and ``updated_at`` is deliberately untouched: this is the same name the read
+#: path already falls back to, so it is not a revision subscribers must re-see
+#: (#103's SEQUENCE contract).
+_FILL_EARNINGS_ENGLISH_SQL = """
+    UPDATE earnings e
+       SET company_name_en = sn.company_name_en
+      FROM stock_names sn
+     WHERE sn.symbol = e.symbol AND sn.market = e.market
+       AND COALESCE(sn.company_name_en, '') <> ''
+       AND COALESCE(e.company_name_en, '') = ''
+"""
+
+
+def backfill_earnings_english_names() -> int:
+    """Converge ``earnings.company_name_en`` on the cache; return rows written.
+
+    Runs on every round and issues no provider request: after the first pass it
+    writes nothing.  Without it the stage's per-symbol target rule left every row
+    created after the symbol was resolved (the weekly predictions) permanently
+    without a Latin name (Issue #106).
+    """
+    with db_cursor() as cur:
+        cur.execute(_FILL_EARNINGS_ENGLISH_SQL)
+        filled = cur.rowcount or 0
+    if filled:
+        logger.info("filled %d earnings row(s) with a cached english name", filled)
+    return filled
 
 
 def cache_name(symbol: str, market: str, name: str, source: str,
@@ -143,6 +185,10 @@ def main(run_id: int | None = None) -> tuple[int, list[tuple[str, str]], list[tu
     budget and its audit row must age from real progress (Issue #78).
     """
     init_db()
+    # Issue #106: converge rows the cache can already name before deciding which
+    # symbols still need a provider call — otherwise the per-symbol target rule
+    # turns every new prediction row into a permanent gap.
+    backfill_earnings_english_names()
     targets = {(t["symbol"], t["market"]): t for t in missing_name_targets()}
     for t in english_name_targets():
         targets.setdefault((t["symbol"], t["market"]), t)
