@@ -10,7 +10,7 @@ from ..errors import AppError, NotFoundError, ConflictError, ForbiddenError
 from ..schemas import (
     ManagedWatchlistItem, ManagedWatchlistInput as ManagedInput, SyncRun, SyncRunCancelResult,
     SyncRunRecoverResult, SyncRunRetryResult, AuditLogEntry, HealthResponse, ReadyResponse,
-    DiagnosticsResponse, OverviewResponse,
+    DiagnosticsResponse, OverviewResponse, IcalTokenRotation,
 )
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -205,6 +205,49 @@ def recover_stale_runs(user=Depends(admin_user)):
 def list_audit_log(limit: int = 50, _: dict = Depends(admin_user)):
     from ..audit import get_audit_log
     return get_audit_log(limit)
+
+
+@router.post("/ical-tokens/{user_id}/rotate", response_model=IcalTokenRotation)
+def rotate_ical_token(user_id: int, user=Depends(admin_user)):
+    """Rotate a user's subscription token inside the serving process (#112).
+
+    Revoking a leaked iCal URL used to require editing ``users`` and restarting
+    the container, because the feed body was cached by token in the server's
+    memory. Rotation now runs here, against the process that holds those caches,
+    so the old address answers 404 on the very next request — no restart, and no
+    waiting for ``ICAL_TOKEN_CACHE_TTL_SECONDS``.
+
+    The new URL is returned to the admin (as ``GET /api/me`` returns it to the
+    owner); the audit entry keeps fingerprints only.
+    """
+    from .. import ical_tokens
+    from ..audit import log_admin_action
+
+    with db.db_cursor() as cur:
+        targets = ical_tokens.select_targets(cur, user_id=user_id)
+        if not targets:
+            raise NotFoundError("user")
+        rows = ical_tokens.rotate(cur, targets)
+    dropped = ical_tokens.invalidate_feed_cache(rows)
+    row = rows[0]
+    log_admin_action(
+        "rotate_ical_token",
+        actor_id=str(user.get("id")),
+        actor_email=user.get("email"),
+        target=f"user:{user_id}",
+        details={
+            "old_fingerprint": row["old_fingerprint"],
+            "new_fingerprint": row["new_fingerprint"],
+            "cache_entries_dropped": dropped,
+        },
+    )
+    return {
+        "user_id": user_id,
+        "email": row["email"],
+        "ical_url": f"{config.ICAL_BASE_URL}/ical/{row['new_token']}",
+        "fingerprint": row["new_fingerprint"],
+        "cache_entries_dropped": dropped,
+    }
 
 
 @router.get("/diagnostics", response_model=DiagnosticsResponse)

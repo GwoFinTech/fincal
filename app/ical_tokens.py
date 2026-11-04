@@ -7,15 +7,17 @@ token reached a log line (``docker logs``, a pasted ops record, a screenshot) th
 only remedies were hand-editing the database or deleting the user.
 
 This module holds the rotation itself so the CLI (``scripts/
-rotate_ical_tokens.py``) and any future admin endpoint share one implementation:
+rotate_ical_tokens.py``) and the admin endpoint
+(``POST /api/admin/ical-tokens/{user_id}/rotate``) share one implementation:
 
 * :func:`select_targets` reads the users to rotate (all, one id, one email);
 * :func:`plan` produces new tokens without writing, so a dry run can report the
   blast radius — it returns fingerprints only, never a credential;
 * :func:`rotate` writes them and returns the same shape;
-* :func:`invalidate_feed_cache` drops the feed cache the app would otherwise
-  keep serving the *old* URL from (the cache is keyed by token, so a rotated
-  token needs both its old and new keys dropped).
+* :func:`invalidate_feed_cache` drops the cached feed and the cached token
+  resolution for the rotated users, and reports how many feed entries it really
+  removed in this process (Issue #112 — the service now checks every token
+  before serving a cached body, so a rotation no longer needs a restart).
 
 The token entropy stays ``secrets.token_urlsafe(24)``: the same 32-character
 base64url shape ``ensure_user`` generates, so nothing downstream (path regexes,
@@ -108,21 +110,25 @@ def rotate(cur, targets: Sequence[dict]) -> list[dict]:
     return results
 
 
-def invalidate_feed_cache(tokens: Iterable[str]) -> int:
-    """Drop the cached feeds for ``tokens``; returns how many were dropped.
+def invalidate_feed_cache(rotations: Iterable[dict]) -> int:
+    """Drop the cached feed and token resolution for each rotated user.
 
-    The feed cache lives in this process (``app.routers.ical._ical_cache``), so
-    this only helps a rotation that runs where the app runs — an in-app admin
-    action, or a test. A rotation from a *separate* CLI process cannot reach the
-    running server's memory: that path needs the service restarted (or the
-    3600 s TTL to pass) before the old URL really stops answering 200. The CLI
-    says so in its output instead of implying an invalidation it cannot perform.
+    ``rotations`` are :func:`rotate`'s result rows: each carries ``user_id``
+    plus the ``old_token``/``new_token`` involved. Returns how many **feed
+    entries were actually removed from this process** (Issue #112) — the old
+    implementation counted the tokens it was handed, so an out-of-process
+    rotation reported ``2 × users`` dropped while the server's cache was
+    untouched.
+
+    A rotation no longer needs a restart to take effect: the service re-reads
+    every token at most ``config.ICAL_TOKEN_CACHE_TTL_SECONDS`` (60 s) after it
+    was last resolved, and this function makes that cut-off immediate when the
+    rotation runs inside the serving process (admin endpoint, tests).
     """
-    from .routers.ical import invalidate_ical_cache
+    from .routers.ical import forget_subscription_token, invalidate_ical_cache
 
     dropped = 0
-    for token in tokens:
-        if token:
-            invalidate_ical_cache(token)
-            dropped += 1
+    for row in rotations:
+        dropped += invalidate_ical_cache(row["user_id"])
+        forget_subscription_token(row.get("old_token"), row.get("new_token"))
     return dropped

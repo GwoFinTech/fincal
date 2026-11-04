@@ -25,11 +25,14 @@ Usage
     python scripts/rotate_ical_tokens.py --user-id 3 --apply
     python scripts/rotate_ical_tokens.py --email a@b.c --apply
 
-After ``--apply`` against a *running* service, restart it (``docker restart
-fincal``): the feed cache lives in the server process and is keyed by token, so
-until the process restarts (or the 3600 s TTL expires) the old URL is still
-answered from memory. ``--apply`` says so; it cannot reach the other process's
-cache from here.
+After ``--apply``: the rotation is written to the database and this process's
+feed cache is dropped, so a rotation performed *inside* the service takes effect
+immediately. A rotation run from the host against a *running* container cannot
+reach the server's memory — but it no longer needs to: the service re-checks
+every token at most ``ICAL_TOKEN_CACHE_TTL_SECONDS`` (60 s by default) before
+serving a cached feed (Issue #112), so the old URL stops answering within that
+window. For an immediate cut-off use ``POST /api/admin/ical-tokens/{id}/rotate``,
+which rotates inside the serving process.
 """
 from __future__ import annotations
 
@@ -40,7 +43,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app import ical_tokens  # noqa: E402
+from app import config, ical_tokens  # noqa: E402
 from app.db import db_cursor  # noqa: E402
 
 
@@ -69,18 +72,20 @@ def main(argv: list[str] | None = None) -> int:
             return 1 if (args.user_id is not None or args.email) else 0
         rows = ical_tokens.rotate(cur, targets) if args.apply else ical_tokens.plan(targets)
 
-    # Keys that must leave the feed cache: the old token (cached bodies) and the
-    # new one (a rerun within the TTL window).
+    # Feed entries and token resolutions this process actually drops. An
+    # out-of-process run reports 0 here, which is the truth — the *service*
+    # re-validates the token within ICAL_TOKEN_CACHE_TTL_SECONDS regardless.
     dropped = 0
     if args.apply:
-        dropped = ical_tokens.invalidate_feed_cache(
-            key for row in rows for key in (row["old_token"], row["new_token"])
-        )
+        dropped = ical_tokens.invalidate_feed_cache(rows)
 
     report = {
         "applied": bool(args.apply),
         "users": len(rows),
         "cache_entries_dropped": dropped,
+        # Upper bound on how long a revocation made in the database takes to
+        # stop being honoured by a *running* service (Issue #112).
+        "revocation_effective_within_seconds": config.ICAL_TOKEN_CACHE_TTL_SECONDS,
         "rotations": [
             {
                 "user_id": row["user_id"],
@@ -102,10 +107,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  id={row['user_id']:<6} {row['email']:<32} "
                   f"{row['old_fingerprint']} -> {new}")
         if args.apply:
-            print(f"cache entries dropped : {report['cache_entries_dropped']}")
-            print("NOTE: a running service keeps its own feed cache. Restart it "
-                  "(docker restart fincal) so the old URLs stop answering; "
-                  "otherwise the previous feed stays cached for up to 3600 s.")
+            print(f"cache entries dropped : {report['cache_entries_dropped']} (this process)")
+            print(f"NOTE: a running service re-checks each token within "
+                  f"{report['revocation_effective_within_seconds']:g} s, so the old "
+                  f"URL stops answering inside that window without a restart. For an "
+                  f"immediate cut-off call POST /api/admin/ical-tokens/<user_id>/rotate.")
         else:
             print("dry run — nothing written; re-run with --apply")
 

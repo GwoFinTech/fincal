@@ -173,6 +173,24 @@ LONGBRIDGE_ACCESS_TOKEN=os.getenv("LONGBRIDGE_ACCESS_TOKEN", "")
 # iCal subscription base URL (must be publicly accessible)
 ICAL_BASE_URL = os.getenv("ICAL_BASE_URL", "")
 
+# How long a subscription token's user lookup may be reused (Issue #112).
+#
+# ``/ical/{token}`` is authenticated by the token alone, and the feed body used
+# to be cached *by token*: after a rotation the old URL kept answering from
+# memory for up to the 3600 s content TTL, so closing a leak meant restarting
+# the service. Token resolution is now its own layer, re-read from the unique
+# ``users.ical_token`` index at most once per this window per token — which is
+# also the *upper bound* on how long a revocation written straight into the
+# database takes to bite. An in-app rotation (admin endpoint, CLI run where the
+# service runs) drops the resolution immediately, so this is not the delay of a
+# supported revoke path.
+#
+# Must stay positive: 0 would put an indexed read on every calendar poll (the
+# exact cost the layer exists to avoid) and a negative value makes ``TTLCache``
+# reject every entry — the same thing, silently. Clamped rather than raised at
+# import so a bad environment value cannot stop the service from booting.
+ICAL_TOKEN_CACHE_TTL_SECONDS = max(1.0, float(os.getenv("ICAL_TOKEN_CACHE_TTL_SECONDS", "60")))
+
 # Forward horizon (days) of the calendar read outlets (Issue #59).  This is the
 # single source of truth for "how far ahead does the app look": the iCal feed
 # (app/routers/ical.py) and the default window of /api/earnings

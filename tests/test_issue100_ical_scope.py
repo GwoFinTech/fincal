@@ -242,9 +242,10 @@ def test_invalidate_symbol_universe_clears_the_feed_cache():
     from app.universe import invalidate_symbol_universe
 
     ical_router._ical_cache.clear()
-    ical_router._store_feed(("tok-abc", "zh", "all", 1, "all"),
+    # Keys are (user_id, lang, scope, predicted, markets) — Issue #112.
+    ical_router._store_feed((1, "zh", "all", 1, "all"),
                             ical_router._CachedFeed("X" * 100, 'W/"e"', "Mon, 01 Aug 2026 08:00:00 GMT"))
-    ical_router._store_feed(("tok-xyz", "zh", "watchlist", 1, "all"),
+    ical_router._store_feed((8, "zh", "watchlist", 1, "all"),
                             ical_router._CachedFeed("Y" * 100, 'W/"f"', "Mon, 01 Aug 2026 08:00:00 GMT"))
     assert len(ical_router._ical_cache) == 2
 
@@ -264,7 +265,7 @@ def test_admin_watchlist_write_drops_the_feeds(path):
 
     app.dependency_overrides = {}
     ical_router._ical_cache.clear()
-    ical_router._store_feed(("tok-abc", "zh", "all", 1, "all"),
+    ical_router._store_feed((1, "zh", "all", 1, "all"),
                             ical_router._CachedFeed("X" * 100, 'W/"e"', "Mon, 01 Aug 2026 08:00:00 GMT"))
 
     class _AdminCursor:

@@ -65,7 +65,9 @@ class _FakeCursor:
                 if row["id"] == user_id:
                     row["ical_token"] = new_token
             self._rows = []
-        elif flat.startswith("SELECT id, email, name FROM users WHERE ical_token"):
+        elif "FROM users WHERE ical_token" in flat:
+            # The credential now resolves on its own (Issue #112) — the feed
+            # reads (id, email), the old cold path also selected the name.
             self._rows = [row for row in self._store.users if row["ical_token"] == params[0]]
         elif flat.startswith("SELECT symbol, market FROM watchlist"):
             self._rows = [row for row in self._store.watchlist if row["user_id"] == params[0]]
@@ -362,7 +364,7 @@ def test_rotate_apply_swaps_the_token_and_kills_the_cached_feed(capsys):
     try:
         # Warm the feed cache for the leaked token, as production polling does.
         assert client.get(f"/ical/{TOKEN}").status_code == 200
-        assert any(key[0] == TOKEN for key in ical_router._ical_cache), "cache not warmed"
+        assert any(key[0] == 7 for key in ical_router._ical_cache), "cache not warmed"
 
         with patch.object(rotate, "db_cursor", lambda: store.connection()):
             assert rotate.main(["--apply"]) == 0
@@ -370,8 +372,12 @@ def test_rotate_apply_swaps_the_token_and_kills_the_cached_feed(capsys):
         new_token = store.users[0]["ical_token"]
         assert new_token != TOKEN and len(new_token) >= 16
 
-        # The cached body for the old key is gone in this process...
-        assert not any(key[0] == TOKEN for key in ical_router._ical_cache)
+        # The warm body for the rotated user is gone and the old credential no
+        # longer resolves (Issue #112): the cache key is the user id, so nothing
+        # is left under a token at all.
+        assert not any(key[0] == 7 for key in ical_router._ical_cache)
+        assert not any(TOKEN in str(key) for key in ical_router._ical_cache)
+        assert TOKEN not in ical_router._token_cache
         # ...so the old URL stops resolving and the new one serves the feed.
         assert client.get(f"/ical/{TOKEN}").status_code == 404
         assert client.get(f"/ical/{new_token}").status_code == 200
@@ -383,7 +389,13 @@ def test_rotate_apply_swaps_the_token_and_kills_the_cached_feed(capsys):
     # The CLI reports fingerprints only: it must not re-leak what it replaced.
     assert TOKEN not in output and new_token not in output, output
     assert token_fingerprint(TOKEN) in output
-    assert "docker restart" in output, "an out-of-process cache is not invalidated here"
+    # Issue #112: the server re-checks the token within the resolution TTL, so
+    # the operator is no longer told to restart the whole service.
+    assert "without a restart" in output, output
+    assert "docker restart" not in output, "a restart is no longer required"
+    assert "cache entries dropped : 1 (this process)" in output, (
+        "the CLI must report the entries it really removed, not the tokens it was handed"
+    )
 
 
 def test_rotate_can_target_one_user():

@@ -315,8 +315,9 @@ def test_subscription_serves_new_event_when_only_content_changed():
         }
 
         # The user adds MSFT: POST /api/watchlist invalidates the feed cache,
-        # earnings rows themselves are not rewritten (same updated_at).
-        invalidate_ical_cache("tok-abc")
+        # earnings rows themselves are not rewritten (same updated_at). The
+        # cache is keyed by user id, not by the credential (Issue #112).
+        invalidate_ical_cache(user["id"])
         from app import earnings as earnings_mod
         with patch.object(earnings_mod, "fetch_earnings_from_db", lambda **kw: [aapl, msft]):
             second = client.get("/ical/tok-abc", headers=validators)

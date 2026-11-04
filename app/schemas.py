@@ -50,6 +50,20 @@ class WatchlistAddResult(BaseModel):
 class WatchlistRemoveResult(BaseModel):
     status: str
 
+class IcalTokenRotation(BaseModel):
+    """Outcome of an in-app subscription-token rotation (Issue #112).
+
+    ``ical_url`` is the replacement address, published here for the same reason
+    ``GET /api/me`` publishes it to its owner: the subscriber needs the new URL
+    after the old one was revoked. Audit entries and logs carry ``fingerprint``
+    only — never the credential itself.
+    """
+    user_id: int
+    email: str
+    ical_url: str
+    fingerprint: str
+    cache_entries_dropped: int
+
 class SearchItem(BaseModel):
     symbol: str
     market: str

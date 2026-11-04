@@ -117,6 +117,28 @@ def isolated_database(request, monkeypatch):
             )
 
 
+@pytest.fixture(autouse=True)
+def isolated_ical_caches():
+    """No test inherits another test's token→user mapping or feed body (#112).
+
+    Both caches are process-wide — that is the point in production — and the
+    token cache now decides whether a feed is served *at all*, so a mapping
+    warmed by one test would make the next test's fake ``users`` table
+    irrelevant (or keep a revoked token resolving). Reset before and after,
+    exactly like the database pool above.
+    """
+    from app.routers import ical as ical_router
+
+    def _reset():
+        ical_router._ical_cache.clear()
+        ical_router._content_versions.clear()
+        ical_router._token_cache.clear()
+
+    _reset()
+    yield
+    _reset()
+
+
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
 def pytest_runtest_makereport(item, call):
     """Record each phase's report on the item (used by the isolation teardown).

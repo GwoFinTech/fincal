@@ -141,7 +141,9 @@ def api_add_watchlist(symbol: str, market: str = "US", user=Depends(get_current_
         )
         row = cur.fetchone()
     from .ical import invalidate_ical_cache
-    invalidate_ical_cache(fincal_user.get("ical_token"))
+    # The feed cache is keyed by the FinCal user id, not by the credential
+    # (Issue #112), so invalidating must name the user whose watchlist changed.
+    invalidate_ical_cache(fincal_user["id"])
     # The default calendar view folds this user's own watchlist into its symbol
     # set (see _fetch below), so the response cached for the caller has to go as
     # well — the watchlist page reads live and would otherwise disagree with the
@@ -181,7 +183,7 @@ def api_remove_watchlist(symbol: str, market: str = "US", user=Depends(get_curre
     if not removed:
         raise AppError("watchlist_entry_not_found", "watchlist entry not found", 404)
     from .ical import invalidate_ical_cache
-    invalidate_ical_cache(fincal_user.get("ical_token"))
+    invalidate_ical_cache(fincal_user["id"])  # by user, not token (Issue #112)
     # Same reason as in api_add_watchlist: a removed symbol must not linger on
     # the calendar (Issue #72).
     invalidate_calendar_caches()

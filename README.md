@@ -74,19 +74,36 @@ co-tenant container is ever suspected of being compromised.
   `uvicorn.access` (at `import app.main`, so plain `uvicorn app.main:app` is
   covered), the feed's timeout warning logs an 8-hex fingerprint instead of the
   token, and provider/watchlist URLs are logged without their query string.
-- **Tokens are rotatable.** `users.ical_token` is no longer write-once:
+- **Tokens are rotatable — and a rotation takes effect without a restart.**
+  `users.ical_token` is no longer write-once:
 
   ```bash
   python scripts/rotate_ical_tokens.py                     # dry run, all users
   python scripts/rotate_ical_tokens.py --user-id 3 --apply
   python scripts/rotate_ical_tokens.py --email a@b.c --apply
-  docker restart fincal    # drops the feed cache the old URL is still served from
   ```
 
-  The new URL is published by `GET /api/me` (`ical_url`); the script prints only
-  fingerprints. Restarting is required after an out-of-process rotation because
-  the feed cache lives in the server's memory — until then (or until the 3600 s
-  TTL) the old URL keeps answering.
+  The new URL is published by `GET /api/me` (`ical_url`) and returned by the
+  admin endpoint below; the script prints only fingerprints.
+
+  Revocation delay (Issue #112): the feed body is cached per **user id**, and
+  every request re-checks the token through its own resolution cache, refreshed
+  at most once per `ICAL_TOKEN_CACHE_TTL_SECONDS` (60 s by default). So a
+  rotation written straight into `users` — including one run from the host
+  against a container — stops the old URL within that window, **no restart
+  required** (`cache_entries_dropped` in the script output counts only the
+  entries that process really removed, i.e. 0 for an out-of-process run).
+
+  For an immediate cut-off, rotate inside the serving process:
+
+  ```bash
+  curl -X POST "$FINCAL_BASE_URL/api/admin/ical-tokens/3/rotate"
+  ```
+
+  It replaces the token, drops that user's cached feed and token resolution, and
+  audits `rotate_ical_token` with fingerprints only — the old address answers
+  `404` on the next request, and the new one reuses the unchanged body (same
+  `ETag`/`Last-Modified`, so calendar clients keep their conditional requests).
 
 Rotating invalidates existing calendar subscriptions (clients must re-subscribe
 from the URL in the app). After rotating, historical `docker logs` still hold
@@ -345,8 +362,9 @@ feed, so a symbol added there is in the next poll rather than after the TTL.
 
 The feed cache is bounded in **bytes of feed text**, not slots
 (`FEED_CACHE_MAX_BYTES = 16 MiB`, plus a 512-entry ceiling): the key is
-token + 5 options, so one subscriber can legitimately mint 12 keys, and a slot
-count said nothing about memory.
+user id + 5 options (Issue #112 — never the subscription token), so one
+subscriber can legitimately mint 12 keys, and a slot count said nothing about
+memory.
 
 **Compression (Issue #99).** Responses are gzipped by the application
 (`GZipMiddleware`, `minimum_size=1024`, `compresslevel=6`) as the outermost
@@ -620,8 +638,8 @@ Read them with three caveats in mind (`app/metrics.py` documents the same):
   bucket per cache (`earnings` for the calendar layer cache, `ical` for the feed
   cache). Provider counters are keyed by provider name only — the label set is
   bounded by the code, so no cache key, symbol, subscription token or user id can
-  end up in a label (the iCal cache key carries a token, `_earnings_cache`'s key
-  carries a user id, and neither is exposed).
+  end up in a label (the iCal cache key carries a user id, `_earnings_cache`'s
+  key too, and neither is exposed).
 - **A green number is not a promise.** `calls=0` after a restart means "nothing
   has happened yet", not "nothing is wrong"; use the freshness summary above for
   "has the pipeline run".

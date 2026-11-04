@@ -137,6 +137,72 @@ def _make_feed_cache(max_bytes: int = FEED_CACHE_MAX_BYTES) -> TTLCache[Any, _Ca
 _ical_cache: TTLCache[Any, _CachedFeed] = _make_feed_cache()
 
 
+# Credential layer (Issue #112). The feed body used to be cached *by token*, so
+# a revoked or rotated token kept being answered from a body generated while it
+# was still valid — 24 legitimate key combinations per token, up to the 3600 s
+# content TTL, and the only way to close a leaked URL was to restart the whole
+# process. Token and content are now two layers:
+#
+# * this cache maps ``token -> (user_id, email)`` and is consulted on **every**
+#   request, so an unknown token is a 404 before any content is read. Its TTL is
+#   the upper bound on how long a revocation made directly in ``users`` takes to
+#   bite; an in-process rotation drops the entry immediately.
+# * the content cache below is keyed by ``user_id``, so rotating a token does
+#   not throw away a feed body that has not changed (and its ETag /
+#   Last-Modified stay stable across the rotation).
+#
+# Only the resolution is cached, never a negative answer: an unknown token costs
+# the same single indexed lookup on the unique ``users.ical_token`` column that
+# the old cold path already paid, so scanners do not get a cheaper oracle.
+ICAL_TOKEN_CACHE_MAX_ENTRIES = 512
+
+
+def _make_token_cache(
+    ttl: float = config.ICAL_TOKEN_CACHE_TTL_SECONDS,
+) -> TTLCache[str, tuple[int, str]]:
+    return TTLCache[str, tuple[int, str]](maxsize=ICAL_TOKEN_CACHE_MAX_ENTRIES, ttl=ttl)
+
+
+_token_cache: TTLCache[str, tuple[int, str]] = _make_token_cache()
+
+
+def _resolve_subscriber(token: str) -> tuple[int, str] | None:
+    """Map a subscription token to ``(user_id, email)``, or ``None`` if unknown.
+
+    The token is the feed's only credential, so this check must happen before
+    anything cached is served (Issue #112). The email comes along because the
+    feed's ``X-WR-CALNAME`` is built from it; it is not part of the cache key,
+    and a profile change is therefore visible after at most one TTL window.
+    """
+    known = _token_cache.get(token)
+    if known is not None:
+        return known
+    with db.db_cursor() as cur:
+        cur.execute("SELECT id, email FROM users WHERE ical_token = %s", (token,))
+        row = cur.fetchone()
+    if not row:
+        return None
+    resolved = (row["id"], row.get("email") or "")
+    _token_cache[token] = resolved
+    return resolved
+
+
+def forget_subscription_token(*tokens: str | None) -> int:
+    """Drop cached ``token -> user`` resolutions; returns how many existed.
+
+    Used by rotation (Issue #112): the *old* token has to stop resolving now
+    rather than after the TTL, and the new one must not be served from anything
+    cached before it was written. A token that was never resolved here has no
+    entry to drop — the caller reports that honestly instead of counting the
+    arguments.
+    """
+    dropped = 0
+    for token in tokens:
+        if token and _token_cache.pop(token, None) is not None:
+            dropped += 1
+    return dropped
+
+
 def _store_feed(cache_key: tuple, feed: _CachedFeed, cache: TTLCache[Any, _CachedFeed] | None = None) -> None:
     """Cache a feed, honouring both the byte budget and the slot ceiling.
 
@@ -172,20 +238,29 @@ _ical_flight = Singleflight()
 _content_versions: TTLCache[Any, tuple[str, datetime]] = TTLCache[Any, tuple[str, datetime]](maxsize=512, ttl=3600)
 
 
-def invalidate_ical_cache(token: str | None = None) -> None:
-    """Invalidate one user's feed, or all feeds when token is omitted.
+def invalidate_ical_cache(user_id: int | None = None) -> int:
+    """Invalidate one user's feed, or all feeds when ``user_id`` is omitted.
+
+    Returns the number of feed entries actually removed (Issue #112). The
+    rotation CLI used to report the number of tokens it was *handed* as
+    ``cache_entries_dropped``, so an out-of-process run printed ``2 × users``
+    while deleting nothing and read like a completed revocation.
 
     Called with no argument whenever the *symbol universe* changes (Issue
     #100): ``scope=all`` now reads ``app.universe.popular_stocks()``, so an
     admin add/rename/remove has to drop every feed, otherwise a subscriber
     keeps the old symbol set for up to the 3600 s TTL.
     """
-    if token is None:
+    if user_id is None:
+        dropped = len(_ical_cache)
         _ical_cache.clear()
-    else:
-        for key in list(_ical_cache):
-            if isinstance(key, tuple) and key[0] == token:
-                _ical_cache.pop(key, None)
+        return dropped
+    dropped = 0
+    for key in list(_ical_cache):
+        if isinstance(key, tuple) and key[0] == user_id:
+            _ical_cache.pop(key, None)
+            dropped += 1
+    return dropped
 
 
 def _feed_last_modified(cache_key: tuple, etag: str, latest_dt: datetime) -> datetime:
@@ -224,13 +299,24 @@ def ical_feed(
     markets: str = Query("all", pattern="^(US|HK|all)$"),
 ):
     """Generate iCal feed for user based on their ical_token."""
-    cache_key = (token, lang, scope, predicted, markets)
+    # Credential first, content second (Issue #112): a token that no longer
+    # resolves must never be answered from a cached body, whether it never
+    # existed or was rotated/revoked after its feed was warmed.
+    subscriber = _resolve_subscriber(token)
+    if subscriber is None:
+        # An unknown token is not a cache miss: there is no feed to cache, and
+        # counting scanners here would drown the real hit rate.
+        return Response(content="Not Found", status_code=404)
+    user_id, email = subscriber
+    # The body cache is keyed by the *user*, not the credential (Issue #112), so
+    # a rotation neither resurrects the old URL nor discards an unchanged feed.
+    cache_key = (user_id, lang, scope, predicted, markets)
     cached = _ical_cache.get(cache_key)
     if cached is not None:
         # Both answers come out of the cached feed, so both are hits (Issue
         # #83): the 304 is the conditional-request form of the same body. The
-        # counters stay aggregate on purpose — the key carries the subscription
-        # token, which must never become a metric label.
+        # counters stay aggregate on purpose — the key carries a subscriber id,
+        # which must never become a metric label.
         metrics.record_cache_hit(FEED_CACHE_NAME)
         if _not_modified(request, cached.etag, cached.last_modified):
             return _not_modified_response(cached.etag, cached.last_modified)
@@ -243,13 +329,7 @@ def ical_feed(
         )
 
     with db.db_cursor() as cur:
-        cur.execute("SELECT id, email, name FROM users WHERE ical_token = %s", (token,))
-        user = cur.fetchone()
-        if not user:
-            # An unknown token is not a cache miss: there is no feed to cache,
-            # and counting scanners here would drown the real hit rate.
-            return Response(content="Not Found", status_code=404)
-        cur.execute("SELECT symbol, market FROM watchlist WHERE user_id = %s", (user["id"],))
+        cur.execute("SELECT symbol, market FROM watchlist WHERE user_id = %s", (user_id,))
         watchlist = cur.fetchall()
 
     from ..earnings import fetch_earnings_from_db
@@ -285,7 +365,7 @@ def ical_feed(
         # Same guard for both scopes: an empty symbol set must produce a valid
         # empty VCALENDAR, never an unfiltered full-database read (Issue #25).
         if not syms:
-            return generate_ical([], user.get("email", ""), title_lang=lang), []
+            return generate_ical([], email, title_lang=lang), []
         # The window is the shared calendar horizon (config.CALENDAR_FORWARD_DAYS,
         # default = predictor MAX_FUTURE_DAYS), not a local literal: the feed is a
         # subscription, so an event outside the window has no other path to the
@@ -298,7 +378,7 @@ def ical_feed(
         )
         if not predicted:
             earn = [e for e in earn if not e.get("is_predicted")]
-        return generate_ical(earn, user.get("email", ""), title_lang=lang), earn
+        return generate_ical(earn, email, title_lang=lang), earn
 
     try:
         # Cold path: this request produces the feed itself (a hit would have
