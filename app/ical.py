@@ -359,9 +359,16 @@ def generate_ical(earnings: list[dict], user_email: str = "", title_lang: str = 
 
         fq_str = f"Q{fq}" if fq else ""
         is_pred = e.get("is_predicted", False)
+        # Issue #111: a row that states an actual for a report date still ahead has
+        # not been disclosed, whatever its stored ``date_status`` says.  It must not
+        # be published as a fact: no ``STATUS:CONFIRMED`` (which would overwrite the
+        # subscriber's TENTATIVE copy) and no "EPS Actual" line.
+        unreleased = fiscal.has_unreleased_actuals(e)
         # Issue #55: the status marker follows the feed's language; a reported
         # event carries none. `_status_marker` owns the wording for both.
         date_status = e.get("date_status", "")
+        if unreleased and date_status == "reported":
+            date_status = "predicted" if is_pred else "scheduled"
         date_source = e.get("date_source", "")
         source_tag = "" if date_status == "reported" else _status_marker(date_status, title_lang)
         if not source_tag and date_status != "reported" and is_pred:
@@ -391,7 +398,8 @@ def generate_ical(earnings: list[dict], user_email: str = "", title_lang: str = 
                       _attributed_amount(_label("eps_estimate", title_lang), e.get("eps_estimate"),
                                          fiscal.declared_attribution(e, "estimate_currency"),
                                          title_lang),
-                      _attributed_amount(_label("eps_actual", title_lang), e.get("eps_actual"),
+                      _attributed_amount(_label("eps_actual", title_lang),
+                                         None if unreleased else e.get("eps_actual"),
                                          fiscal.declared_attribution(e, "actual_currency"),
                                          title_lang),
                       _comparability_note(comparison_reason, title_lang) if comparison_reason else ""]
@@ -422,7 +430,7 @@ def generate_ical(earnings: list[dict], user_email: str = "", title_lang: str = 
             lines.append(f"DTSTART;VALUE=DATE:{dt_str}")
             lines.append(f"DTEND;VALUE=DATE:{(report_date + timedelta(days=1)).strftime('%Y%m%d')}")
 
-        lines.append(f"STATUS:{'TENTATIVE' if is_pred else 'CONFIRMED'}")
+        lines.append(f"STATUS:{'TENTATIVE' if (is_pred or unreleased) else 'CONFIRMED'}")
         lines.append("END:VEVENT")
 
     lines.append("END:VCALENDAR")

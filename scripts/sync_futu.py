@@ -96,7 +96,8 @@ _KEEP_SAME_PROVIDER_PAIR_SQL = """
 #: counter, so both are conditional — a statement re-fetched unchanged must not
 #: restamp the row.  The comparison reads the *stored* value, which in an UPDATE
 #: is what an unqualified column name refers to.
-_ACTUAL_UPDATE_SQL = f"""UPDATE earnings SET {{column}} = %s, date_status = 'reported',
+_ACTUAL_UPDATE_SQL = f"""UPDATE earnings SET {{column}} = %s,
+   date_status = CASE WHEN report_date <= CURRENT_DATE THEN 'reported' ELSE date_status END,
    actual_source = 'futu',
    actual_as_of = CASE WHEN {{column}} IS DISTINCT FROM %s::numeric
                        THEN NOW() ELSE actual_as_of END,
@@ -699,7 +700,7 @@ ON CONFLICT (symbol, market, report_date, report_type)
 DO UPDATE SET
     {_DATE_ASSIGNMENTS},
     date_source = 'futu',
-    date_status = CASE WHEN earnings.eps_actual IS NOT NULL OR earnings.revenue_actual IS NOT NULL THEN 'reported' ELSE 'scheduled' END,
+    date_status = CASE WHEN (earnings.eps_actual IS NOT NULL OR earnings.revenue_actual IS NOT NULL) AND earnings.report_date <= CURRENT_DATE THEN 'reported' ELSE 'scheduled' END,
     updated_at = CASE WHEN {fiscal.revision_predicate(_FUTU_DATE_UPSERT, _DATE_REVISION_COLUMNS)}
                       THEN NOW() ELSE earnings.updated_at END
 """

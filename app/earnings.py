@@ -60,7 +60,8 @@ def fetch_earnings_from_db(
 
         where = " AND ".join(conditions)
         cur.execute(
-            f"""SELECT e.*, sn.company_name_en AS stock_names_company_name_en,
+            f"""SELECT e.*, CURRENT_DATE AS read_today,
+                   sn.company_name_en AS stock_names_company_name_en,
                    c.currency AS consensus_currency, c.eps_gaap AS consensus_eps_gaap,
                    c.eps_adjusted AS consensus_eps_adjusted, c.revenue AS consensus_revenue,
                    c.ebit AS consensus_ebit, c.net_income AS consensus_net_income,
@@ -72,6 +73,19 @@ def fetch_earnings_from_db(
             params,
         )
         rows = [dict(row) for row in cur.fetchall()]
+
+    # Issue #111: the read boundary is where "already disclosed" is decided for
+    # every consumer at once.  ``date_status`` is written from the presence of an
+    # actual alone, so a future-dated row can claim to be disclosed (and publish
+    # the number as fact); the database's own ``CURRENT_DATE`` is selected above so
+    # this rule and the sync's use the same day.
+    from . import fiscal
+    read_today = None
+    for row in rows:
+        read_today = row.pop("read_today", read_today)
+    masked = fiscal.hide_unreleased_actuals(rows, read_today)
+    if masked:
+        logger.debug("masked %d future-dated actual(s) on the read path", masked)
 
     # Issue #106: ``earnings.company_name_en`` is filled by the write paths, but a
     # row written by a path that does not know the Latin name (a prediction created
@@ -87,14 +101,19 @@ def fetch_earnings_from_db(
     # One fiscal period is one event: collapsing here (the single read entry point
     # of the API, the CSV/JSON export and the iCal feed) keeps the three outlets
     # in agreement instead of letting each of them pick its own row (Issue #50).
-    from . import fiscal
     rows = fiscal.collapse_fiscal_duplicates(rows)
     # Issue #61: the same single entry point decides whether each row's estimate
     # and actual may be subtracted, so the calendar, the exports and the iCal feed
     # cannot disagree about comparability either. The reason is a code, never
     # prose — the UI owns the wording.
     for row in rows:
-        row["comparison_unavailable_reason"] = fiscal.comparison_unavailable_reason(row)
+        # A verdict already reached at the read boundary (the unreleased-actuals
+        # rule of Issue #111) wins: it explains a masked pair, which by then has no
+        # values left for the attribution check to look at.
+        row["comparison_unavailable_reason"] = (
+            row.get("comparison_unavailable_reason")
+            or fiscal.comparison_unavailable_reason(row)
+        )
     return rows
 
 

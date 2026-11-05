@@ -659,10 +659,14 @@ def mark_confirmed():
         n2 = cur.rowcount
 
         # 2) Rows that have actuals are no longer predicted — unless their period
-        #    is already confirmed by another row (step 1 removed those).
+        #    is already confirmed by another row (step 1 removed those).  Issue
+        #    #111: a row whose report date is still ahead has not been disclosed,
+        #    so a provider-supplied actual must not promote it (it would take the
+        #    period's identity and make the real report skip as ``identity_skipped``).
         cur.execute(
             """UPDATE earnings SET is_predicted = FALSE, date_status = 'reported'
             WHERE is_predicted = TRUE AND eps_actual IS NOT NULL
+              AND report_date <= CURRENT_DATE
               AND NOT EXISTS (
                 SELECT 1 FROM earnings c
                 WHERE c.is_predicted = FALSE

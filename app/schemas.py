@@ -490,6 +490,10 @@ class DiagnosticsResponse(BaseModel):
     recent_syncs: list[RecentSync | dict] = []
     freshness: FreshnessResponse | None = None
     universe: UniverseStatus | None = None
+    # Issue #111: rows that still claim to be disclosed while their report date is
+    # ahead of today. The read path withholds their actuals, so this count is how
+    # the stored inconsistency stays visible instead of needing a manual SQL query.
+    future_reported: int = 0
 
 class OverviewSource(BaseModel):
     configured: str = ""

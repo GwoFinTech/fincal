@@ -557,6 +557,9 @@
       currency_unknown: '币种未标明',
       basis_mismatch: '口径不同',
       basis_unverified: '口径未经同一来源确认',
+      // Issue #111: the API withheld an actual whose report date is still ahead —
+      // the event has not been disclosed, so there is nothing to compare yet.
+      report_date_in_future: '报告尚未发生',
     };
     function attributionNote(reason, subject) {
       if (!reason) return '';

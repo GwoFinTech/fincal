@@ -216,8 +216,12 @@ class FutuActualsProvenanceTests(TestCase):
                    if sql.strip().startswith("UPDATE earnings")]
         assert len(updates) >= 2, "expected EPS and revenue updates to run"
         for sql in updates:
-            assert "date_status = 'reported'" in sql, (
-                "actuals update must mark the event reported"
+            # Issue #111 supersedes the bare "actuals → reported" rule: the event
+            # is only reported once its report date has arrived, otherwise the
+            # status it already had stands (a future-dated row cannot be disclosed).
+            assert "CASE WHEN report_date <= CURRENT_DATE THEN 'reported'" in sql, (
+                "actuals update must mark the event reported — but only from its "
+                "report date onwards"
             )
             assert "actual_source = 'futu'" in sql, (
                 "actuals update must attribute the actuals to Futu"

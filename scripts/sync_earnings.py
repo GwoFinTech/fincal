@@ -729,8 +729,13 @@ def flush_batch(cur, rows: list[tuple]) -> FlushStats:
     # they no longer carry a timestamp: the upsert above owns the revision
     # stamps, and rewriting them here would put the run clock back on the row
     # (Issue #103).
+    #
+    # Issue #111 supersedes the bare "has actuals → reported" rule: a report date
+    # still ahead means the event has not been disclosed, whatever the payload
+    # carries, so the row stays ``scheduled`` until its day arrives.  The database's
+    # ``CURRENT_DATE`` is the clock the read boundary uses too.
     execute_values(cur, """UPDATE earnings AS e SET
-        date_source = 'longbridge', date_status = CASE WHEN e.eps_actual IS NOT NULL OR e.revenue_actual IS NOT NULL THEN 'reported' ELSE 'scheduled' END,
+        date_source = 'longbridge', date_status = CASE WHEN (e.eps_actual IS NOT NULL OR e.revenue_actual IS NOT NULL) AND e.report_date <= CURRENT_DATE THEN 'reported' ELSE 'scheduled' END,
         estimate_source = CASE WHEN e.eps_estimate IS NOT NULL OR e.revenue_estimate IS NOT NULL THEN 'longbridge' ELSE e.estimate_source END,
         actual_source = CASE WHEN e.eps_actual IS NOT NULL OR e.revenue_actual IS NOT NULL THEN 'longbridge' ELSE e.actual_source END
         FROM (VALUES %s) AS v(symbol, market, report_date)

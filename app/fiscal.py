@@ -481,6 +481,107 @@ def comparison_unavailable_reason(row) -> str | None:
     return None
 
 
+# ── Unreleased actuals (Issue #111) ────────────────────────────────────────
+#
+# ``date_status`` answers "has this event been disclosed?".  It used to be derived
+# from *values alone* — ``eps_actual IS NOT NULL OR revenue_actual IS NOT NULL`` —
+# while ``report_date`` came from the provider untouched, so a row dated in the
+# future could read ``reported`` (18 production rows on 2026-11-03, e.g. PFIS with
+# an actual EPS three days before its own report date).  A report that has not
+# happened yet cannot have an actual, so the read paths need one shared rule that
+# compares the two: this section is that rule.
+
+#: Reason code for "the row carries an actual but its report date is still ahead".
+#: Language-independent like the other ``COMPARISON_*`` codes; the UI owns wording.
+COMPARISON_REPORT_DATE_IN_FUTURE = "report_date_in_future"
+
+
+def report_date_value(row) -> date | None:
+    """Return a row's ``report_date`` as a :class:`datetime.date`, or ``None``.
+
+    Rows reach this module from psycopg (``date``), from the JSON export/API
+    round-trip (ISO string) and from tests (either) — all three must compare.
+    """
+    value = row.get("report_date")
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            return date.fromisoformat(value.strip()[:10])
+        except ValueError:
+            return None
+    return None
+
+
+def _coerce_today(today) -> date:
+    if today is None:
+        return date.today()
+    if isinstance(today, datetime):
+        return today.date()
+    if isinstance(today, date):
+        return today
+    if isinstance(today, str) and today.strip():
+        try:
+            return date.fromisoformat(today.strip()[:10])
+        except ValueError:
+            return date.today()
+    return date.today()
+
+
+def report_date_is_future(row, today=None) -> bool:
+    """True when the row's report date has not arrived yet.
+
+    ``today`` lets a caller pin the clock (tests, or the database's own
+    ``CURRENT_DATE`` so the read path and the write path agree on the day).
+    """
+    report_date = report_date_value(row)
+    if report_date is None:
+        return False
+    return report_date > _coerce_today(today)
+
+
+def has_unreleased_actuals(row, today=None) -> bool:
+    """True when the row states an actual for a report that has not happened.
+
+    Also true once :func:`hide_unreleased_actuals` has already masked the row —
+    the flag travels as the reason code, so a second consumer (the iCal feed reads
+    rows the API already post-processed) reaches the same verdict.
+    """
+    if row.get("comparison_unavailable_reason") == COMPARISON_REPORT_DATE_IN_FUTURE:
+        return True
+    if not report_date_is_future(row, today):
+        return False
+    return row.get("eps_actual") is not None or row.get("revenue_actual") is not None
+
+
+def hide_unreleased_actuals(rows, today=None) -> int:
+    """Mask the actuals of future-dated rows in place; return how many were masked.
+
+    This is the single read-boundary rule (``fetch_earnings_from_db``), so the
+    calendar, both exports, the iCal feed and the decision panel cannot disagree:
+    the row keeps its estimates and its date, loses the numbers that cannot be
+    known yet, reads ``scheduled`` (or ``predicted``) instead of ``reported``, and
+    carries :data:`COMPARISON_REPORT_DATE_IN_FUTURE` so every "较预期" surface is
+    withheld with a stated cause rather than an empty cell.
+
+    It never writes: the stored actuals stay where they are (the provider's
+    retraction problem is a separate decision, Issue #111 方案 3).
+    """
+    masked = 0
+    for row in rows:
+        if not has_unreleased_actuals(row, today):
+            continue
+        row["eps_actual"] = None
+        row["revenue_actual"] = None
+        row["actual_as_of"] = None
+        row["date_status"] = "predicted" if row.get("is_predicted") else "scheduled"
+        row["comparison_unavailable_reason"] = COMPARISON_REPORT_DATE_IN_FUTURE
+        masked += 1
+    return masked
+
+
 def _same_actual_source(first_row, second_row) -> bool:
     """True when one provider wrote both rows' actuals."""
     first_source = first_row.get("actual_source")

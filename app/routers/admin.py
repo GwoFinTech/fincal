@@ -273,6 +273,17 @@ def diagnostics(_: dict = Depends(admin_user)):
                        WHERE started_at > NOW() - make_interval(hours => %s)
                        ORDER BY started_at DESC LIMIT 20""", (window_hours,))
         result["recent_syncs"] = [dict(r) for r in cur.fetchall()]
+        # Issue #111: an event that has not happened cannot be disclosed. The read
+        # path already withholds such a row's actuals; counting them here keeps the
+        # stored inconsistency observable (the count is a plain integer — no symbol,
+        # token or user id).
+        cur.execute("""SELECT COUNT(*) AS cnt FROM earnings
+                       WHERE report_date > CURRENT_DATE
+                         AND (date_status = 'reported'
+                              OR eps_actual IS NOT NULL OR revenue_actual IS NOT NULL)""")
+        row = cur.fetchone() or {}
+        count = row.get("cnt") if hasattr(row, "get") else None
+        result["future_reported"] = int(count or 0)
     result["sync_runs_window_hours"] = window_hours
     result["freshness"] = check_freshness()
     # Issue #58: surface the state of the live default universe, so a fallback
