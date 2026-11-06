@@ -13,6 +13,8 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from .log_redaction import redact_ical_tokens
+
 logger = logging.getLogger(__name__)
 
 
@@ -69,7 +71,11 @@ async def error_middleware(request: Request, call_next):
             headers=exc.headers or None,
         )
     except Exception as exc:
-        logger.exception("unhandled error on %s %s", request.method, request.url.path)
+        # ``/ical/{token}`` is a bearer credential: redact the path here rather
+        # than trusting the handler-layer filter, so this line is safe even if
+        # logging is reconfigured later (Issue #114).
+        logger.exception("unhandled error on %s %s",
+                         request.method, redact_ical_tokens(request.url.path))
         return JSONResponse(
             status_code=500,
             content={"error": {"code": "internal_error", "details": ""}},

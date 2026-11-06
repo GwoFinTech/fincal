@@ -13,11 +13,18 @@ This module is the single place those exits share::
     redact_ical_tokens(text)   # "/ical/<token>" -> "/ical/[REDACTED]"
     sanitize_url(url)          # drops a URL's query string, keeps the path
     token_fingerprint(token)   # 8 hex chars, safe to log and to grep
-    install_log_redaction()    # attaches the filter to ``uvicorn.access``
+    install_log_redaction()    # attaches the filter to every exit a record takes
 
 Nothing here is allowed to raise on odd input: a logging filter that throws
 would silence the log line it was meant to protect, and every caller sits on a
 request or provider path.
+
+A logger-level ``Filter`` only sees records emitted by *that* logger: a child
+logger such as ``app.errors`` propagates to the root handlers without passing
+through any ancestor logger's filters, so a handler that has no filter prints
+the record verbatim. ``install_log_redaction()`` therefore installs the filter
+on the root handlers as well (Issue #114) — that is the layer every propagated
+record must cross, whoever wrote it.
 """
 from __future__ import annotations
 
@@ -105,16 +112,44 @@ class TokenRedactionFilter(logging.Filter):
         return True
 
 
-def install_log_redaction(logger_name: str = "uvicorn.access") -> logging.Logger:
-    """Attach the redaction filter to ``logger_name`` (idempotent).
+def _attach_to_handler(handler: logging.Handler) -> bool:
+    """Put the filter on one handler; ``True`` when it was added.
 
-    A filter belongs to the logger that *emits* the record, so this is installed
-    on ``uvicorn.access`` itself rather than on a handler: uvicorn reconfigures
-    its handlers at startup, but the logger object (and its filters) survive.
-    Repeated calls — app reloads, tests, a second import — must not stack
-    filters, hence the isinstance guard.
+    ``Handler.handle()`` runs this filter for every record that reaches the
+    handler, whatever logger emitted it — that is the point (Issue #114): a
+    record emitted by ``app.errors`` propagates straight to the root handler and
+    never crosses a logger-level filter on the way. Returns rather than asserts
+    so a caller can report what it changed, and the isinstance check keeps the
+    install idempotent when it runs again (tests, reloads, a second import).
+    """
+    if any(isinstance(existing, TokenRedactionFilter) for existing in handler.filters):
+        return False
+    handler.addFilter(TokenRedactionFilter())
+    return True
+
+
+def install_log_redaction(logger_name: str = "uvicorn.access") -> logging.Logger:
+    """Attach the redaction filter to every exit a record can take (idempotent).
+
+    Two layers, because they cover different records:
+
+    * ``logger_name`` (``uvicorn.access``) — uvicorn's own access lines are
+      emitted there and that logger's handler is configured by uvicorn, which
+      re-runs its log config at startup; the logger object (and its filters)
+      survive that, the handler does not have to.
+    * every root handler — the layer every *propagated* record crosses. An
+      application logger (``app.errors`` and anything below ``app.``) has no
+      handler of its own, so its record goes to the root handler unfiltered
+      unless that handler carries the filter (#114). The root handler itself is
+      created by ``logging.basicConfig`` in ``app.main``, before this runs.
+
+    Repeatable by contract: called on import, on a reload, from a test — it adds
+    nothing twice. A handler attached *after* this call is the documented
+    residual risk; calling again covers it.
     """
     logger = logging.getLogger(logger_name)
     if not any(isinstance(existing, TokenRedactionFilter) for existing in logger.filters):
         logger.addFilter(TokenRedactionFilter())
+    for handler in logging.getLogger().handlers:
+        _attach_to_handler(handler)
     return logger
