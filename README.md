@@ -446,6 +446,17 @@ whole process and strands a `running` audit row that would block every later
 sync. The audited run is also wrapped in a `finally` that forces a terminal
 state on any exit path.
 
+The actuals stage reads EPS and revenue from the income statement, and those
+field ids are **market-specific**: US statements use `8002` (revenue) and
+`8047`/`8048` (basic/diluted EPS), HK statements use `5001`, `5054` and `5055`
+(Issue #115). The id table is selected by the symbol's market; an unregistered
+market is reported as unsupported instead of being read with another market's
+numbering. A symbol whose statement carries none of the expected ids is recorded
+in `details.actual_missing_fields` (a report with revenue only, like `3690.HK`,
+is legitimate and is not a failure), while a run in which **every** fetched
+symbol is missing them fails with `futu_actual_fields_missing` — a provider
+schema change must not look like a clean stage that wrote nothing.
+
 ### Revision stamps: `updated_at`, `estimate_as_of`, `actual_as_of` (Issue #103)
 
 `earnings.updated_at` is not a write clock. It is the row's **revision counter**,

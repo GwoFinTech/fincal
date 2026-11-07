@@ -11,7 +11,7 @@ import socket
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any
 
@@ -49,20 +49,46 @@ PUB_TYPE_MAP = {1: "before", 2: "after", 3: "during"}
 # field whose label contradicts its id fails that symbol instead of silently
 # storing another metric.
 FUTU_STATEMENT_INCOME = 1
-FUTU_FID_INCOME_REVENUE = 8002        # 营业总收入
-FUTU_FID_INCOME_EPS_BASIC = 8047      # 基本每股收益
-FUTU_FID_INCOME_EPS_DILUTED = 8048    # 稀释每股收益
+FUTU_FID_INCOME_REVENUE = 8002        # 营业总收入 (US statement)
+FUTU_FID_INCOME_EPS_BASIC = 8047      # 基本每股收益 (US statement)
+FUTU_FID_INCOME_EPS_DILUTED = 8048    # 稀释每股收益 (US statement)
+FUTU_FID_INCOME_REVENUE_HK = 5001     # 营业总收入 (HK statement, Issue #115)
+FUTU_FID_INCOME_EPS_BASIC_HK = 5054   # 基本每股收益 (HK statement)
+FUTU_FID_INCOME_EPS_DILUTED_HK = 5055 # 稀释每股收益 (HK statement)
 
-#: Income-statement field ids read as EPS, in preference order.
+#: Income-statement field ids read as EPS, in preference order (US schema).
 FUTU_EPS_FIELD_IDS = (FUTU_FID_INCOME_EPS_BASIC, FUTU_FID_INCOME_EPS_DILUTED)
+
+#: Issue #115: OpenD addresses income-statement fields by a numeric id whose
+#: numbering *differs per market* — 8xxx is the US statement, 5xxx the HK one.
+#: The stage used only the US ids, so every HK symbol "found no field", and a
+#: missing field was neither written nor counted: 24 HK symbols were reported as
+#: processed with zero failures and zero rows written.  The id table is therefore
+#: selected by market; an unregistered market is reported as unsupported instead
+#: of being read with another market's numbering.
+FUTU_INCOME_FIELDS: dict[str, dict[str, Any]] = {
+    "US": {
+        "revenue": FUTU_FID_INCOME_REVENUE,
+        "eps": FUTU_EPS_FIELD_IDS,
+    },
+    "HK": {
+        "revenue": FUTU_FID_INCOME_REVENUE_HK,
+        "eps": (FUTU_FID_INCOME_EPS_BASIC_HK, FUTU_FID_INCOME_EPS_DILUTED_HK),
+    },
+}
 
 #: Labels accepted for each field id — case-folded substrings of OpenD's own
 #: ``display_name``, which is localised and may carry extra detail.  A label that
 #: matches none of them means the id no longer carries what the column expects.
+#: The HK ids are listed too (Issue #115): without them every HK field would be
+#: refused as drift even when the id and the label agree.
 FUTU_FIELD_LABELS = {
     FUTU_FID_INCOME_REVENUE: ("营业总收入", "营业收入", "revenue"),
     FUTU_FID_INCOME_EPS_BASIC: ("基本每股收益", "每股收益", "basic eps", "eps"),
     FUTU_FID_INCOME_EPS_DILUTED: ("稀释每股收益", "每股收益", "diluted eps", "eps"),
+    FUTU_FID_INCOME_REVENUE_HK: ("营业总收入", "营业收入", "revenue"),
+    FUTU_FID_INCOME_EPS_BASIC_HK: ("基本每股收益", "每股收益", "basic eps", "eps"),
+    FUTU_FID_INCOME_EPS_DILUTED_HK: ("稀释每股收益", "每股收益", "diluted eps", "eps"),
 }
 
 #: SQL list of the sources a new Futu actual may replace (Issue #45, extended by
@@ -415,6 +441,15 @@ class FutuStageStats:
     skipped_rows: int = 0
     cleared_predictions: int = 0
     reschedule_skipped: int = 0
+    #: Issue #115: symbols whose income statement arrived but carried none of the
+    #: expected field ids.  A single such symbol is not a failure (an HK interim
+    #: may only publish revenue), but if *every* fetched symbol is missing the
+    #: fields the provider's schema changed and the run must fail loudly instead
+    #: of reporting a clean stage that wrote nothing.
+    missing_field_symbols: list[str] = field(default_factory=list)
+    #: Symbols that returned at least one statement report — the denominator for
+    #: the "all symbols lost their fields" check.
+    report_symbols: int = 0
 
     def count_symbol(self, outcome: str) -> None:
         """Count one symbol-level outcome (``ok`` outcomes count nothing)."""
@@ -549,6 +584,15 @@ def futu_audit_outcome(*stages: FutuStageStats) -> tuple[str, str | None]:
     """
     if any(stage.rate_limited or stage.rate_limited_calls for stage in stages):
         return "failed", "futu_rate_limited"
+    if any(
+        stage.report_symbols and len(stage.missing_field_symbols) == stage.report_symbols
+        for stage in stages
+    ):
+        # Issue #115: every symbol returned a statement and none of them carried
+        # an expected field id.  That is not "these instruments have no data" but
+        # "the provider's field schema changed", and the stage must not report a
+        # clean success while writing nothing.
+        return "failed", "futu_actual_fields_missing"
     if any(stage.failed_symbols for stage in stages):
         return "failed", "futu_symbol_fetch_failed"
     return "success", None
@@ -584,6 +628,10 @@ def futu_audit_details(date_stats: FutuStageStats, actual_stats: FutuStageStats,
         "date_rows_skipped": date_stats.skipped_rows,
         "date_predictions_cleared": date_stats.cleared_predictions,
         "date_reschedule_skipped": date_stats.reschedule_skipped,
+        # Issue #115: symbols that returned an income statement without any of the
+        # expected field ids.  Written even when zero so a provider schema change
+        # is visible in the run instead of looking like "no HK actuals exist".
+        "actual_missing_fields": len(actual_stats.missing_field_symbols),
     }
 
 
@@ -842,11 +890,13 @@ def sync_earnings_dates(ctx, run_id: int, symbols: list[str],
 
 def sync_actuals(ctx, run_id: int, symbols: list[str],
                  stats: FutuStageStats | None = None) -> FutuStageStats:
-    """Fetch actual EPS (fid=8047/8048) and revenue (fid=8002) from the income statement.
+    """Fetch actual EPS and revenue from the market's income statement.
 
     Both figures live in ``statement_type=1``, so one OpenD call per symbol now
     carries them: the stage used to spend two calls per symbol, one of which read
-    a liquidity ratio and stored it as the actual EPS (Issue #62).  The symbol is
+    a liquidity ratio and stored it as the actual EPS (Issue #62).  The ids are
+    selected by market (Issue #115: US 8002/8047/8048, HK 5001/5054/5055) — the
+    numbering belongs to the statement schema, not to the metric.  The symbol is
     counted once, using the most severe outcome, so ``failed_symbols`` keeps its
     historical per-symbol meaning (Issue #49) — including a statement field whose
     label no longer matches the column it would be written to.
@@ -865,6 +915,19 @@ def sync_actuals(ctx, run_id: int, symbols: list[str],
         stats.symbols_attempted += 1
         symbol, market = canonical_earnings_symbol(source_symbol)
         futu_code = to_futu_code(source_symbol)
+        fields = FUTU_INCOME_FIELDS.get(market)
+        if fields is None:
+            # Issue #115: field ids belong to a market's statement schema.  Reading
+            # another market's numbering would either find nothing (silent zero
+            # writes) or, worse, another metric; an unregistered market is reported
+            # as unsupported instead of being guessed.
+            logger.warning(
+                "%s: no income-statement field map for market %s — actuals skipped",
+                futu_code, market,
+            )
+            stats.total += 1
+            stats.count_symbol(OUTCOME_UNSUPPORTED)
+            continue
         outcome = OUTCOME_OK
         try:
             outcome, income_data = futu_call(
@@ -877,16 +940,20 @@ def sync_actuals(ctx, run_id: int, symbols: list[str],
                 timeout_seconds=config.FUTU_ACTUALS_TIMEOUT_SECONDS,
             )
             if outcome == OUTCOME_OK and income_data.get("report_list"):
+                stats.report_symbols += 1
+                saw_expected_field = False
                 for report in income_data["report_list"]:
                     fy = report.get("fiscal_year")
                     ft = report.get("financial_type")
                     fq = F10_TO_QUARTER.get(ft)
                     if not fy or not fq:
                         continue
-                    eps = read_statement_field(report, FUTU_EPS_FIELD_IDS)
-                    revenue = read_statement_field(report, (FUTU_FID_INCOME_REVENUE,))
-                    for name, field in (("EPS", eps), ("Revenue", revenue)):
-                        if field.drift:
+                    eps = read_statement_field(report, fields["eps"])
+                    revenue = read_statement_field(report, (fields["revenue"],))
+                    if eps.field_id is not None or revenue.field_id is not None:
+                        saw_expected_field = True
+                    for name, read in (("EPS", eps), ("Revenue", revenue)):
+                        if read.drift:
                             # The id came back under a label that measures
                             # something else: write nothing for this period and
                             # let the symbol be audited as a failure, instead of
@@ -895,13 +962,13 @@ def sync_actuals(ctx, run_id: int, symbols: list[str],
                             logger.warning(
                                 "%s: %s field id %s is labelled %r for FY%s Q%s — "
                                 "value not written (Issue #62)",
-                                futu_code, name, field.field_id, field.label, fy, fq,
+                                futu_code, name, read.field_id, read.label, fy, fq,
                             )
-                        elif field.value is not None and not field.labelled:
+                        elif read.value is not None and not read.labelled:
                             logger.warning(
                                 "%s: %s field id %s came back without a label for "
                                 "FY%s Q%s; semantics unverified",
-                                futu_code, name, field.field_id, fy, fq,
+                                futu_code, name, read.field_id, fy, fq,
                             )
                     # Issue #61: a written actual must say which currency and
                     # which accounting base it is in — OpenD reports the
@@ -929,6 +996,19 @@ def sync_actuals(ctx, run_id: int, symbols: list[str],
                                  revenue.value, currency, basis,
                                  symbol, market, fy, fq),
                             )
+                if not saw_expected_field:
+                    # Issue #115: the report arrived but carried none of the ids
+                    # this market's schema defines.  Nothing was written; say so
+                    # instead of letting the stage look clean (all-market miss
+                    # fails the run — see futu_audit_outcome).
+                    stats.missing_field_symbols.append(source_symbol)
+                    logger.warning(
+                        "%s: %d income-statement report(s) but none of the %s "
+                        "expected field ids (revenue=%s, eps=%s) — no actual "
+                        "written (Issue #115)",
+                        futu_code, len(income_data["report_list"]), market,
+                        fields["revenue"], fields["eps"],
+                    )
         except Exception as e:
             outcome = merge_outcome(outcome, OUTCOME_FAILED)
             logger.warning("Actuals failed %s: %s", futu_code, e)

@@ -198,6 +198,29 @@ def _income_response(*, fy=2026, ft=2, eps=1.23, revenue=123.0,
                              "item_list": items}]}
 
 
+def _hk_income_response(*, fy=2025, ft=3, eps: float | None = 6.952,
+                        revenue: float | None = 192869000000.0,
+                        eps_field_id=5054, eps_label="基本每股收益",
+                        revenue_field_id=5001, revenue_label="营业总收入",
+                        currency="CNY", standard="国际会计准则", item_list=None):
+    """One OpenD *HK* income-statement response (Issue #115).
+
+    HK statements address the same figures with 5xxx ids: revenue ``5001``,
+    basic EPS ``5054``, diluted EPS ``5055``.  ``item_list`` overrides the
+    default field set when a test needs a different layout.
+    """
+    items = list(item_list) if item_list is not None else []
+    if item_list is None:
+        if eps is not None:
+            items.append({"field_id": eps_field_id, "display_name": eps_label, "data": eps})
+        if revenue is not None:
+            items.append({"field_id": revenue_field_id,
+                          "display_name": revenue_label, "data": revenue})
+    return {"report_list": [{"fiscal_year": fy, "financial_type": ft,
+                             "currency_code": currency, "accounting_standards": standard,
+                             "item_list": items}]}
+
+
 class FutuActualsProvenanceTests(TestCase):
     """The actuals updates must flip status to reported and attribute Futu."""
 
@@ -370,6 +393,92 @@ class FutuEpsFieldTests(TestCase):
             assert "NOT (" in sql
             # and the gap-filling path is still allowed
             assert "COALESCE(actual_source, 'unknown') IN" in sql
+
+
+class FutuHkIncomeFieldTests(TestCase):
+    """Issue #115: HK income statements are addressed with 5xxx, not the US 8xxx ids.
+
+    The stage only knew the US numbering, so every HK symbol "found no field" —
+    and a missing field was neither written nor counted, which is why 24 HK
+    symbols were reported as processed with zero failures and zero rows.
+    """
+
+    def _run(self, response, symbols=("0700.HK",)):
+        ctx = MagicMock()
+        ctx.get_financials_statements.return_value = (0, response)
+        cursor = _RecordingCursor()
+        with patch.object(sync_futu, "check_cancelled"), _db_mock(cursor):
+            stats = sync_futu.sync_actuals(ctx, 1, list(symbols))
+        updates = [params for sql, params in cursor.executed
+                   if sql.strip().startswith("UPDATE earnings")]
+        return ctx, stats, updates
+
+    def test_hk_statement_is_read_with_5xxx_field_ids(self):
+        _ctx, stats, updates = self._run(_hk_income_response())
+
+        assert [params[0] for params in updates] == [6.952, 192869000000.0], (
+            "0700.HK must read 5054 (基本每股收益) and 5001 (营业总收入)"
+        )
+        for params in updates:
+            # (value, value, currency, basis, value, currency, basis,
+            #  symbol, market, fiscal_year, fiscal_quarter)
+            assert params[2] == "CNY" and params[3] == "ifrs", (
+                "the written actual must declare the statement's currency and basis"
+            )
+            assert params[7:11] == ("0700.HK", "HK", 2025, 3), (
+                "the HK row is selected by symbol+market+fiscal period"
+            )
+        assert stats.failed_symbols == 0
+        assert stats.missing_field_symbols == []
+
+    def test_revenue_only_hk_statement_writes_revenue_and_is_not_a_failure(self):
+        """3690.HK publishes 5001 without 5054/5055 — legitimate, not a failure."""
+        _ctx, stats, updates = self._run(_hk_income_response(eps=None))
+
+        assert [params[0] for params in updates] == [192869000000.0]
+        assert stats.failed_symbols == 0
+        assert stats.missing_field_symbols == []
+
+    def test_a_hk_statement_with_no_expected_field_is_counted_not_silent(self):
+        """US ids on an HK report mean the schema moved: no write, but visible."""
+        response = _hk_income_response(
+            item_list=[{"field_id": 8002, "display_name": "营业总收入", "data": 1.0},
+                       {"field_id": 8047, "display_name": "基本每股收益", "data": 2.0}],
+        )
+        with self.assertLogs("sync_futu", level="WARNING") as logs:
+            _ctx, stats, updates = self._run(response)
+
+        assert updates == [], "no field id matched, so nothing may be written"
+        assert stats.missing_field_symbols == ["0700.HK"]
+        assert stats.failed_symbols == 0, (
+            "one symbol without the expected ids is not a symbol failure"
+        )
+        assert "Issue #115" in "\n".join(logs.output)
+
+        details = sync_futu.futu_audit_details(
+            sync_futu.FutuStageStats(), stats, [])
+        assert details["actual_missing_fields"] == 1
+
+        status, code = sync_futu.futu_audit_outcome(
+            sync_futu.FutuStageStats(), stats)
+        assert (status, code) == ("failed", "futu_actual_fields_missing"), (
+            "every fetched symbol missing its fields means the provider schema changed"
+        )
+
+    def test_one_missing_symbol_among_others_does_not_fail_the_run(self):
+        stats = sync_futu.FutuStageStats(report_symbols=2)
+        stats.missing_field_symbols.append("0700.HK")
+        assert sync_futu.futu_audit_outcome(stats) == ("success", None)
+
+    def test_a_drifted_hk_field_still_fails_the_symbol(self):
+        """The 5xxx labels are checked the same way as the 8xxx ones."""
+        response = _hk_income_response(eps=6.952, eps_label="流动比率")
+        _ctx, stats, updates = self._run(response)
+
+        assert stats.failed_symbols == 1
+        assert [params[0] for params in updates] == [192869000000.0], (
+            "only the verified revenue figure may be written"
+        )
 
 
 class FutuWatchdogTests(TestCase):
