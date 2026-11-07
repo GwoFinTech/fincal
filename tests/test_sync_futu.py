@@ -411,10 +411,12 @@ class FutuHkIncomeFieldTests(TestCase):
             stats = sync_futu.sync_actuals(ctx, 1, list(symbols))
         updates = [params for sql, params in cursor.executed
                    if sql.strip().startswith("UPDATE earnings")]
-        return ctx, stats, updates
+        sqls = [sql for sql, _ in cursor.executed
+                if sql.strip().startswith("UPDATE earnings")]
+        return ctx, stats, updates, sqls
 
     def test_hk_statement_is_read_with_5xxx_field_ids(self):
-        _ctx, stats, updates = self._run(_hk_income_response())
+        _ctx, stats, updates, sqls = self._run(_hk_income_response())
 
         assert [params[0] for params in updates] == [6.952, 192869000000.0], (
             "0700.HK must read 5054 (基本每股收益) and 5001 (营业总收入)"
@@ -428,12 +430,17 @@ class FutuHkIncomeFieldTests(TestCase):
             assert params[7:11] == ("0700.HK", "HK", 2025, 3), (
                 "the HK row is selected by symbol+market+fiscal period"
             )
+        for sql in sqls:
+            assert "actual_source = 'futu'" in sql
+            assert "CASE WHEN report_date <= CURRENT_DATE THEN 'reported'" in sql, (
+                "a past report date must flip date_status to reported"
+            )
         assert stats.failed_symbols == 0
         assert stats.missing_field_symbols == []
 
     def test_revenue_only_hk_statement_writes_revenue_and_is_not_a_failure(self):
         """3690.HK publishes 5001 without 5054/5055 — legitimate, not a failure."""
-        _ctx, stats, updates = self._run(_hk_income_response(eps=None))
+        _ctx, stats, updates, _sqls = self._run(_hk_income_response(eps=None))
 
         assert [params[0] for params in updates] == [192869000000.0]
         assert stats.failed_symbols == 0
@@ -446,7 +453,7 @@ class FutuHkIncomeFieldTests(TestCase):
                        {"field_id": 8047, "display_name": "基本每股收益", "data": 2.0}],
         )
         with self.assertLogs("sync_futu", level="WARNING") as logs:
-            _ctx, stats, updates = self._run(response)
+            _ctx, stats, updates, _sqls = self._run(response)
 
         assert updates == [], "no field id matched, so nothing may be written"
         assert stats.missing_field_symbols == ["0700.HK"]
@@ -473,7 +480,7 @@ class FutuHkIncomeFieldTests(TestCase):
     def test_a_drifted_hk_field_still_fails_the_symbol(self):
         """The 5xxx labels are checked the same way as the 8xxx ones."""
         response = _hk_income_response(eps=6.952, eps_label="流动比率")
-        _ctx, stats, updates = self._run(response)
+        _ctx, stats, updates, _sqls = self._run(response)
 
         assert stats.failed_symbols == 1
         assert [params[0] for params in updates] == [192869000000.0], (
