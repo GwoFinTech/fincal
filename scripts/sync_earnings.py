@@ -226,6 +226,9 @@ class FlushStats:
     identity_skipped: int = 0
     #: Actual figures the provider withdrew and this batch cleared (Issue #111).
     retracted: int = 0
+    #: The display keys of the rows that really lost a value, so a run's details name
+    #: what went rather than listing every event that carried a blank.
+    retracted_keys: list[str] = field(default_factory=list)
 
 
 
@@ -963,13 +966,18 @@ def flush_batch(cur, rows: list[tuple], retractions: dict | None = None) -> Flus
     # adds values, ``COALESCE``) and before the provenance UPDATE below, so the
     # row's status is recomputed from what the table now holds.
     retracted = 0
+    retracted_keys: list[str] = []
     if retractions:
-        execute_values(
-            cur, _RETRACTION_SQL,
+        cleared = execute_values(
+            cur,
+            _RETRACTION_SQL + """
+            RETURNING e.symbol, e.market, e.report_date, e.report_type""",
             [(symbol, market, report_date, report_type, dropped["eps"], dropped["revenue"])
              for (symbol, market, report_date, report_type), dropped in retractions.items()],
-        )
-        retracted = cur.rowcount
+            fetch=True,
+        ) or []
+        retracted = len(cleared)
+        retracted_keys = [f"{row[0]}.{row[1]} {row[2]} {row[3]}".strip() for row in cleared]
     # Provenance and status still converge on every run (Issue #89/#91: a label
     # may not outlive its value, a row with actuals must read ``reported``), but
     # they no longer carry a timestamp: the upsert above owns the revision
@@ -995,7 +1003,8 @@ def flush_batch(cur, rows: list[tuple], retractions: dict | None = None) -> Flus
                                            + len(same_date.dropped)),
                       takeovers=sum(1 for move in outcome.moves if move.get("kind") == "takeover"),
                       identity_skipped=identity_skipped,
-                      retracted=retracted)
+                      retracted=retracted,
+                      retracted_keys=retracted_keys)
 
 
 def _flush_pending(run_stats: SyncStats, batch: list[tuple], label: str,
@@ -1071,14 +1080,13 @@ def _flush_batch(run_stats: SyncStats, batch: list[tuple], label: str,
     run_stats.written += flushed.rows
     run_stats.unlabeled += unlabeled
     run_stats.retracted += flushed.retracted
-    if flushed.retracted and retractions:
-        for (symbol, market, report_date, report_type) in list(retractions)[:10]:
-            key = f"{symbol}.{market} {report_date} {report_type}"
+    if flushed.retracted:
+        for key in flushed.retracted_keys:
             if key not in run_stats.retracted_keys and len(run_stats.retracted_keys) < 10:
                 run_stats.retracted_keys.append(key)
         logger.warning(
-            "  provider withdrew actual value(s) for %d event(s), e.g. %s (Issue #111)",
-            flushed.retracted, ", ".join(list(run_stats.retracted_keys)[:5]),
+            "  provider withdrew actual value(s) from %d row(s), e.g. %s (Issue #111)",
+            flushed.retracted, ", ".join(flushed.retracted_keys[:5]),
         )
     run_stats.rescheduled += flushed.moves
     run_stats.skipped += flushed.skipped + flushed.identity_skipped
