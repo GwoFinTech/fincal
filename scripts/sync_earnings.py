@@ -44,6 +44,7 @@ period (its figures are the quarter's), which is recorded as the row's
   (:func:`app.fiscal.reschedule_confirmed_rows`, ``kind='takeover'``), and an
   incoming disclosure never re-dates a stored release row.
 """
+import re
 import subprocess
 import json
 import logging
@@ -52,7 +53,7 @@ import os
 
 import psycopg2.errors
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -375,18 +376,93 @@ def extract_kv(data_kv: list[dict]) -> dict:
     return result
 
 
+#: ``Today 2026.10.30 (EST)`` — Longbridge prefixes same-day events with a word
+#: but still writes the absolute date (Issue #107).  ``split(" ")[0]`` used to
+#: return ``"Today"``, so 114 events per run were dropped as unparseable.
+_ABSOLUTE_DATE = re.compile(r"(\d{4})[.\-/](\d{2})[.\-/](\d{2})")
+
+#: Zones the provider names in its date label, as a UTC offset in hours.  Only
+#: used to bucket an epoch timestamp into a calendar day — a fallback that only
+#: runs when neither the label nor ``ext.local_date`` carries a date.
+_ZONE_OFFSETS = (
+    ("EST", -5), ("EDT", -4), ("美东", -4),
+    ("CST", -6), ("CDT", -5),
+    ("PST", -8), ("PDT", -7),
+    ("HKT", 8), ("GMT+8", 8), ("+08", 8), ("香港", 8),
+    ("JST", 9), ("GMT+9", 9),
+    ("BST", 1), ("CET", 1), ("CEST", 2),
+)
+
+
 def parse_report_date(date_str: str) -> str | None:
-    """Normalize provider dates, rejecting relative/non-ISO display labels."""
+    """Normalize provider dates, including a relative label that carries one.
+
+    ``Today 2026.10.30 (EST)`` must yield ``2026-10-30``: the prefix is a display
+    detail, the absolute date is right there in the string (Issue #107).
+    """
+    if not date_str:
+        return None
+    absolute = _ABSOLUTE_DATE.search(date_str)
+    if absolute:
+        try:
+            year, month, day = (int(part) for part in absolute.groups())
+            return date(year, month, day).isoformat()
+        except ValueError:
+            return None
     try:
-        parsed = date_str.split(" ")[0].replace(".", "-")
+        parsed = str(date_str).split(" ")[0].replace(".", "-")
         return date.fromisoformat(parsed).isoformat()
     except (AttributeError, TypeError, ValueError):
         return None
 
 
-#: Disclosure sequences keyed to the fiscal quarter they disclose.  A half-year
-#: report is the second quarter and an annual report the fourth, whatever their
-#: ``period`` field says (Issue #75).
+def _date_from_epoch(value, zone: str = "") -> str | None:
+    """Bucket an epoch timestamp into a calendar day in the event's own zone."""
+    try:
+        stamp = int(float(str(value).strip()))
+    except (TypeError, ValueError):
+        return None
+    offset = next((hours for name, hours in _ZONE_OFFSETS if name in (zone or "")), 0)
+    try:
+        moment = datetime.fromtimestamp(stamp, tz=timezone.utc) + timedelta(hours=offset)
+    except (OverflowError, OSError, ValueError):
+        return None
+    return moment.date().isoformat()
+
+
+def resolve_report_date(info: dict) -> str | None:
+    """The event's absolute report date, from the most authoritative source available.
+
+    Priority follows reliability, not convenience (Issue #107):
+
+    1. ``ext.local_date`` — the provider's own ISO date for the event's market day;
+    2. the absolute date inside the label (``Today 2026.10.30 (EST)``);
+    3. the epoch ``datetime``, bucketed into the zone the label names;
+    4. the legacy bare-ISO label.
+
+    ``None`` means the event really carries no absolute date, which the caller
+    counts as ``unresolved`` instead of dropping it silently.
+    """
+    ext = info.get("ext") or {}
+    local_date = ext.get("local_date") if isinstance(ext, dict) else None
+    if local_date:
+        parsed = parse_report_date(str(local_date))
+        if parsed:
+            return parsed
+
+    label = info.get("date", "")
+    parsed = parse_report_date(label)
+    if parsed:
+        return parsed
+
+    zone = ""
+    if isinstance(ext, dict):
+        zone = str(ext.get("date_zone") or "")
+    if not zone:
+        zone = str(label)
+    return _date_from_epoch(info.get("datetime"), zone)
+
+
 #: Confirmed annual rows per symbol — the closings a fiscal year is derived from.
 #: ``report_type = 'A'`` covers an annual report whose quarter was never labelled;
 #: ``fiscal_quarter = 4`` covers a Q4 release that carries the annual figures.
@@ -399,6 +475,9 @@ _ANNUAL_CLOSINGS_SQL = """
      ORDER BY symbol, market, report_date
 """
 
+#: Disclosure sequences keyed to the fiscal quarter they disclose.  A half-year
+#: report is the second quarter and an annual report the fourth, whatever their
+#: ``period`` field says (Issue #75).
 _DISCLOSURE_QUARTERS = {"saf": 2, "af": 4}
 _DISCLOSURE_PERIOD_TYPES = frozenset(_DISCLOSURE_QUARTERS)
 _VALID_PERIOD_TYPES = {"qf", "3q"}
@@ -536,7 +615,7 @@ def build_fiscal_period_index(pages: list[dict], closings=None) -> dict[tuple[st
     for page in pages:
         for info in page.get("infos", []):
             symbol, market = from_lb_calendar_info(info)
-            report_date = parse_report_date(info.get("date", ""))
+            report_date = resolve_report_date(info)
             if not symbol or not report_date:
                 continue
             ext = info.get("ext", {}).get("financial_report", {})
@@ -960,7 +1039,7 @@ def sync_earnings(run_id: int, stats: SyncStats | None = None) -> SyncStats:
                     run_stats.unresolved += 1
                     continue
 
-                report_date = parse_report_date(info.get("date", ""))
+                report_date = resolve_report_date(info)
                 if not report_date:
                     run_stats.unresolved += 1
                     continue

@@ -207,6 +207,13 @@ The entrypoint runs the pipeline and then the freshness gate:
    `details.unresolved` and exit non-zero, so the scheduled run fails loudly
    instead of logging a `success` that wrote 0 rows; the later stages still run.
 
+   A **relative date label is not an unparseable one**: `Today 2026.10.30 (EST)`
+   carries its absolute date, so the resolver reads `ext.local_date` first, then
+   the date inside the label, then the epoch timestamp in the zone the label names
+   (Issue #107). `details.unlabeled` counts the rows written *without* a fiscal
+   identity, so a label the derivation refused can no longer be invisible
+   (Issue #113).
+
 2. `scripts/check_sync_freshness.py` — the hard gate, run **after** the stages
    so a first catch-up run is judged on the data it just wrote. Its non-zero
    exit (a stage that stopped running, or a derived table that is stale) plus
