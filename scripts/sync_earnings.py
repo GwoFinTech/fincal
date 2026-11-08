@@ -187,9 +187,10 @@ _RETRACTION_SQL = """
         actual_basis = CASE WHEN v.drop_eps AND v.drop_revenue THEN NULL ELSE e.actual_basis END,
         actual_source = CASE WHEN v.drop_eps AND v.drop_revenue THEN NULL ELSE e.actual_source END,
         updated_at = NOW()
-      FROM (VALUES %s) AS v(symbol, market, report_date, drop_eps, drop_revenue)
+      FROM (VALUES %s) AS v(symbol, market, report_date, report_type, drop_eps, drop_revenue)
      WHERE e.symbol = v.symbol AND e.market = v.market
        AND e.report_date = (v.report_date)::date
+       AND e.report_type = v.report_type
        AND e.is_predicted = FALSE
        -- Only the value's own supplier may withdraw it (#91): Longbridge serving a
        -- blank for an event whose actual came from Futu says nothing about Futu's
@@ -965,8 +966,8 @@ def flush_batch(cur, rows: list[tuple], retractions: dict | None = None) -> Flus
     if retractions:
         execute_values(
             cur, _RETRACTION_SQL,
-            [(symbol, market, report_date, dropped["eps"], dropped["revenue"])
-             for (symbol, market, report_date), dropped in retractions.items()],
+            [(symbol, market, report_date, report_type, dropped["eps"], dropped["revenue"])
+             for (symbol, market, report_date, report_type), dropped in retractions.items()],
         )
         retracted = cur.rowcount
     # Provenance and status still converge on every run (Issue #89/#91: a label
@@ -1071,8 +1072,8 @@ def _flush_batch(run_stats: SyncStats, batch: list[tuple], label: str,
     run_stats.unlabeled += unlabeled
     run_stats.retracted += flushed.retracted
     if flushed.retracted and retractions:
-        for (symbol, market, report_date) in list(retractions)[:10]:
-            key = f"{symbol}.{market} {report_date}"
+        for (symbol, market, report_date, report_type) in list(retractions)[:10]:
+            key = f"{symbol}.{market} {report_date} {report_type}"
             if key not in run_stats.retracted_keys and len(run_stats.retracted_keys) < 10:
                 run_stats.retracted_keys.append(key)
         logger.warning(
@@ -1155,7 +1156,7 @@ def sync_earnings(run_id: int, stats: SyncStats | None = None) -> SyncStats:
         batch = []
         #: Actual figures this market's pages explicitly withdrew, keyed by the
         #: display key so the batch's own flush can apply them (Issue #111).
-        retractions: dict[tuple[str, str, str], dict] = {}
+        retractions: dict[tuple[str, str, str, str], dict] = {}
         for page in pages:
             check_cancelled(run_id)
             beats.maybe(run_id, phase=f"calendar-{market.lower()}",
@@ -1182,9 +1183,6 @@ def sync_earnings(run_id: int, stats: SyncStats | None = None) -> SyncStats:
                 # this event; an unstated/unsupported value is recorded as the
                 # explicit ``unknown`` marker rather than assumed.
                 currency = normalize_currency(info.get("currency"))
-                withdrawn = extract_retractions(info.get("data_kv"))
-                if withdrawn["eps"] or withdrawn["revenue"]:
-                    retractions[(symbol, mkt, report_date)] = withdrawn
 
                 ext = info.get("ext", {}).get("financial_report", {})
                 fiscal_year, fiscal_quarter, skip_event = fiscal_period_for_event(
@@ -1196,6 +1194,13 @@ def sync_earnings(run_id: int, stats: SyncStats | None = None) -> SyncStats:
                 # from, so a period's release row is distinguishable from a
                 # half-year/annual disclosure of the same period.
                 report_type = fiscal.report_type_for_period_type(ext.get("period_type"))
+
+                # Issue #111: a withdrawal names the row it belongs to — symbol,
+                # market, date *and* report type.  Keying it by the day alone let a
+                # blank on one event clear a same-day row of another report type.
+                withdrawn = extract_retractions(info.get("data_kv"))
+                if withdrawn["eps"] or withdrawn["revenue"]:
+                    retractions[(symbol, mkt, report_date, report_type)] = withdrawn
 
                 batch.append((
                     symbol, mkt, company_name, report_date, report_type,

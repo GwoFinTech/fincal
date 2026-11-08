@@ -80,6 +80,9 @@ class TheStatementTests(TestCase):
         assert "AND e.eps_actual IS NOT NULL" in sql
         assert "AND e.revenue_actual IS NOT NULL" in sql
         assert "eps_actual = CASE WHEN v.drop_eps THEN NULL" in sql
+        # A withdrawal names the row it belongs to: without the report type, a
+        # blank on one event could clear a same-day row of another type.
+        assert "AND e.report_type = v.report_type" in sql
         assert "revenue_actual = CASE WHEN v.drop_revenue THEN NULL" in sql
 
     def test_the_whole_attribution_goes_when_the_last_actual_goes(self):
@@ -128,7 +131,7 @@ class WiringTests(TestCase):
             ("BBAR", "US", "BBAR", "2026-11-24", "Q", 2026, 3, None, 1.9, None, 1_369_164_371,
              "after", "USD", "USD", "longbridge", "longbridge"),
         ]
-        withdrawals = {("BBAR", "US", "2026-11-24"): {"eps": False, "revenue": True}}
+        withdrawals = {("BBAR", "US", "2026-11-24", "Q"): {"eps": False, "revenue": True}}
 
         with patch.object(sync_earnings, "db_cursor", lambda *a, **k: _Cursor()), \
                 patch.object(sync_earnings, "flush_batch", side_effect=fake_flush):
