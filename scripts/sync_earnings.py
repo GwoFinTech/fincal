@@ -224,6 +224,12 @@ class SyncStats:
     #: Events dropped because their identity (symbol/market) or their date could
     #: not be resolved.  ``events - unresolved`` is what entered the write path.
     unresolved: int = 0
+    #: Rows written without a fiscal identity ``(fiscal_year, fiscal_quarter)``.
+    #: Those rows are outside the identity contract: no unique-index protection,
+    #: no reschedule move, no merge, and a date-based iCal UID.  Before Issue
+    #: #113 a run could write 462 of them and still record ``success`` with
+    #: nothing in ``details`` to show it (Issue #113 acceptance 4).
+    unlabeled: int = 0
 
     def resolved(self) -> int:
         """Events that carried a usable identity and date."""
@@ -236,6 +242,7 @@ class SyncStats:
             skipped=self.skipped,
             failed=self.failed_batches,
             unresolved=self.unresolved,
+            unlabeled=self.unlabeled,
         )
 
 
@@ -380,6 +387,18 @@ def parse_report_date(date_str: str) -> str | None:
 #: Disclosure sequences keyed to the fiscal quarter they disclose.  A half-year
 #: report is the second quarter and an annual report the fourth, whatever their
 #: ``period`` field says (Issue #75).
+#: Confirmed annual rows per symbol — the closings a fiscal year is derived from.
+#: ``report_type = 'A'`` covers an annual report whose quarter was never labelled;
+#: ``fiscal_quarter = 4`` covers a Q4 release that carries the annual figures.
+_ANNUAL_CLOSINGS_SQL = """
+    SELECT symbol, market, fiscal_year, report_date
+      FROM earnings
+     WHERE is_predicted = FALSE
+       AND fiscal_year IS NOT NULL
+       AND (fiscal_quarter = 4 OR report_type = 'A')
+     ORDER BY symbol, market, report_date
+"""
+
 _DISCLOSURE_QUARTERS = {"saf": 2, "af": 4}
 _DISCLOSURE_PERIOD_TYPES = frozenset(_DISCLOSURE_QUARTERS)
 _VALID_PERIOD_TYPES = {"qf", "3q"}
@@ -398,16 +417,23 @@ def _parse_int(value) -> int | None:
         return None
 
 
-def _fiscal_year_for(market: str, fiscal_quarter: int, report_date: str) -> int | None:
-    """Derive a quarter's fiscal year from the event's own date.
+def _fiscal_year_for(market: str, fiscal_quarter: int, report_date: str, *,
+                     symbol: str = "", closings=None) -> int | None:
+    """Derive a quarter's fiscal year from the symbol's own closing history.
 
-    Fiscal years end in any month, but the calendar date of a quarter follows a
-    stable convention per market: a December year-end company reports Q1/Q2 of
-    the calendar year they fall in and Q3/Q4 out of the previous fiscal year,
-    while a June year-end company (common for US names) reports Q3/Q4 of the
-    previous fiscal year once the calendar has passed mid-year.  This is the
-    same mapping the calendar used before, now shared by every code path.
+    A fiscal year is closed by its annual report, so an event belongs to the year
+    after the last annual report that preceded it — true for any year end
+    (Issue #113).  The calendar-month rule below is the fallback for a symbol
+    whose annual report we have never seen: it is only correct for a December
+    year-end, which is why 468 half-year reports of March/June year-end companies
+    were labelled one year early and then rejected by the consistency check.
     """
+    if closings is not None:
+        from_history = fiscal.fiscal_year_after_closing(
+            closings.get((symbol, market), ()), report_date
+        )
+        if from_history is not None:
+            return from_history
     try:
         year = int(report_date[:4])
         month = int(report_date[5:7])
@@ -422,7 +448,8 @@ def _fiscal_year_for(market: str, fiscal_quarter: int, report_date: str) -> int 
     return year - 1 if month <= 3 else year
 
 
-def _raw_fiscal_period(ext: dict, report_date: str, market: str) -> tuple[int | None, int | None, str]:
+def _raw_fiscal_period(ext: dict, report_date: str, market: str, *,
+                       symbol: str = "", closings=None) -> tuple[int | None, int | None, str]:
     """Read a Longbridge fiscal period without conflating event sequences."""
     period_type = str(ext.get("period_type") or "").strip().lower()
     fiscal_quarter = _parse_int(ext.get("period"))
@@ -431,11 +458,73 @@ def _raw_fiscal_period(ext: dict, report_date: str, market: str) -> tuple[int | 
 
     fiscal_year = _parse_int(ext.get("fiscal_year") or ext.get("year"))
     if fiscal_year is None and fiscal_quarter is not None:
-        fiscal_year = _fiscal_year_for(market, fiscal_quarter, report_date)
+        # Issue #113: the annual-report history outranks the month heuristic — a
+        # June year-end company's Q1 is the calendar year's, a March year-end
+        # company's is the year after its annual report.
+        fiscal_year = _fiscal_year_for(market, fiscal_quarter, report_date,
+                                       symbol=symbol, closings=closings)
     return fiscal_year, fiscal_quarter, period_type
 
 
-def build_fiscal_period_index(pages: list[dict]) -> dict[tuple[str, str], list[dict]]:
+class ClosingHistory(dict):
+    """Annual-report history, read from the database the first time it is asked for.
+
+    Lazy on purpose.  A run whose every event states its own ``fiscal_year`` never
+    consults the history, so it must not pay for (or require) the read — and a
+    unit test that fakes the provider should not have to fake this too.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._loaded = False
+
+    def _load(self) -> None:
+        if self._loaded:
+            return
+        self._loaded = True
+        self.update(load_annual_closings())
+
+    def get(self, key, default=None):
+        self._load()
+        return super().get(key, default)
+
+    def __contains__(self, key) -> bool:
+        self._load()
+        return super().__contains__(key)
+
+
+def load_annual_closings() -> dict[tuple[str, str], list[dict]]:
+    """Annual-report history per symbol: the closings a fiscal year derives from.
+
+    Read once per run.  The rule is "the event belongs to the fiscal year after
+    the last annual report that preceded it", and that report is frequently
+    *outside* the 180/365-day calendar window (a March year-end company's annual
+    result lands 6 months before its half-year), so it cannot come from the
+    window index — it has to come from the table (Issue #113).
+
+    A failure here must not stop the sync: without the history the month
+    heuristic still derives a year, just less reliably, and the rows it gets
+    wrong are counted in ``unlabeled`` instead of being written silently.
+    """
+    closings: dict[tuple[str, str], list[dict]] = {}
+    try:
+        with db_cursor() as cur:
+            cur.execute(_ANNUAL_CLOSINGS_SQL)
+            for row in cur.fetchall():
+                closings.setdefault((row["symbol"], row["market"]), []).append({
+                    "fiscal_year": row["fiscal_year"],
+                    "report_date": row["report_date"],
+                })
+    except Exception as exc:  # noqa: BLE001 - the sync must still run
+        logger.warning(
+            "could not read the annual-report history; deriving fiscal years from "
+            "the calendar month instead (%s)", exc,
+        )
+        return {}
+    return closings
+
+
+def build_fiscal_period_index(pages: list[dict], closings=None) -> dict[tuple[str, str], list[dict]]:
     """Index canonical qf/3q events for mapping disclosure-only events.
 
     Longbridge's ``saf`` and ``af`` events are disclosure sequences, not a second
@@ -451,7 +540,9 @@ def build_fiscal_period_index(pages: list[dict]) -> dict[tuple[str, str], list[d
             if not symbol or not report_date:
                 continue
             ext = info.get("ext", {}).get("financial_report", {})
-            fiscal_year, fiscal_quarter, period_type = _raw_fiscal_period(ext, report_date, market)
+            fiscal_year, fiscal_quarter, period_type = _raw_fiscal_period(
+                ext, report_date, market, symbol=symbol, closings=closings
+            )
             if fiscal_year is None or fiscal_quarter is None:
                 continue
             if period_type and period_type not in _VALID_PERIOD_TYPES:
@@ -467,7 +558,8 @@ def build_fiscal_period_index(pages: list[dict]) -> dict[tuple[str, str], list[d
 
 
 def fiscal_period_for_event(symbol: str, market: str, report_date: str, ext: dict,
-                            canonical_periods: dict[tuple[str, str], list[dict]]) -> tuple[int | None, int | None, bool]:
+                            canonical_periods: dict[tuple[str, str], list[dict]],
+                            closings=None) -> tuple[int | None, int | None, bool]:
     """Return ``(FY, quarter, skip)`` using Longbridge event-sequence semantics.
 
     A ``saf``/``af`` event is the *disclosure* of a quarter: its own ``period``
@@ -484,11 +576,14 @@ def fiscal_period_for_event(symbol: str, market: str, report_date: str, ext: dic
     event and keeps the identity, subject to the same ordering guard as any
     other label.
     """
-    fiscal_year, fiscal_quarter, period_type = _raw_fiscal_period(ext, report_date, market)
+    fiscal_year, fiscal_quarter, period_type = _raw_fiscal_period(
+        ext, report_date, market, symbol=symbol, closings=closings
+    )
 
     if period_type in _DISCLOSURE_QUARTERS:
         quarter = _DISCLOSURE_QUARTERS[period_type]
-        fiscal_year = _fiscal_year_for(market, quarter, report_date)
+        fiscal_year = _fiscal_year_for(market, quarter, report_date,
+                                       symbol=symbol, closings=closings)
         rows = canonical_periods.get((symbol, market), [])
         for row in rows:
             if row["fiscal_year"] != fiscal_year or row["fiscal_quarter"] != quarter:
@@ -774,15 +869,19 @@ def _flush_batch(run_stats: SyncStats, batch: list[tuple], label: str) -> None:
         )
         return
     run_stats.written += flushed.rows
+    run_stats.unlabeled += sum(
+        1 for row in batch if row[5] is None or row[6] is None
+    )
     run_stats.rescheduled += flushed.moves
     run_stats.skipped += flushed.skipped + flushed.identity_skipped
     run_stats.dropped_disclosures += flushed.dropped_disclosures
     run_stats.takeovers += flushed.takeovers
     logger.info(
         "  Flushed %d records (written: %d, fetched: %d, skipped: %d [%d held by another row], "
-        "disclosures dropped: %d, takeovers: %d)",
+        "disclosures dropped: %d, takeovers: %d, unlabelled rows so far: %d)",
         flushed.rows, run_stats.written, run_stats.fetched, run_stats.skipped,
         flushed.identity_skipped, run_stats.dropped_disclosures, run_stats.takeovers,
+        run_stats.unlabeled,
     )
 
 
@@ -832,13 +931,19 @@ def sync_earnings(run_id: int, stats: SyncStats | None = None) -> SyncStats:
     # one write per minute, not one per page.
     beats = HeartbeatThrottle()
 
+    # Issue #113: derive a fiscal year from the symbol's own annual report rather
+    # than from the calendar month.  ``ClosingHistory`` reads the table on first
+    # use; a symbol with no annual report keeps the month heuristic and is counted
+    # in ``unlabeled``.
+    closings = ClosingHistory()
+
     for market in ["US", "HK"]:
         check_cancelled(run_id)
         logger.info(f"=== Fetching {market} earnings [{start} → {end}] ===")
         pages = fetch_calendar(market, start, end)
         run_stats.pages += len(pages)
         logger.info(f"  Total pages received: {len(pages)}")
-        canonical_periods = build_fiscal_period_index(pages)
+        canonical_periods = build_fiscal_period_index(pages, closings)
 
         batch = []
         for page in pages:
@@ -870,7 +975,7 @@ def sync_earnings(run_id: int, stats: SyncStats | None = None) -> SyncStats:
 
                 ext = info.get("ext", {}).get("financial_report", {})
                 fiscal_year, fiscal_quarter, skip_event = fiscal_period_for_event(
-                    symbol, mkt, report_date, ext, canonical_periods
+                    symbol, mkt, report_date, ext, canonical_periods, closings
                 )
                 if skip_event:
                     continue

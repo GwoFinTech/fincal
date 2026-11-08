@@ -216,6 +216,45 @@ def sort_key(row) -> tuple:
     )
 
 
+def fiscal_year_after_closing(closings, report_date) -> int | None:
+    """Fiscal year an event belongs to, given the symbol's annual-report history.
+
+    A fiscal year is *closed* by its annual report: everything after that closing
+    belongs to the next fiscal year, whatever month the year ends in.  A company
+    with a December year-end that published FY2025 in February 2026 reports FY2026
+    from April 2026 onwards; a company with a March year-end (VTECH, and most
+    Japanese ADRs) that published FY2026 in May 2026 publishes its November
+    half-year as **FY2027** H1 — the calendar-month rule in
+    ``scripts/sync_earnings.py::_fiscal_year_for`` called that FY2026 and the
+    consistency check then rejected it, so 487 rows lost their fiscal identity
+    (Issue #113).
+
+    ``closings`` are the symbol's confirmed annual rows as
+    ``{"fiscal_year", "report_date"}``.  The closing must be *strictly* earlier
+    than the event: re-syncing the annual report itself must keep deriving the
+    year it closes, not the one after it.
+    """
+    candidate = report_date_of({}, report_date)
+    if candidate is None or not closings:
+        return None
+    best_year = None
+    best_date = None
+    for row in closings:
+        closed = report_date_of(row)
+        if closed is None or closed >= candidate:
+            continue
+        try:
+            fiscal_year = int(row.get("fiscal_year"))
+        except (TypeError, ValueError):
+            continue
+        if best_date is None or closed > best_date:
+            best_date = closed
+            best_year = fiscal_year
+    if best_year is None:
+        return None
+    return best_year + 1
+
+
 def fiscal_label_consistent(symbol, market, fiscal_year, fiscal_quarter,
                             report_date, existing_rows) -> bool:
     """Return whether a fiscal label preserves date order for one symbol/year.
