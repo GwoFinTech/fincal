@@ -5,7 +5,7 @@ fetched, written, skipped, failed, unresolved, partial status.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 
 
 @dataclass
@@ -19,8 +19,10 @@ class SyncQuality:
     #: Rows written without a fiscal identity (Issue #113).  A count, not a
     #: status input: the run still wrote what the provider gave it.
     unlabeled: int = 0
-    #: Rows whose actual value the provider withdrew this run (Issue #111).
+    #: Rows whose actual value the provider withdrew this run (Issue #111), and a
+    #: sample of their display keys so the run's details name what went.
     retracted: int = 0
+    retracted_sample: list[str] = field(default_factory=list)
     status: str = "success"  # success | partial | unavailable
     sources: dict[str, str] = field(default_factory=dict)  # source_name → ok|degraded|failed
 

@@ -142,3 +142,19 @@ class WiringTests(TestCase):
         details = sync_earnings.SyncStats(written=10, retracted=2).quality().to_dict()
 
         assert details["retracted"] == 2
+
+class TheCrossProviderGuardTests(TestCase):
+    """A provider may only withdraw the value it supplied (Issue #91's principle).
+
+    The first production run cleared one Futu-written US actual because
+    Longbridge served the field blank: the blank says nothing about Futu's figure.
+    """
+
+    def test_the_statement_restricts_retraction_to_the_same_supplier(self):
+        sql = " ".join(sync_earnings._RETRACTION_SQL.split())
+
+        assert "e.actual_source IS NULL OR e.actual_source = 'longbridge'" in sql
+
+    def test_the_regression_is_named_in_the_sql(self):
+        # A guard without a reason gets deleted by the next cleanup; keep both.
+        assert "#91" in sync_earnings._RETRACTION_SQL

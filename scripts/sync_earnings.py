@@ -52,7 +52,7 @@ import sys
 import os
 
 import psycopg2.errors
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -191,6 +191,10 @@ _RETRACTION_SQL = """
      WHERE e.symbol = v.symbol AND e.market = v.market
        AND e.report_date = (v.report_date)::date
        AND e.is_predicted = FALSE
+       -- Only the value's own supplier may withdraw it (#91): Longbridge serving a
+       -- blank for an event whose actual came from Futu says nothing about Futu's
+       -- figure — the first version of this cleared one Futu-written US actual.
+       AND (e.actual_source IS NULL OR e.actual_source = 'longbridge')
        AND ((v.drop_eps AND e.eps_actual IS NOT NULL)
             OR (v.drop_revenue AND e.revenue_actual IS NOT NULL))
 """
@@ -260,6 +264,9 @@ class SyncStats:
     #: (Issue #111).  Recorded so a value can disappear visibly instead of
     #: lingering for weeks after the provider stopped serving it.
     retracted: int = 0
+    #: A sample of the cleared display keys, so the run's details name what went
+    #: instead of only how much (capped; the count is the full number).
+    retracted_keys: list[str] = field(default_factory=list)
 
     def resolved(self) -> int:
         """Events that carried a usable identity and date."""
@@ -274,6 +281,7 @@ class SyncStats:
             unresolved=self.unresolved,
             unlabeled=self.unlabeled,
             retracted=self.retracted,
+            retracted_sample=self.retracted_keys,
         )
 
 
@@ -1062,6 +1070,15 @@ def _flush_batch(run_stats: SyncStats, batch: list[tuple], label: str,
     run_stats.written += flushed.rows
     run_stats.unlabeled += unlabeled
     run_stats.retracted += flushed.retracted
+    if flushed.retracted and retractions:
+        for (symbol, market, report_date) in list(retractions)[:10]:
+            key = f"{symbol}.{market} {report_date}"
+            if key not in run_stats.retracted_keys and len(run_stats.retracted_keys) < 10:
+                run_stats.retracted_keys.append(key)
+        logger.warning(
+            "  provider withdrew actual value(s) for %d event(s), e.g. %s (Issue #111)",
+            flushed.retracted, ", ".join(list(run_stats.retracted_keys)[:5]),
+        )
     run_stats.rescheduled += flushed.moves
     run_stats.skipped += flushed.skipped + flushed.identity_skipped
     run_stats.dropped_disclosures += flushed.dropped_disclosures
