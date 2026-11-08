@@ -173,6 +173,28 @@ _BATCH_VALUE_CASTS = {
     "before_after": "text", "estimate_currency": "text",
     "actual_currency": "text", "estimate_basis": "text", "actual_basis": "text",
 }
+#: Clear the actual figures an event explicitly withdrew (Issue #111).  Runs before
+#: the provenance UPDATE of the same batch, so ``date_status`` is recomputed from
+#: what is actually stored: a row that loses its last actual goes back to
+#: ``scheduled`` in the same commit.  Only rows that still hold the value are
+#: touched, and a predicted row is never a target.
+_RETRACTION_SQL = """
+    UPDATE earnings AS e SET
+        eps_actual = CASE WHEN v.drop_eps THEN NULL ELSE e.eps_actual END,
+        revenue_actual = CASE WHEN v.drop_revenue THEN NULL ELSE e.revenue_actual END,
+        actual_as_of = CASE WHEN v.drop_eps AND v.drop_revenue THEN NULL ELSE e.actual_as_of END,
+        actual_currency = CASE WHEN v.drop_eps AND v.drop_revenue THEN NULL ELSE e.actual_currency END,
+        actual_basis = CASE WHEN v.drop_eps AND v.drop_revenue THEN NULL ELSE e.actual_basis END,
+        actual_source = CASE WHEN v.drop_eps AND v.drop_revenue THEN NULL ELSE e.actual_source END,
+        updated_at = NOW()
+      FROM (VALUES %s) AS v(symbol, market, report_date, drop_eps, drop_revenue)
+     WHERE e.symbol = v.symbol AND e.market = v.market
+       AND e.report_date = (v.report_date)::date
+       AND e.is_predicted = FALSE
+       AND ((v.drop_eps AND e.eps_actual IS NOT NULL)
+            OR (v.drop_revenue AND e.revenue_actual IS NOT NULL))
+"""
+
 _BATCH_VALUE_COLUMNS = tuple(_BATCH_VALUE_CASTS)
 
 
@@ -197,6 +219,8 @@ class FlushStats:
     #: Rows skipped because another confirmed row already holds the same fiscal
     #: identity at a different (report_date, report_type) — Issue #87.
     identity_skipped: int = 0
+    #: Actual figures the provider withdrew and this batch cleared (Issue #111).
+    retracted: int = 0
 
 
 
@@ -232,6 +256,10 @@ class SyncStats:
     #: #113 a run could write 462 of them and still record ``success`` with
     #: nothing in ``details`` to show it (Issue #113 acceptance 4).
     unlabeled: int = 0
+    #: Rows whose actual value the provider withdrew, cleared by this run
+    #: (Issue #111).  Recorded so a value can disappear visibly instead of
+    #: lingering for weeks after the provider stopped serving it.
+    retracted: int = 0
 
     def resolved(self) -> int:
         """Events that carried a usable identity and date."""
@@ -245,6 +273,7 @@ class SyncStats:
             failed=self.failed_batches,
             unresolved=self.unresolved,
             unlabeled=self.unlabeled,
+            retracted=self.retracted,
         )
 
 
@@ -375,6 +404,28 @@ def extract_kv(data_kv: list[dict]) -> dict:
         elif t == "actual_revenue":
             result["revenue_actual"] = val
     return result
+
+
+def extract_retractions(data_kv: list[dict]) -> dict:
+    """Which actual figures this event explicitly withdrew (Issue #111).
+
+    The provider withdraws a value by serving the field with an empty
+    ``value_raw`` — ``{"type": "actual_revenue", "value_raw": ""}`` — which is not
+    the same as not mentioning it.  Only that explicit form may clear a stored
+    actual: a calendar window that simply does not cover an event must never be
+    read as a withdrawal, or one shrunken window would wipe the table.  A zero is
+    a value (``"0.000000"`` stays a real 0.00 EPS), so only a blank clears.
+    """
+    dropped = {"eps": False, "revenue": False}
+    for kv in data_kv or ():
+        field = str(kv.get("type", ""))
+        if field not in ("actual_eps", "actual_revenue"):
+            continue
+        raw = kv.get("value_raw")
+        if raw is None or str(raw).strip() != "":
+            continue
+        dropped["eps" if field == "actual_eps" else "revenue"] = True
+    return dropped
 
 
 #: ``Today 2026.10.30 (EST)`` — Longbridge prefixes same-day events with a word
@@ -779,7 +830,7 @@ def _insert_earnings_rows(cur, insert_sql: str, rows: list[tuple]) -> tuple[list
     return written, skipped
 
 
-def flush_batch(cur, rows: list[tuple]) -> FlushStats:
+def flush_batch(cur, rows: list[tuple], retractions: dict | None = None) -> FlushStats:
     """Batch upsert using execute_values.
 
     Two Issue #50 guards run before the upsert, because the table's unique key is
@@ -899,6 +950,17 @@ def flush_batch(cur, rows: list[tuple]) -> FlushStats:
     written_rows, identity_skipped = _insert_earnings_rows(cur, insert_sql, rows)
     rows = written_rows
     keys = [(r[0], r[1], r[3]) for r in rows]
+    # Issue #111: a withdrawn actual is applied after the upsert (which only ever
+    # adds values, ``COALESCE``) and before the provenance UPDATE below, so the
+    # row's status is recomputed from what the table now holds.
+    retracted = 0
+    if retractions:
+        execute_values(
+            cur, _RETRACTION_SQL,
+            [(symbol, market, report_date, dropped["eps"], dropped["revenue"])
+             for (symbol, market, report_date), dropped in retractions.items()],
+        )
+        retracted = cur.rowcount
     # Provenance and status still converge on every run (Issue #89/#91: a label
     # may not outlive its value, a row with actuals must read ``reported``), but
     # they no longer carry a timestamp: the upsert above owns the revision
@@ -923,7 +985,22 @@ def flush_batch(cur, rows: list[tuple]) -> FlushStats:
                       dropped_disclosures=(len(outcome.dropped) + collapse_drops
                                            + len(same_date.dropped)),
                       takeovers=sum(1 for move in outcome.moves if move.get("kind") == "takeover"),
-                      identity_skipped=identity_skipped)
+                      identity_skipped=identity_skipped,
+                      retracted=retracted)
+
+
+def _flush_pending(run_stats: SyncStats, batch: list[tuple], label: str,
+                   retractions: dict | None) -> None:
+    """Flush a batch with the withdrawals it carries, if it carries any.
+
+    The extra argument is only passed when a withdrawal exists: a run that has
+    nothing to retract calls ``_flush_batch`` exactly the way it always did, which
+    is also the shape the stage's own tests fake.
+    """
+    if retractions:
+        _flush_batch(run_stats, batch, label, retractions)
+    else:
+        _flush_batch(run_stats, batch, label)
 
 
 def _count_unlabeled_keys(cur, keys: list[tuple]) -> int:
@@ -955,7 +1032,8 @@ def _count_unlabeled_keys(cur, keys: list[tuple]) -> int:
         return 0
 
 
-def _flush_batch(run_stats: SyncStats, batch: list[tuple], label: str) -> None:
+def _flush_batch(run_stats: SyncStats, batch: list[tuple], label: str,
+                 retractions: dict | None = None) -> None:
     """Commit one batch, isolating its failure from the rest of the run.
 
     Issue #52: one unmovable row (a data conflict inside a 200-row batch) used to
@@ -968,7 +1046,9 @@ def _flush_batch(run_stats: SyncStats, batch: list[tuple], label: str) -> None:
     unlabeled = 0
     try:
         with db_cursor() as cur:
-            flushed = flush_batch(cur, batch)
+            # Same rule as ``_flush_pending``: a batch with nothing withdrawn is
+            # flushed through the three-argument call it has always used.
+            flushed = flush_batch(cur, batch, retractions) if retractions else flush_batch(cur, batch)
             unlabeled = _count_unlabeled_keys(cur, [(row[0], row[1], row[3]) for row in batch])
     except SyncCancelledError:
         raise
@@ -981,6 +1061,7 @@ def _flush_batch(run_stats: SyncStats, batch: list[tuple], label: str) -> None:
         return
     run_stats.written += flushed.rows
     run_stats.unlabeled += unlabeled
+    run_stats.retracted += flushed.retracted
     run_stats.rescheduled += flushed.moves
     run_stats.skipped += flushed.skipped + flushed.identity_skipped
     run_stats.dropped_disclosures += flushed.dropped_disclosures
@@ -1055,6 +1136,9 @@ def sync_earnings(run_id: int, stats: SyncStats | None = None) -> SyncStats:
         canonical_periods = build_fiscal_period_index(pages, closings)
 
         batch = []
+        #: Actual figures this market's pages explicitly withdrew, keyed by the
+        #: display key so the batch's own flush can apply them (Issue #111).
+        retractions: dict[tuple[str, str, str], dict] = {}
         for page in pages:
             check_cancelled(run_id)
             beats.maybe(run_id, phase=f"calendar-{market.lower()}",
@@ -1081,6 +1165,9 @@ def sync_earnings(run_id: int, stats: SyncStats | None = None) -> SyncStats:
                 # this event; an unstated/unsupported value is recorded as the
                 # explicit ``unknown`` marker rather than assumed.
                 currency = normalize_currency(info.get("currency"))
+                withdrawn = extract_retractions(info.get("data_kv"))
+                if withdrawn["eps"] or withdrawn["revenue"]:
+                    retractions[(symbol, mkt, report_date)] = withdrawn
 
                 ext = info.get("ext", {}).get("financial_report", {})
                 fiscal_year, fiscal_quarter, skip_event = fiscal_period_for_event(
@@ -1118,13 +1205,14 @@ def sync_earnings(run_id: int, stats: SyncStats | None = None) -> SyncStats:
 
                 # Flush when batch is full
                 if len(batch) >= BATCH_SIZE:
-                    _flush_batch(run_stats, batch, f"{market} page batch")
+                    _flush_pending(run_stats, batch, f"{market} page batch", retractions)
                     batch = []
+                    retractions = {}
                     check_cancelled(run_id)
 
         # Flush remaining
         if batch:
-            _flush_batch(run_stats, batch, f"{market} final batch")
+            _flush_pending(run_stats, batch, f"{market} final batch", retractions)
 
     if run_stats.unresolved:
         # Not a failure by itself (some events legitimately carry no usable

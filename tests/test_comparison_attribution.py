@@ -260,7 +260,9 @@ class LongbridgeAttributionWriteTests(TestCase):
         """Collect the batch ``sync_earnings`` hands to ``_flush_batch`` (US only)."""
         captured = {}
 
-        def fake_flush(stats, batch, label):
+        def fake_flush(stats, batch, label, retractions=None):
+            # Issue #111: a batch that carries a withdrawn actual arrives with the
+            # fourth argument; this test only cares about the rows.
             captured.setdefault("rows", []).extend(batch)
 
         def fake_fetch(market, start, end):

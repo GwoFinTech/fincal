@@ -19,6 +19,8 @@ class SyncQuality:
     #: Rows written without a fiscal identity (Issue #113).  A count, not a
     #: status input: the run still wrote what the provider gave it.
     unlabeled: int = 0
+    #: Rows whose actual value the provider withdrew this run (Issue #111).
+    retracted: int = 0
     status: str = "success"  # success | partial | unavailable
     sources: dict[str, str] = field(default_factory=dict)  # source_name → ok|degraded|failed
 
