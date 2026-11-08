@@ -1007,6 +1007,28 @@ def flush_batch(cur, rows: list[tuple], retractions: dict | None = None) -> Flus
                       retracted_keys=retracted_keys)
 
 
+def effective_retractions(withdrawn: dict, stated: dict) -> dict:
+    """Drop the withdrawals a payload contradicts by stating the same value.
+
+    One payload can describe the same row twice — an event that carries the actual
+    and another that serves the field blank.  Applying the blank would then clear a
+    value the same payload just supplied, and the next run would write it again: a
+    row flapping between reported and scheduled (observed as exactly one retraction
+    per run on the 2026-08-04 cohort).  A stated value wins; only a side no event
+    states can be withdrawn.
+    """
+    effective: dict = {}
+    for key, dropped in withdrawn.items():
+        claims = stated.get(key) or {}
+        sides = {
+            side: dropped[side] and not claims.get(side)
+            for side in ("eps", "revenue")
+        }
+        if sides["eps"] or sides["revenue"]:
+            effective[key] = sides
+    return effective
+
+
 def _display_key(row) -> str:
     """Render a RETURNING row's display key.
 
@@ -1183,6 +1205,7 @@ def sync_earnings(run_id: int, stats: SyncStats | None = None) -> SyncStats:
         #: Actual figures this market's pages explicitly withdrew, keyed by the
         #: display key so the batch's own flush can apply them (Issue #111).
         retractions: dict[tuple[str, str, str, str], dict] = {}
+        stated: dict[tuple[str, str, str, str], dict] = {}
         for page in pages:
             check_cancelled(run_id)
             beats.maybe(run_id, phase=f"calendar-{market.lower()}",
@@ -1224,9 +1247,19 @@ def sync_earnings(run_id: int, stats: SyncStats | None = None) -> SyncStats:
                 # Issue #111: a withdrawal names the row it belongs to — symbol,
                 # market, date *and* report type.  Keying it by the day alone let a
                 # blank on one event clear a same-day row of another report type.
+                key = (symbol, mkt, report_date, report_type)
                 withdrawn = extract_retractions(info.get("data_kv"))
                 if withdrawn["eps"] or withdrawn["revenue"]:
-                    retractions[(symbol, mkt, report_date, report_type)] = withdrawn
+                    merged = retractions.setdefault(key, {"eps": False, "revenue": False})
+                    for side in ("eps", "revenue"):
+                        merged[side] = merged[side] or withdrawn[side]
+                if kv.get("eps_actual") is not None or kv.get("revenue_actual") is not None:
+                    # This event states a value: it vetoes a blank from another
+                    # event for the same row in this payload (see
+                    # ``effective_retractions``).
+                    claims = stated.setdefault(key, {"eps": False, "revenue": False})
+                    claims["eps"] = claims["eps"] or kv.get("eps_actual") is not None
+                    claims["revenue"] = claims["revenue"] or kv.get("revenue_actual") is not None
 
                 batch.append((
                     symbol, mkt, company_name, report_date, report_type,
@@ -1253,14 +1286,17 @@ def sync_earnings(run_id: int, stats: SyncStats | None = None) -> SyncStats:
 
                 # Flush when batch is full
                 if len(batch) >= BATCH_SIZE:
-                    _flush_pending(run_stats, batch, f"{market} page batch", retractions)
+                    _flush_pending(run_stats, batch, f"{market} page batch",
+                                   effective_retractions(retractions, stated))
                     batch = []
                     retractions = {}
+                    stated = {}
                     check_cancelled(run_id)
 
         # Flush remaining
         if batch:
-            _flush_pending(run_stats, batch, f"{market} final batch", retractions)
+            _flush_pending(run_stats, batch, f"{market} final batch",
+                           effective_retractions(retractions, stated))
 
     if run_stats.unresolved:
         # Not a failure by itself (some events legitimately carry no usable

@@ -177,3 +177,31 @@ class ReturnedRowShapeTests(TestCase):
         # Regression: indexing a dict positionally raised KeyError(0), and the
         # batch isolation reported it as a failure whose message was "0".
         assert sync_earnings._display_key(("BBAR", "US", "2026-11-24", "Q")) == "BBAR.US 2026-11-24 Q"
+
+class ContradictionTests(TestCase):
+    """A payload that states a value cannot also be read as withdrawing it."""
+
+    def test_a_stated_value_vetoes_the_blank_for_the_same_row(self):
+        withdrawn = {("GLRE", "US", "2026-08-04", "Q"): {"eps": True, "revenue": True}}
+        stated = {("GLRE", "US", "2026-08-04", "Q"): {"eps": True, "revenue": True}}
+
+        assert sync_earnings.effective_retractions(withdrawn, stated) == {}
+
+    def test_a_side_nothing_contradicts_is_still_withdrawn(self):
+        withdrawn = {("GLRE", "US", "2026-08-04", "Q"): {"eps": True, "revenue": True}}
+        stated = {("GLRE", "US", "2026-08-04", "Q"): {"eps": True, "revenue": False}}
+
+        assert sync_earnings.effective_retractions(withdrawn, stated) == {
+            ("GLRE", "US", "2026-08-04", "Q"): {"eps": False, "revenue": True}
+        }
+
+    def test_another_row_stating_a_value_vetoes_nothing(self):
+        withdrawn = {("GLRE", "US", "2026-08-04", "Q"): {"eps": True, "revenue": False}}
+        stated = {("GLRE", "US", "2026-08-04", "H"): {"eps": True, "revenue": True}}
+
+        assert sync_earnings.effective_retractions(withdrawn, stated) == withdrawn
+
+    def test_an_uncontradicted_withdrawal_passes_through(self):
+        withdrawn = {("BBAR", "US", "2026-11-24", "Q"): {"eps": False, "revenue": True}}
+
+        assert sync_earnings.effective_retractions(withdrawn, {}) == withdrawn
