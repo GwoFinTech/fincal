@@ -3,11 +3,11 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
-from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from . import db
 from .routers import api, admin, ical as ical_router
+from .compression import CompressedResponses
 from .errors import error_middleware
 from .etag_middleware import etag_middleware
 from .log_redaction import install_log_redaction
@@ -63,20 +63,21 @@ def install_middleware(app: FastAPI) -> None:
 
     # Response compression (Issue #99). Everything this service emits is text —
     # JSON, iCalendar, HTML/JS/CSS — and the two hot outlets are big: the month
-    # view was 93 KiB on the wire and a ``scope=all`` feed 182 KiB, per poll,
-    # per subscriber (measured 2026-10-24).
+    # view is 99 KiB on the wire and a ``scope=all`` feed 182 KiB, per poll, per
+    # subscriber (measured 2026-10-24).
     #
-    # ``minimum_size`` only applies to a body that arrives in one message: true
-    # for the endpoints the ETag layer re-serializes (small ones stay identity,
-    # with their ``Content-Length``), false for the streamed ones — both
-    # middlewares above are ``BaseHTTPMiddleware``, which re-emits every response
-    # as a body *stream*, so those are coded regardless of size and go out
-    # chunked (tests/test_response_compression.py pins both cases).
+    # ``app.compression.CompressedResponses`` rather than Starlette's stock
+    # ``GZipMiddleware``: the stock one compares ``minimum_size`` against the first
+    # body message only, so every response that arrives in several messages — all
+    # of them, since the two layers above are ``BaseHTTPMiddleware`` and re-emit the
+    # body as a stream — was coded regardless of size, and the 253 B health probe
+    # went out gzip-coded. Ours buffers until the body is known to be at least
+    # ``minimum_size`` and weakens the ETag of what it codes.
     #
     # Do not add Traefik ``compress`` on top of this: the edge would either
     # recode an already-coded body or skip it, a redundant layer either way
     # (README, "API Endpoints").
-    app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
+    app.add_middleware(CompressedResponses, minimum_size=1024, compresslevel=6)
 
 
 app = FastAPI(title="FinCal", lifespan=lifespan)

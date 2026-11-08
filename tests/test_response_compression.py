@@ -20,13 +20,12 @@ What this module pins:
 
 One framing note these tests document rather than hide: ``/api/error`` and the
 ETag layer are ``BaseHTTPMiddleware``, which re-emits every response as a
-*stream* of body messages. ``GZipMiddleware``'s ``minimum_size`` gate only sees
-a size when the body arrives in one message — true for the paths the ETag
-middleware re-serializes itself (it returns a complete ``Response``), false for
-the streamed ones. So the whitelisted JSON endpoints keep their
-``Content-Length`` and stay identity below 1 KiB, while streamed paths (the
-month view, the iCal feed, the health probe) are always coded and lose
-``Content-Length``.
+*stream* of body messages, and ``StaticFiles`` streams the bundle the same way.
+Starlette's stock ``GZipMiddleware`` compares ``minimum_size`` with the first
+body message only, so on this stack the gate never fired and the 453 B health
+probe went out coded — which is why ``app.compression`` exists: it buffers until
+the body is known to be at least ``minimum_size``. A complete body is coded with
+an exact ``Content-Length``; a streamed one goes out chunked.
 """
 from __future__ import annotations
 
@@ -224,12 +223,12 @@ def test_gzip_is_the_outermost_layer_of_the_production_stack():
     validator — and one cache entry — per content-coding.
     """
     from starlette.middleware.base import BaseHTTPMiddleware
-    from starlette.middleware.gzip import GZipMiddleware
 
+    from app.compression import CompressedResponses
     from app.main import app
 
     stack = app.user_middleware
-    assert stack[0].cls is GZipMiddleware
+    assert stack[0].cls is CompressedResponses
     assert stack[0].kwargs == {"minimum_size": 1024, "compresslevel": 6}
     assert stack[1].cls is BaseHTTPMiddleware
     assert stack[1].kwargs["dispatch"] is etag_middleware
@@ -352,13 +351,14 @@ def test_cacheable_answer_below_the_threshold_stays_identity():
     assert json.loads(raw) == SMALL_CACHEABLE_BODY
 
 
-def test_streamed_health_probe_is_coded_but_never_inflated():
-    """A 453 B probe is compressed because it arrives as a stream (§ module doc).
+def test_small_probe_stays_identity_even_though_it_arrives_as_a_stream():
+    """Acceptance criterion 5: the 453 B probe must not be coded.
 
-    ``GZipMiddleware`` only sees a body size when the whole body is one message,
-    and the two ``BaseHTTPMiddleware`` layers re-emit every streamed response as
-    chunks. The probe is 453 B, so coding it still *shrinks* it; what must not
-    happen is a client without gzip noticing any difference.
+    This is where the stock ``GZipMiddleware`` failed in production: it compares
+    ``minimum_size`` with the first body message, and both ``BaseHTTPMiddleware``
+    layers above re-emit every body as a stream, so the size gate never fired and
+    the probe came back gzip-coded (253 B of coding around 253 B of JSON).  The
+    layer here buffers until the body is known to be at least ``minimum_size``.
     """
     client = TestClient(_probe_app())
 
@@ -366,10 +366,10 @@ def test_streamed_health_probe_is_coded_but_never_inflated():
     _, identity_headers, identity = _wire(client, "/api/admin/health", accept_encoding="identity")
 
     assert status == 200
-    assert coded_headers["content-encoding"] == "gzip"
-    assert gzip.decompress(coded) == identity
-    assert len(coded) <= len(identity), f"{len(coded)} B coded vs {len(identity)} B identity"
     assert 400 < len(identity) < 1024, "the fixture must stay under minimum_size"
+    assert "content-encoding" not in coded_headers, "a sub-1 KiB answer must not be coded"
+    assert coded == identity, "a gzip-capable client gets the identity bytes here"
+    assert coded_headers.get("content-length") == str(len(identity))
     assert "content-encoding" not in identity_headers
 
 
@@ -382,7 +382,10 @@ def test_csv_export_still_decompresses_into_the_same_file():
     assert headers["content-encoding"] == "gzip"
     assert headers["content-disposition"] == 'attachment; filename="fincal.csv"'
     assert gzip.decompress(raw) == CSV_BODY
-    assert headers["content-length"] == str(len(raw)), "a declared length must match the coded body"
+    # ``/api/export`` is on the ETag whitelist, so the body is complete by the time
+    # it reaches this layer and the coded length is exact — never the endpoint's
+    # raw length, which is the framing mistake of #35.
+    assert headers["content-length"] == str(len(raw)), "the declared length must describe the coded bytes"
 
 
 # ── The iCal feed: the most expensive repeated transfer ────────────────────
@@ -547,3 +550,157 @@ def test_ical_identity_client_revalidates_with_the_cached_gzip_validator():
 
     assert status == 304, "the weak comparison must not depend on the coding that minted the ETag"
     assert raw == b""
+
+
+# ── What the stock middleware got wrong, pinned directly on our layer ──────
+
+def _run(scope_headers: list[tuple[bytes, bytes]], messages, *, minimum_size: int = 1024):
+    """Drive ``CompressedResponses`` with a scripted ASGI app and collect output."""
+    import asyncio
+
+    from app.compression import CompressedResponses
+
+    sent: list[dict] = []
+
+    async def app(scope, receive, send):
+        for message in messages:
+            await send(message)
+
+    async def send(message):
+        sent.append(message)
+
+    async def receive():
+        return {"type": "http.request"}
+
+    scope = {"type": "http", "method": "GET", "path": "/x",
+             "headers": list(scope_headers)}
+    asyncio.run(CompressedResponses(app, minimum_size=minimum_size)(scope, receive, send))
+    return sent
+
+
+def _body(sent) -> bytes:
+    return b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
+
+
+def _headers(sent) -> dict[str, str]:
+    start = next(m for m in sent if m["type"] == "http.response.start")
+    return {k.decode().lower(): v.decode() for k, v in start["headers"]}
+
+
+def test_a_small_body_split_across_messages_is_still_identity():
+    """The exact production failure: 253 B delivered as 2 chunks was coded."""
+    sent = _run(
+        [(b"accept-encoding", b"gzip")],
+        [
+            {"type": "http.response.start", "status": 200,
+             "headers": [(b"content-type", b"application/json")]},
+            {"type": "http.response.body", "body": b'{"status":' , "more_body": True},
+            {"type": "http.response.body", "body": b'"ok"}', "more_body": False},
+        ],
+    )
+
+    assert "content-encoding" not in _headers(sent)
+    assert json.loads(_body(sent)) == {"status": "ok"}
+
+
+def test_a_large_streamed_body_is_coded_as_it_flows():
+    """A body that passes ``minimum_size`` mid-stream is coded from that point on."""
+    head, tail = b"x" * 1200, b"y" * 900
+    sent = _run(
+        [(b"accept-encoding", b"gzip")],
+        [
+            {"type": "http.response.start", "status": 200,
+             "headers": [(b"content-type", b"text/csv"), (b"content-length", b"2100")]},
+            {"type": "http.response.body", "body": head, "more_body": True},
+            {"type": "http.response.body", "body": tail, "more_body": False},
+        ],
+    )
+
+    headers = _headers(sent)
+    assert headers["content-encoding"] == "gzip"
+    assert "content-length" not in headers, "a streamed body cannot declare its coded length"
+    assert "accept-encoding" in headers["vary"].lower()
+    assert gzip.decompress(_body(sent)) == head + tail
+
+
+def test_a_body_completed_while_buffering_declares_its_coded_length():
+    """Chunks that arrive within ``minimum_size`` are held, so the length is known."""
+    body = b"x" * 900
+    sent = _run(
+        [(b"accept-encoding", b"gzip")],
+        [
+            {"type": "http.response.start", "status": 200,
+             "headers": [(b"content-type", b"text/plain"), (b"content-length", b"1800")]},
+            {"type": "http.response.body", "body": body, "more_body": True},
+            {"type": "http.response.body", "body": body, "more_body": False},
+        ],
+    )
+
+    headers = _headers(sent)
+    assert headers["content-encoding"] == "gzip"
+    assert headers["content-length"] == str(len(_body(sent)))
+    assert gzip.decompress(_body(sent)) == body * 2
+
+
+def test_a_strong_static_validator_is_weakened_when_the_body_is_coded():
+    """``StaticFiles`` mints a strong ETag from stat and reuses it for both codings."""
+    sent = _run(
+        [(b"accept-encoding", b"gzip")],
+        [
+            {"type": "http.response.start", "status": 200,
+             "headers": [(b"content-type", b"application/javascript"),
+                         (b"etag", b'"47f1d0888dd2605fa46f4ce5b0b85e3d"')]},
+            {"type": "http.response.body", "body": b"console.log(1);" * 200, "more_body": False},
+        ],
+    )
+
+    assert _headers(sent)["etag"].startswith('W/"'), _headers(sent)["etag"]
+
+
+def test_a_body_that_is_already_coded_is_forwarded_untouched():
+    sent = _run(
+        [(b"accept-encoding", b"gzip")],
+        [
+            {"type": "http.response.start", "status": 200,
+             "headers": [(b"content-type", b"application/json"),
+                         (b"content-encoding", b"br"),
+                         (b"etag", b'"abc"')]},
+            {"type": "http.response.body", "body": b"already coded", "more_body": False},
+        ],
+    )
+
+    headers = _headers(sent)
+    assert headers["content-encoding"] == "br"
+    assert headers["etag"] == '"abc"', "a foreign coding's validator is not ours to weaken"
+    assert _body(sent) == b"already coded"
+
+
+def test_an_event_stream_is_never_buffered():
+    sent = _run(
+        [(b"accept-encoding", b"gzip")],
+        [
+            {"type": "http.response.start", "status": 200,
+             "headers": [(b"content-type", b"text/event-stream")]},
+            {"type": "http.response.body", "body": b"data: 1\n\n" * 200, "more_body": True},
+            {"type": "http.response.body", "body": b"", "more_body": False},
+        ],
+    )
+
+    assert "content-encoding" not in _headers(sent)
+    assert _body(sent) == b"data: 1\n\n" * 200
+
+
+def test_identity_clients_get_the_stream_untouched():
+    sent = _run(
+        [(b"accept-encoding", b"deflate")],
+        [
+            {"type": "http.response.start", "status": 200,
+             "headers": [(b"content-type", b"application/json"),
+                         (b"content-length", b"4")]},
+            {"type": "http.response.body", "body": b"{}  ", "more_body": False},
+        ],
+    )
+
+    assert "content-encoding" not in _headers(sent)
+    assert _headers(sent)["content-length"] == "4"
+    assert _body(sent) == b"{}  "
