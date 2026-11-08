@@ -977,7 +977,7 @@ def flush_batch(cur, rows: list[tuple], retractions: dict | None = None) -> Flus
             fetch=True,
         ) or []
         retracted = len(cleared)
-        retracted_keys = [f"{row[0]}.{row[1]} {row[2]} {row[3]}".strip() for row in cleared]
+        retracted_keys = [_display_key(row) for row in cleared]
     # Provenance and status still converge on every run (Issue #89/#91: a label
     # may not outlive its value, a row with actuals must read ``reported``), but
     # they no longer carry a timestamp: the upsert above owns the revision
@@ -1005,6 +1005,24 @@ def flush_batch(cur, rows: list[tuple], retractions: dict | None = None) -> Flus
                       identity_skipped=identity_skipped,
                       retracted=retracted,
                       retracted_keys=retracted_keys)
+
+
+def _display_key(row) -> str:
+    """Render a RETURNING row's display key.
+
+    ``db_cursor()`` yields ``RealDictCursor`` rows, so a returned row is a mapping;
+    indexing it positionally raised ``KeyError(0)`` inside the batch, which the
+    per-batch isolation then reported as "batch failed … 0" — an error whose whole
+    message was the number zero.
+    """
+    if isinstance(row, dict):
+        symbol = row["symbol"]
+        market = row["market"]
+        report_date = row["report_date"]
+        report_type = row["report_type"]
+    else:
+        symbol, market, report_date, report_type = row[0], row[1], row[2], row[3]
+    return f"{symbol}.{market} {report_date} {report_type}".strip()
 
 
 def _flush_pending(run_stats: SyncStats, batch: list[tuple], label: str,

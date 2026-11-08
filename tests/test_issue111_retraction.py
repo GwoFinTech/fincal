@@ -161,3 +161,19 @@ class TheCrossProviderGuardTests(TestCase):
     def test_the_regression_is_named_in_the_sql(self):
         # A guard without a reason gets deleted by the next cleanup; keep both.
         assert "#91" in sync_earnings._RETRACTION_SQL
+
+class ReturnedRowShapeTests(TestCase):
+    """`db_cursor()` is a RealDictCursor, so a RETURNING row is a mapping."""
+
+    def test_a_mapping_row_renders_its_key(self):
+        key = sync_earnings._display_key({
+            "symbol": "BBAR", "market": "US",
+            "report_date": "2026-11-24", "report_type": "Q",
+        })
+
+        assert key == "BBAR.US 2026-11-24 Q"
+
+    def test_a_tuple_row_still_renders(self):
+        # Regression: indexing a dict positionally raised KeyError(0), and the
+        # batch isolation reported it as a failure whose message was "0".
+        assert sync_earnings._display_key(("BBAR", "US", "2026-11-24", "Q")) == "BBAR.US 2026-11-24 Q"
