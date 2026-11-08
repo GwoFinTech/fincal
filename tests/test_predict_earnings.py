@@ -740,6 +740,16 @@ class _PredictDb:
             return self._company_name_en
         if flat.startswith("SELECT id FROM earnings WHERE symbol = %s"):
             return self._target_holder
+        if flat.startswith("SELECT id, fiscal_year, fiscal_quarter, is_predicted"):
+            # Issue #116: who holds the display key decides between "the period
+            # already converged" and "a different period owns this date".
+            return self._target_holder_identity
+        if flat.startswith("SELECT id, report_date, date_source, eps_actual, revenue_actual"):
+            return self._period_predictions
+        if flat.startswith("UPDATE earnings_estimate_snapshots"):
+            return lambda params: None
+        if flat.startswith("DELETE FROM earnings WHERE id = ANY"):
+            return self._delete
         if flat.startswith("UPDATE earnings SET report_date"):
             return self._move
         if flat.startswith("INSERT INTO earnings"):
@@ -786,6 +796,42 @@ class _PredictDb:
         hits = [row for row in self.rows
                 if (row["symbol"], row["market"], row["report_date"], row["report_type"]) == key]
         self._result = [{"id": hits[0]["id"]}] if hits else ([{"id": -1}] if key in self.extra_holders else [])
+
+    def _target_holder_identity(self, params):
+        symbol, market, report_date, report_type = params
+        key = (symbol, market, report_date, report_type)
+        hits = [row for row in self.rows
+                if (row["symbol"], row["market"], row["report_date"], row["report_type"]) == key]
+        if hits:
+            hit = hits[0]
+            self._result = [{"id": hit["id"], "fiscal_year": hit["fiscal_year"],
+                             "fiscal_quarter": hit["fiscal_quarter"],
+                             "is_predicted": hit["is_predicted"]}]
+        elif key in self.extra_holders:
+            # A row of *another* period holding the date: a real conflict.
+            self._result = [{"id": -1, "fiscal_year": 9999, "fiscal_quarter": 1,
+                             "is_predicted": False}]
+        else:
+            self._result = []
+
+    def _period_predictions(self, params):
+        symbol, market, fiscal_year, fiscal_quarter = params
+        self._result = [
+            {"id": row["id"], "report_date": row["report_date"],
+             "date_source": row["date_source"], "eps_actual": row["eps_actual"],
+             "revenue_actual": row["revenue_actual"]}
+            for row in self.rows
+            if row["symbol"] == symbol and row["market"] == market
+            and row["fiscal_year"] == fiscal_year and row["fiscal_quarter"] == fiscal_quarter
+            and row["is_predicted"]
+        ]
+
+    def _delete(self, params):
+        (identifiers,) = params
+        before = len(self.rows)
+        self.rows = [row for row in self.rows if row["id"] not in set(identifiers)]
+        self.deleted = getattr(self, "deleted", []) + list(identifiers)
+        self.rowcount = before - len(self.rows)
 
     def _move(self, params):
         new_date, row_id, old_date = params
@@ -862,14 +908,18 @@ class SupersededPredictionMoveTests(TestCase):
                          [date(2025, 1, 30), date(2026, 1, 29), date(2027, 1, 29)])
         self.assertEqual([call[4] for call in db.inserts], ["2027-01-29"])
 
-    def test_move_skips_when_another_row_owns_the_target_date(self):
+    def test_move_skips_the_write_when_another_period_owns_the_target_date(self):
         count, db, stats = _run_predict(_aapl_fixture(),
                                         extra_holders=[("AAPL", "US", date(2027, 1, 29), "Q")])
 
-        self.assertEqual(count, 1)
+        # Issue #116: the date belongs to another period, so this run writes nothing
+        # there — the upsert used to run anyway and change no row, every single week.
+        self.assertEqual(count, 0)
         self.assertEqual(db.moves, [])
+        self.assertEqual(db.inserts, [])
         self.assertEqual(stats.rescheduled, 0)
         self.assertEqual(stats.reschedule_skipped, 1)
+        self.assertEqual(stats.converged, 0)
         # The stale row is left alone rather than made to collide with the occupant.
         self.assertEqual(db.rows_of("AAPL", "US")[2]["report_date"], date(2027, 1, 30))
 
@@ -1043,3 +1093,69 @@ class PredictedRowNameTests(TestCase):
         insert_sql = next(sql for sql, _ in db.executed if sql.startswith("INSERT INTO earnings"))
         self.assertIn("earnings.date_source = 'algorithm'", insert_sql)
         self.assertIn("EXCLUDED.company_name <> ''", insert_sql)
+
+class DuplicatePredictionPeriodTests(TestCase):
+    """Issue #116: a period that already holds two predicted rows converges to one.
+
+    ``move_superseded_prediction`` refuses to take a date another row owns, and
+    nothing cleaned up afterwards, so the superseded row stayed forever: twelve
+    periods in production held two predicted rows each and ``reschedule_skipped``
+    was a constant 11, which made every real conflict indistinguishable from noise.
+    """
+
+    @staticmethod
+    def _duplicate_fixture():
+        """AAPL FY2027Q1 held by two algorithm rows: the rule's date and a stale one."""
+        return [
+            _predict_row(1, "AAPL", "US", date(2025, 1, 30), 2025, 1, eps_actual=2.4),
+            _predict_row(2, "AAPL", "US", date(2026, 1, 29), 2026, 1, eps_actual=2.5),
+            # The rule's answer for FY2027Q1 (pick_predicted_date over January samples).
+            _predict_row(3, "AAPL", "US", date(2027, 1, 29), 2027, 1,
+                         is_predicted=True, date_source="algorithm"),
+            # The superseded row: a day later, which is what the read path showed.
+            _predict_row(4, "AAPL", "US", date(2027, 1, 30), 2027, 1,
+                         is_predicted=True, date_source="algorithm"),
+        ]
+
+    def test_a_duplicate_period_is_collapsed_onto_the_rules_date(self):
+        count, db, stats = _run_predict(self._duplicate_fixture())
+
+        remaining = [row["report_date"] for row in db.rows_of("AAPL", "US")
+                     if row["fiscal_year"] == 2027]
+        self.assertEqual(remaining, [date(2027, 1, 29)], "one row per period")
+        self.assertEqual(stats.converged, 1)
+        self.assertEqual(stats.duplicate_periods, 1)
+        self.assertEqual(count, 0, "the period already held the rule's date — nothing to write")
+
+    def test_convergence_does_not_report_a_conflict(self):
+        _, _, stats = _run_predict(self._duplicate_fixture())
+
+        # The blocked move is the *converged* case, not a real conflict: counting it
+        # as skipped is what pinned the counter at 11 and hid genuine conflicts.
+        self.assertEqual(stats.reschedule_skipped, 0)
+
+    def test_a_second_run_finds_nothing_left_to_converge(self):
+        first_rows = self._duplicate_fixture()
+        _, db, stats = _run_predict(first_rows)
+        _, db2, stats2 = _run_predict(db.rows)
+
+        self.assertEqual(stats2.duplicate_periods, 0)
+        self.assertEqual(stats2.converged, 0)
+        self.assertEqual(stats2.reschedule_skipped, 0)
+        self.assertEqual(db.deleted, [4])
+
+    def test_a_confirmed_row_of_the_period_is_never_deleted(self):
+        rows = self._duplicate_fixture()
+        rows[3]["is_predicted"] = False          # the second row is a confirmed one
+        rows[3]["date_source"] = "longbridge"
+
+        _, db, _ = _run_predict(rows)
+
+        self.assertFalse(hasattr(db, "deleted") and 4 in getattr(db, "deleted", []))
+        self.assertTrue(any(row["id"] == 4 for row in db.rows))
+
+    def test_the_counters_reach_the_run_details(self):
+        details = predict_earnings.PredictionStats(duplicate_periods=12, converged=12).details()
+
+        self.assertEqual(details["duplicate_periods"], 12)
+        self.assertEqual(details["converged"], 12)

@@ -181,6 +181,10 @@ class PredictionStats:
     reschedule_skipped: int = 0   # periods left alone because the target date is taken
     restated: int = 0             # stored predictions outside the window re-applied
     names_aligned: int = 0        # algorithm rows pulled onto the symbol's provider name
+    #: Fiscal periods that held more than one predicted row when the run looked at
+    #: them (Issue #116).  ``converged`` of those were collapsed back to one row.
+    duplicate_periods: int = 0
+    converged: int = 0
 
     def details(self) -> dict:
         return {
@@ -197,6 +201,8 @@ class PredictionStats:
             "reschedule_skipped": self.reschedule_skipped,
             "restated": self.restated,
             "names_aligned": self.names_aligned,
+            "duplicate_periods": self.duplicate_periods,
+            "converged": self.converged,
         }
 
 
@@ -210,6 +216,35 @@ _TARGET_HOLDER_SQL = (
     "SELECT id FROM earnings"
     " WHERE symbol = %s AND market = %s AND report_date = %s AND report_type = %s"
     " LIMIT 1"
+)
+
+#: The same key, read for *who* holds it: the fiscal period a blocked move ran into
+#: decides whether the period simply converged or a real conflict occurred
+#: (Issue #116).  Kept separate so ``_TARGET_HOLDER_SQL`` stays a display-key check.
+_TARGET_HOLDER_IDENTITY_SQL = (
+    "SELECT id, fiscal_year, fiscal_quarter, is_predicted FROM earnings"
+    " WHERE symbol = %s AND market = %s AND report_date = %s AND report_type = %s"
+    " LIMIT 1"
+)
+
+#: Every predicted row of one fiscal period — what a period has to converge from.
+_PERIOD_PREDICTIONS_SQL = (
+    "SELECT id, report_date, date_source, eps_actual, revenue_actual FROM earnings"
+    " WHERE symbol = %s AND market = %s AND fiscal_year = %s AND fiscal_quarter = %s"
+    "   AND is_predicted = TRUE"
+    " ORDER BY report_date"
+)
+
+#: Re-point a dropped row's estimate snapshots onto the survivor.  Prediction rows
+#: carry none today, so this is defensive: it is what keeps a future prediction
+#: with estimates from losing its history to a merge.  A key that already exists on
+#: the survivor is left in place (the delete then drops that duplicate snapshot).
+_REPOINT_PREDICTION_SNAPSHOTS_SQL = (
+    "UPDATE earnings_estimate_snapshots s SET earning_id = %s"
+    " WHERE s.earning_id = ANY(%s)"
+    "   AND NOT EXISTS (SELECT 1 FROM earnings_estimate_snapshots k"
+    "                    WHERE k.earning_id = %s AND k.source = s.source"
+    "                      AND k.captured_at = s.captured_at)"
 )
 
 #: The move carries its own proof, like ``_DELETE_ROWS`` in ``merge_duplicate_symbols``:
@@ -447,6 +482,53 @@ def move_superseded_prediction(cur, *, symbol, market, report_type, row_id, old_
     return outcome
 
 
+def target_holder(cur, *, symbol: str, market: str, report_date, report_type: str):
+    """The row that owns a display key, with the fiscal period it belongs to."""
+    cur.execute(_TARGET_HOLDER_IDENTITY_SQL, (symbol, market, report_date, report_type))
+    return cur.fetchone()
+
+
+def converge_prediction_period(cur, *, symbol: str, market: str, fiscal_year: int,
+                               fiscal_quarter: int, keep_id: int,
+                               stats: "PredictionStats | None" = None) -> int:
+    """Drop a period's superseded predicted rows, keeping ``keep_id`` (Issue #116).
+
+    ``move_superseded_prediction`` is right to refuse to take a date another row
+    already owns, but nothing used to clean up afterwards: the old row stayed, the
+    run's upsert changed nothing, and the next run repeated the same pointless move.
+    Twelve periods in production held two predicted rows each, which is also what
+    pinned ``reschedule_skipped`` at a constant 11 and hid real conflicts.
+
+    Deletion carries the same three guards as the move — algorithm-owned, no actual
+    values — plus ``is_predicted``, so a confirmed row can never be dropped here.
+    Returns how many rows were deleted.
+    """
+    cur.execute(_PERIOD_PREDICTIONS_SQL, (symbol, market, fiscal_year, fiscal_quarter))
+    superseded = [
+        row for row in cur.fetchall()
+        if row["id"] != keep_id
+        and str(row["date_source"] or "").lower() == "algorithm"
+        and row["eps_actual"] is None
+        and row["revenue_actual"] is None
+    ]
+    if not superseded:
+        return 0
+
+    dropped = [row["id"] for row in superseded]
+    cur.execute(_REPOINT_PREDICTION_SNAPSHOTS_SQL, (keep_id, dropped, keep_id))
+    cur.execute(
+        "DELETE FROM earnings WHERE id = ANY(%s) AND is_predicted = TRUE"
+        " AND date_source = 'algorithm' AND eps_actual IS NULL AND revenue_actual IS NULL",
+        (dropped,),
+    )
+    deleted = cur.rowcount
+    logger.info(
+        "prediction period converged: %s.%s FY%s Q%s kept row %s, dropped %d superseded row(s)",
+        symbol, market, fiscal_year, fiscal_quarter, keep_id, deleted,
+    )
+    return deleted
+
+
 def predict_for_symbol(symbol: str, market: str, stats: "PredictionStats | None" = None) -> int:
     """Predict next earnings date(s) for a single symbol."""
     with db_cursor() as cur:
@@ -467,31 +549,39 @@ def predict_for_symbol(symbol: str, market: str, stats: "PredictionStats | None"
     confirmed: dict[tuple[int, int], dict] = {}
     predicted: dict[tuple[int, int], dict] = {}
 
+    #: Every predicted row of a period, so a period that holds more than one can be
+    #: converged instead of silently keeping both (Issue #116).
+    predicted_members: dict[tuple[int, int], list[dict]] = defaultdict(list)
+
     for row in rows:
         key = (row["fiscal_year"], row["fiscal_quarter"])
         if row["is_predicted"]:
-            # Keep the row the read path shows for the period: newest report date
-            # wins, and only an algorithm-owned prediction without actuals may be
-            # re-dated (see move_superseded_prediction).
-            previous = predicted.get(key)
-            if previous is None or row["report_date"] > previous["report_date"]:
-                predicted[key] = {
-                    "report_date": row["report_date"],
-                    "report_type": row["report_type"] or "Q",
-                    "before_after": row["before_after"],
-                    "id": row["id"],
-                    "movable": (
-                        str(row["date_source"] or "").lower() == "algorithm"
-                        and row["eps_actual"] is None
-                        and row["revenue_actual"] is None
-                    ),
-                }
+            predicted_members[key].append({
+                "report_date": row["report_date"],
+                "report_type": row["report_type"] or "Q",
+                "before_after": row["before_after"],
+                "id": row["id"],
+                "movable": (
+                    str(row["date_source"] or "").lower() == "algorithm"
+                    and row["eps_actual"] is None
+                    and row["revenue_actual"] is None
+                ),
+            })
         else:
             # Keep the latest entry per quarter
             confirmed[key] = {
                 "report_date": row["report_date"],
                 "before_after": row["before_after"],
             }
+
+    for key, members in predicted_members.items():
+        winner = max(members, key=lambda member: member["report_date"])
+        predicted[key] = dict(winner)
+        #: Rows of the same period that the read path never shows: exactly what the
+        #: move refused to relocate and nothing else cleaned up.
+        predicted[key]["duplicates"] = [
+            member for member in members if member["id"] != winner["id"]
+        ]
 
     # Build historical quarter patterns from confirmed data only
     # year_offset = report_year - fiscal_year (captures cross-year reporting like Q4 in Jan)
@@ -525,6 +615,24 @@ def predict_for_symbol(symbol: str, market: str, stats: "PredictionStats | None"
     # Predict forward from the latest confirmed quarter
     predictions_made = 0
     cur_fy, cur_fq = latest_fy, latest_fq
+
+    # Both passes below (the forward window and the out-of-window restatement) can
+    # look at the same period, and a period counts once: counting each visit is how
+    # ``reschedule_skipped`` became a constant rather than a signal (Issue #116).
+    conflicted_periods: set[tuple[int, int]] = set()
+    converged_periods: set[tuple[int, int]] = set()
+
+    def note_conflict(fiscal_year: int, fiscal_quarter: int) -> None:
+        if stats is None or (fiscal_year, fiscal_quarter) in conflicted_periods:
+            return
+        conflicted_periods.add((fiscal_year, fiscal_quarter))
+        stats.reschedule_skipped += 1
+
+    def note_converged(fiscal_year: int, fiscal_quarter: int, removed: int) -> None:
+        if stats is None or not removed or (fiscal_year, fiscal_quarter) in converged_periods:
+            return
+        converged_periods.add((fiscal_year, fiscal_quarter))
+        stats.converged += 1
     today = date.today()
     max_date = today + timedelta(days=MAX_FUTURE_DAYS)
 
@@ -556,15 +664,50 @@ def predict_for_symbol(symbol: str, market: str, stats: "PredictionStats | None"
         # A corrected prediction replaces the period's existing row instead of
         # leaving the old date to be displayed (Issue #60).
         existing = predicted.get((next_fy, next_fq))
+        if stats is not None and existing and existing.get("duplicates"):
+            stats.duplicate_periods += 1
+
+        outcome = None
         if existing and existing.get("movable") and existing["report_type"] == "Q":
             with db_cursor() as cur:
-                move_superseded_prediction(
+                # Counted at the call site: whether a blocked move is a *conflict*
+                # or a period that already converged depends on who holds the date.
+                outcome = move_superseded_prediction(
                     cur,
                     symbol=symbol, market=market, report_type="Q",
                     row_id=existing["id"], old_date=existing["report_date"],
                     new_date=pred_date, fiscal_year=next_fy, fiscal_quarter=next_fq,
-                    stats=stats,
                 )
+            if stats is not None and outcome == "moved":
+                stats.rescheduled += 1
+
+        if outcome in ("target_occupied", "unique_violation"):
+            with db_cursor() as cur:
+                holder = target_holder(cur, symbol=symbol, market=market,
+                                       report_date=pred_date, report_type="Q")
+            same_period = (
+                holder is not None
+                and (holder["fiscal_year"], holder["fiscal_quarter"]) == (next_fy, next_fq)
+            )
+            if same_period:
+                # The date is already owned by this very period's other row: the
+                # period has converged on what the rule computes, so drop the
+                # superseded row instead of writing a third row that changes nothing.
+                with db_cursor() as cur:
+                    removed = converge_prediction_period(
+                        cur, symbol=symbol, market=market,
+                        fiscal_year=next_fy, fiscal_quarter=next_fq,
+                        keep_id=holder["id"],
+                    )
+                note_converged(next_fy, next_fq, removed)
+                cur_fy, cur_fq = next_fy, next_fq
+                continue
+            # A genuinely different period owns the date: that is the conflict this
+            # counter exists for, and writing here would be an empty write on a row
+            # this run does not own.
+            note_conflict(next_fy, next_fq)
+            cur_fy, cur_fq = next_fy, next_fq
+            continue
 
         # Determine before_after
         recent = sorted(history, key=lambda h: h["year"])[-RECENT_SAMPLE_LIMIT:]
@@ -583,6 +726,17 @@ def predict_for_symbol(symbol: str, market: str, stats: "PredictionStats | None"
                 report_date=pred_date.isoformat(), fiscal_year=next_fy,
                 fiscal_quarter=next_fq, before_after=pred_ba,
             )
+        if existing and existing.get("duplicates"):
+            with db_cursor() as cur:
+                survivor = target_holder(cur, symbol=symbol, market=market,
+                                         report_date=pred_date, report_type="Q")
+                if survivor is not None:
+                    note_converged(next_fy, next_fq, converge_prediction_period(
+                        cur, symbol=symbol, market=market,
+                        fiscal_year=next_fy, fiscal_quarter=next_fq,
+                        keep_id=survivor["id"],
+                    ))
+
         predictions_made += 1
         if stats is not None:
             stats.predicted += 1
@@ -624,14 +778,30 @@ def predict_for_symbol(symbol: str, market: str, stats: "PredictionStats | None"
         if restated_date is None or restated_date == info.get("report_date"):
             continue
         with db_cursor() as cur:
-            move_superseded_prediction(
+            restated_outcome = move_superseded_prediction(
                 cur,
                 symbol=symbol, market=market, report_type="Q",
                 row_id=info["id"], old_date=info["report_date"], new_date=restated_date,
-                fiscal_year=fy, fiscal_quarter=fq, stats=stats,
+                fiscal_year=fy, fiscal_quarter=fq,
             )
-        if stats is not None:
+        if restated_outcome == "moved" and stats is not None:
+            # ``restated`` counts rows that really moved, not attempts (Issue #116):
+            # a blocked move used to increment it and made the number unreadable.
             stats.restated += 1
+            stats.rescheduled += 1
+        elif restated_outcome in ("target_occupied", "unique_violation"):
+            with db_cursor() as cur:
+                holder = target_holder(cur, symbol=symbol, market=market,
+                                       report_date=restated_date, report_type="Q")
+            if holder is not None and (holder["fiscal_year"], holder["fiscal_quarter"]) == (fy, fq):
+                with db_cursor() as cur:
+                    note_converged(fy, fq, converge_prediction_period(
+                        cur, symbol=symbol, market=market,
+                        fiscal_year=fy, fiscal_quarter=fq,
+                        keep_id=holder["id"],
+                    ))
+            else:
+                note_conflict(fy, fq)
 
     return predictions_made
 
