@@ -138,15 +138,28 @@ def test_the_batch_counter_counts_rows_the_provider_gave_no_period_for():
     ]
 
     class _Cursor:
+        """Answers the one diagnostic statement the flush issues (Issue #113)."""
+
         def __enter__(self):
             return self
 
         def __exit__(self, *exc):
             return False
 
+        def execute(self, sql, params=None):
+            self.sql = " ".join(str(sql).split())
+
+        def fetchone(self):
+            assert "unnest" in self.sql, self.sql
+            # The table holds one of the batch's two identity-less keys unlabelled.
+            return {"n": 1}
+
     original_cursor = sync_earnings.db_cursor
     original_flush = sync_earnings.flush_batch
     sync_earnings.db_cursor = lambda *a, **k: _Cursor()
+    # The count is measured after the upsert, not inferred from the batch contents:
+    # ``flush_batch`` reports how many of the batch's keys the table now holds
+    # without a fiscal identity.
     sync_earnings.flush_batch = lambda cur, rows: sync_earnings.FlushStats(rows=len(rows))
     try:
         sync_earnings._flush_batch(stats, batch, "test batch")
@@ -155,7 +168,7 @@ def test_the_batch_counter_counts_rows_the_provider_gave_no_period_for():
         sync_earnings.flush_batch = original_flush
 
     assert stats.written == 3
-    assert stats.unlabeled == 1, "only the row with no fiscal identity is counted"
+    assert stats.unlabeled == 1, "the run counter follows what the flush measured in the table"
 
 
 # ── the identity is what makes a reschedule an update, not a new event ─────

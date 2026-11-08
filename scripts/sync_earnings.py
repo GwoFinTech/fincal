@@ -199,6 +199,7 @@ class FlushStats:
     identity_skipped: int = 0
 
 
+
 @dataclass
 class SyncStats:
     """Entry counts for one Longbridge run.
@@ -925,6 +926,35 @@ def flush_batch(cur, rows: list[tuple]) -> FlushStats:
                       identity_skipped=identity_skipped)
 
 
+def _count_unlabeled_keys(cur, keys: list[tuple]) -> int:
+    """How many of these rows the table now holds without a fiscal identity.
+
+    Issue #113: the count has to be *measured*, not inferred from the incoming
+    tuples — a row can arrive unlabelled while the stored row already carries its
+    identity (the upsert keeps it), and counting tuples over-reported 76 rows where
+    the table held 36.  A diagnostic must never fail a batch, so a query error
+    falls back to the incoming-tuple count and says so.
+    """
+    if not keys:
+        return 0
+    try:
+        cur.execute(
+            """SELECT count(*) AS n
+                 FROM earnings e
+                 JOIN unnest(%s::text[], %s::text[], %s::date[])
+                   AS v(symbol, market, report_date)
+                   ON e.symbol = v.symbol AND e.market = v.market
+                  AND e.report_date = v.report_date
+                WHERE e.is_predicted = FALSE AND e.fiscal_year IS NULL""",
+            ([key[0] for key in keys], [key[1] for key in keys], [key[2] for key in keys]),
+        )
+        row = cur.fetchone()
+        return int(row["n"] if isinstance(row, dict) else row[0])
+    except Exception as exc:  # noqa: BLE001 - diagnostics never break a batch
+        logger.warning("could not measure unlabelled rows for this batch: %s", exc)
+        return 0
+
+
 def _flush_batch(run_stats: SyncStats, batch: list[tuple], label: str) -> None:
     """Commit one batch, isolating its failure from the rest of the run.
 
@@ -935,9 +965,11 @@ def _flush_batch(run_stats: SyncStats, batch: list[tuple], label: str) -> None:
     and logged, then the run continues with the next batch so a single bad batch
     costs 200 records instead of the whole calendar.
     """
+    unlabeled = 0
     try:
         with db_cursor() as cur:
             flushed = flush_batch(cur, batch)
+            unlabeled = _count_unlabeled_keys(cur, [(row[0], row[1], row[3]) for row in batch])
     except SyncCancelledError:
         raise
     except Exception as exc:
@@ -948,9 +980,7 @@ def _flush_batch(run_stats: SyncStats, batch: list[tuple], label: str) -> None:
         )
         return
     run_stats.written += flushed.rows
-    run_stats.unlabeled += sum(
-        1 for row in batch if row[5] is None or row[6] is None
-    )
+    run_stats.unlabeled += unlabeled
     run_stats.rescheduled += flushed.moves
     run_stats.skipped += flushed.skipped + flushed.identity_skipped
     run_stats.dropped_disclosures += flushed.dropped_disclosures
