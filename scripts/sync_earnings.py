@@ -224,11 +224,7 @@ class FlushStats:
     #: Rows skipped because another confirmed row already holds the same fiscal
     #: identity at a different (report_date, report_type) — Issue #87.
     identity_skipped: int = 0
-    #: Actual figures the provider withdrew and this batch cleared (Issue #111).
-    retracted: int = 0
-    #: The display keys of the rows that really lost a value, so a run's details name
-    #: what went rather than listing every event that carried a blank.
-    retracted_keys: list[str] = field(default_factory=list)
+
 
 
 
@@ -842,7 +838,7 @@ def _insert_earnings_rows(cur, insert_sql: str, rows: list[tuple]) -> tuple[list
     return written, skipped
 
 
-def flush_batch(cur, rows: list[tuple], retractions: dict | None = None) -> FlushStats:
+def flush_batch(cur, rows: list[tuple]) -> FlushStats:
     """Batch upsert using execute_values.
 
     Two Issue #50 guards run before the upsert, because the table's unique key is
@@ -965,19 +961,7 @@ def flush_batch(cur, rows: list[tuple], retractions: dict | None = None) -> Flus
     # Issue #111: a withdrawn actual is applied after the upsert (which only ever
     # adds values, ``COALESCE``) and before the provenance UPDATE below, so the
     # row's status is recomputed from what the table now holds.
-    retracted = 0
-    retracted_keys: list[str] = []
-    if retractions:
-        cleared = execute_values(
-            cur,
-            _RETRACTION_SQL + """
-            RETURNING e.symbol, e.market, e.report_date, e.report_type""",
-            [(symbol, market, report_date, report_type, dropped["eps"], dropped["revenue"])
-             for (symbol, market, report_date, report_type), dropped in retractions.items()],
-            fetch=True,
-        ) or []
-        retracted = len(cleared)
-        retracted_keys = [_display_key(row) for row in cleared]
+
     # Provenance and status still converge on every run (Issue #89/#91: a label
     # may not outlive its value, a row with actuals must read ``reported``), but
     # they no longer carry a timestamp: the upsert above owns the revision
@@ -1002,9 +986,7 @@ def flush_batch(cur, rows: list[tuple], retractions: dict | None = None) -> Flus
                       dropped_disclosures=(len(outcome.dropped) + collapse_drops
                                            + len(same_date.dropped)),
                       takeovers=sum(1 for move in outcome.moves if move.get("kind") == "takeover"),
-                      identity_skipped=identity_skipped,
-                      retracted=retracted,
-                      retracted_keys=retracted_keys)
+                      identity_skipped=identity_skipped)
 
 
 def effective_retractions(withdrawn: dict, stated: dict) -> dict:
@@ -1047,18 +1029,49 @@ def _display_key(row) -> str:
     return f"{symbol}.{market} {report_date} {report_type}".strip()
 
 
-def _flush_pending(run_stats: SyncStats, batch: list[tuple], label: str,
-                   retractions: dict | None) -> None:
-    """Flush a batch with the withdrawals it carries, if it carries any.
+def apply_retractions(cur, retractions: dict) -> list[str]:
+    """Clear the actual figures a payload withdrew, and return what was cleared."""
+    cleared = execute_values(
+        cur,
+        _RETRACTION_SQL + """
+        RETURNING e.symbol, e.market, e.report_date, e.report_type""",
+        [(symbol, market, report_date, report_type, dropped["eps"], dropped["revenue"])
+         for (symbol, market, report_date, report_type), dropped in retractions.items()],
+        fetch=True,
+    ) or []
+    return [_display_key(row) for row in cleared]
 
-    The extra argument is only passed when a withdrawal exists: a run that has
-    nothing to retract calls ``_flush_batch`` exactly the way it always did, which
-    is also the shape the stage's own tests fake.
+
+def _retract(run_stats: SyncStats, withdrawn: dict, stated: dict) -> None:
+    """Apply the market's withdrawals once its payload has been fully read.
+
+    Deciding per batch is not enough: one payload can describe a row twice — an
+    event that states the actual and another that serves it blank — and the two
+    events need not land in the same batch.  Settling it over the whole market is
+    what stops the row flapping between `reported` and `scheduled` on every run
+    (observed as exactly one retraction per run, always on the 2026-08-04 cohort).
     """
-    if retractions:
-        _flush_batch(run_stats, batch, label, retractions)
-    else:
-        _flush_batch(run_stats, batch, label)
+    effective = effective_retractions(withdrawn, stated)
+    if not effective:
+        return
+    try:
+        with db_cursor() as cur:
+            cleared = apply_retractions(cur, effective)
+    except SyncCancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a withdrawal pass must not fail the run
+        logger.error("could not apply withdrawn actual values: %s", exc)
+        return
+    if not cleared:
+        return
+    run_stats.retracted += len(cleared)
+    for key in cleared:
+        if key not in run_stats.retracted_keys and len(run_stats.retracted_keys) < 10:
+            run_stats.retracted_keys.append(key)
+    logger.warning(
+        "  provider withdrew actual value(s) from %d row(s), e.g. %s (Issue #111)",
+        len(cleared), ", ".join(cleared[:5]),
+    )
 
 
 def _count_unlabeled_keys(cur, keys: list[tuple]) -> int:
@@ -1090,8 +1103,7 @@ def _count_unlabeled_keys(cur, keys: list[tuple]) -> int:
         return 0
 
 
-def _flush_batch(run_stats: SyncStats, batch: list[tuple], label: str,
-                 retractions: dict | None = None) -> None:
+def _flush_batch(run_stats: SyncStats, batch: list[tuple], label: str) -> None:
     """Commit one batch, isolating its failure from the rest of the run.
 
     Issue #52: one unmovable row (a data conflict inside a 200-row batch) used to
@@ -1104,9 +1116,7 @@ def _flush_batch(run_stats: SyncStats, batch: list[tuple], label: str,
     unlabeled = 0
     try:
         with db_cursor() as cur:
-            # Same rule as ``_flush_pending``: a batch with nothing withdrawn is
-            # flushed through the three-argument call it has always used.
-            flushed = flush_batch(cur, batch, retractions) if retractions else flush_batch(cur, batch)
+            flushed = flush_batch(cur, batch)
             unlabeled = _count_unlabeled_keys(cur, [(row[0], row[1], row[3]) for row in batch])
     except SyncCancelledError:
         raise
@@ -1119,15 +1129,6 @@ def _flush_batch(run_stats: SyncStats, batch: list[tuple], label: str,
         return
     run_stats.written += flushed.rows
     run_stats.unlabeled += unlabeled
-    run_stats.retracted += flushed.retracted
-    if flushed.retracted:
-        for key in flushed.retracted_keys:
-            if key not in run_stats.retracted_keys and len(run_stats.retracted_keys) < 10:
-                run_stats.retracted_keys.append(key)
-        logger.warning(
-            "  provider withdrew actual value(s) from %d row(s), e.g. %s (Issue #111)",
-            flushed.retracted, ", ".join(flushed.retracted_keys[:5]),
-        )
     run_stats.rescheduled += flushed.moves
     run_stats.skipped += flushed.skipped + flushed.identity_skipped
     run_stats.dropped_disclosures += flushed.dropped_disclosures
@@ -1286,17 +1287,17 @@ def sync_earnings(run_id: int, stats: SyncStats | None = None) -> SyncStats:
 
                 # Flush when batch is full
                 if len(batch) >= BATCH_SIZE:
-                    _flush_pending(run_stats, batch, f"{market} page batch",
-                                   effective_retractions(retractions, stated))
+                    _flush_batch(run_stats, batch, f"{market} page batch")
                     batch = []
-                    retractions = {}
-                    stated = {}
                     check_cancelled(run_id)
 
         # Flush remaining
         if batch:
-            _flush_pending(run_stats, batch, f"{market} final batch",
-                           effective_retractions(retractions, stated))
+            _flush_batch(run_stats, batch, f"{market} final batch")
+
+        # Issue #111: settle the market's withdrawals once every page has been read,
+        # so an event that states a value can veto a blank from another batch.
+        _retract(run_stats, retractions, stated)
 
     if run_stats.unresolved:
         # Not a failure by itself (some events legitimately carry no usable

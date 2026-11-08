@@ -268,10 +268,13 @@ class LongbridgeAttributionWriteTests(TestCase):
         def fake_fetch(market, start, end):
             return pages if market == "US" else []
 
+        # Issue #111 settles withdrawn actuals once the payload is read; this test
+        # is about the labels a batch carries, not about retraction.
         with patch.object(sync_earnings, "fetch_calendar", side_effect=fake_fetch), \
              patch.object(sync_earnings, "check_cancelled"), \
              patch("app.sync_audit.heartbeat"), \
-             patch.object(sync_earnings, "_flush_batch", side_effect=fake_flush):
+             patch.object(sync_earnings, "_flush_batch", side_effect=fake_flush), \
+             patch.object(sync_earnings, "_retract"):
             stats = sync_earnings.SyncStats()
             sync_earnings.sync_earnings(1, stats)
         return captured["rows"]

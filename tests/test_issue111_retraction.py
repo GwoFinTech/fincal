@@ -92,59 +92,70 @@ class TheStatementTests(TestCase):
         for column in ("actual_as_of", "actual_currency", "actual_basis", "actual_source"):
             assert f"{column} = CASE WHEN v.drop_eps AND v.drop_revenue THEN NULL" in sql, column
 
-    def test_it_runs_before_the_status_is_recomputed(self):
-        # The provenance UPDATE derives `date_status` from the stored actuals, so a
-        # retraction applied after it would leave the row saying `reported`.
+    def test_the_withdrawal_is_settled_after_the_whole_payload_is_read(self):
+        # Deciding per batch let an event in one batch blank a value another batch
+        # had just stated: the row flapped between reported and scheduled every run.
         source = Path(sync_earnings.__file__).read_text(encoding="utf-8")
-        body = source[source.index("def flush_batch("):source.index("def _count_unlabeled_keys")]
-        retraction_at = body.index("_RETRACTION_SQL")
-        status_at = body.index("date_status = CASE WHEN (e.eps_actual IS NOT NULL")
+        loop = source[source.index("for market in [\"US\", \"HK\"]:"):source.index("if run_stats.unresolved:")]
+        final_flush = loop.index('f"{market} final batch"')
+        retract_at = loop.index("_retract(run_stats, retractions, stated)")
 
-        assert retraction_at < status_at
+        assert final_flush < retract_at
 
 
 class WiringTests(TestCase):
-    """The batch's withdrawals have to reach the flush that writes the batch."""
+    """The market's withdrawals are applied through one statement after its pages."""
 
-    def test_the_run_counters_see_what_the_flush_retracted(self):
+    class _Cursor:
+        def __init__(self, cleared):
+            self.cleared = cleared
+            self.calls = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def execute(self, sql, params=None):
+            self.calls.append(" ".join(str(sql).split()))
+
+        def fetchone(self):
+            return {"n": 0}
+
+    def test_the_run_records_what_was_cleared(self):
         stats = sync_earnings.SyncStats()
-        seen = {}
+        cursor = self._Cursor([
+            {"symbol": "BBAR", "market": "US",
+             "report_date": "2026-11-24", "report_type": "Q"},
+        ])
+        withdrawn = {("BBAR", "US", "2026-11-24", "Q"): {"eps": False, "revenue": True}}
 
-        class _Cursor:
-            def __enter__(self):
-                return self
+        with patch.object(sync_earnings, "db_cursor", lambda *a, **k: cursor), \
+                patch.object(sync_earnings, "apply_retractions",
+                             side_effect=lambda cur, effective: [
+                                 "BBAR.US 2026-11-24 Q"]):
+            sync_earnings._retract(stats, withdrawn, {})
 
-            def __exit__(self, *exc):
-                return False
-
-            def execute(self, sql, params=None):
-                self.sql = " ".join(str(sql).split())
-
-            def fetchone(self):
-                return {"n": 0}
-
-        def fake_flush(cur, rows, retractions=None):
-            seen["retractions"] = retractions
-            return sync_earnings.FlushStats(rows=len(rows), retracted=1)
-
-        batch = [
-            ("BBAR", "US", "BBAR", "2026-11-24", "Q", 2026, 3, None, 1.9, None, 1_369_164_371,
-             "after", "USD", "USD", "longbridge", "longbridge"),
-        ]
-        withdrawals = {("BBAR", "US", "2026-11-24", "Q"): {"eps": False, "revenue": True}}
-
-        with patch.object(sync_earnings, "db_cursor", lambda *a, **k: _Cursor()), \
-                patch.object(sync_earnings, "flush_batch", side_effect=fake_flush):
-            sync_earnings._flush_batch(stats, batch, "test batch", withdrawals)
-
-        assert seen["retractions"] == withdrawals, "the withdrawal must reach the flush"
         assert stats.retracted == 1
-        assert stats.written == 1
+        assert stats.retracted_keys == ["BBAR.US 2026-11-24 Q"]
+
+    def test_a_contradicted_withdrawal_issues_no_statement(self):
+        stats = sync_earnings.SyncStats()
+        withdrawn = {("GLRE", "US", "2026-08-04", "Q"): {"eps": True, "revenue": True}}
+        stated = {("GLRE", "US", "2026-08-04", "Q"): {"eps": True, "revenue": True}}
+
+        with patch.object(sync_earnings, "db_cursor") as cursor:
+            sync_earnings._retract(stats, withdrawn, stated)
+
+        cursor.assert_not_called()
+        assert stats.retracted == 0
 
     def test_the_details_carry_the_count(self):
         details = sync_earnings.SyncStats(written=10, retracted=2).quality().to_dict()
 
         assert details["retracted"] == 2
+
 
 class TheCrossProviderGuardTests(TestCase):
     """A provider may only withdraw the value it supplied (Issue #91's principle).
