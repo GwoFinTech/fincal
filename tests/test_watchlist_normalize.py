@@ -7,6 +7,7 @@ the write paths (Issue #66): a code from an exchange FinCal has no calendar for
 must never be presented as a US ticker, and the write paths must refuse to
 persist one under a market it does not belong to.
 """
+import logging
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -17,7 +18,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from app import db  # noqa: E402
-from app.symbol import bare_ticker, market_mismatch, market_of, normalize  # noqa: E402
+from app.symbol import (  # noqa: E402
+    bare_ticker, market_mismatch, market_of, normalize, normalize_user_symbol,
+)
 from app.admin_watchlist import normalize_managed_symbol  # noqa: E402
 from app.auth import get_current_user  # noqa: E402
 from app.main import app  # noqa: E402
@@ -107,6 +110,153 @@ def test_legacy_watchlist_migration_is_present():
     sql = " ".join(str(value) for value in source)
     assert "canonical_symbol" in sql
     assert "ROW_NUMBER" in sql
+
+
+# ── Issue #117: one validation contract for both user write paths ────────
+
+def test_user_symbol_entry_point_refuses_a_decorated_numeric_code():
+    """``0700.US`` reads as US to the guard, then normalizes to bare digits."""
+    import pytest
+
+    for symbol in ("0700.US", "US.0700", "us.0700", " 0700.us "):
+        with pytest.raises(ValueError, match="symbol_market_mismatch"):
+            normalize_user_symbol(symbol, "US")
+
+
+def test_user_symbol_entry_point_requires_a_code():
+    import pytest
+
+    for symbol in ("", "   ", None):
+        for market in ("US", "HK", "us", " hk "):
+            with pytest.raises(ValueError, match="symbol_required"):
+                normalize_user_symbol(symbol, market)
+
+
+def test_user_symbol_entry_point_rejects_an_unsupported_market():
+    import pytest
+
+    for market in ("SZ", "SH", "", None, "US.HK"):
+        with pytest.raises(ValueError, match="invalid_market"):
+            normalize_user_symbol("AAPL", market)
+
+
+def test_user_symbol_entry_point_keeps_the_canonical_spellings():
+    assert normalize_user_symbol("AAPL.US", "us") == ("AAPL", "US")
+    assert normalize_user_symbol("US.AAPL", "US") == ("AAPL", "US")
+    assert normalize_user_symbol("700", "HK") == ("0700.HK", "HK")
+    assert normalize_user_symbol("0700.HK", "hk") == ("0700.HK", "HK")
+    # The wrong-market and unservable shapes are still refused, not guessed.
+    for symbol, market in (("600028.SH", "US"), ("0700", "US"), ("AAPL", "HK")):
+        try:
+            normalize_user_symbol(symbol, market)
+        except ValueError as exc:
+            assert str(exc) == "symbol_market_mismatch", (symbol, market)
+        else:  # pragma: no cover - a silent accept is the bug
+            raise AssertionError(f"{symbol}/{market} must be refused")
+
+
+def test_write_paths_answer_400_for_an_empty_or_decorated_code(caplog):
+    """Neither path may 500, and POST may not store an unservable row."""
+    executed: list[str] = []
+    app.dependency_overrides = {get_current_user: lambda: {"id": 1, "email": "t@t.com", "name": "T", "role": "user"}}
+    try:
+        with patch.object(db, "db_cursor", lambda: _RecordingConn(executed)):
+            client = TestClient(app, raise_server_exceptions=False)
+
+            with caplog.at_level(logging.ERROR, logger="app.errors"):
+                for market in ("US", "HK"):
+                    for symbol in ("", "%20%20"):
+                        resp = client.post(f"/api/watchlist?symbol={symbol}&market={market}")
+                        assert resp.status_code == 400, (symbol, market, resp.text)
+                        assert resp.json()["error"]["code"] == "symbol_required", resp.text
+                        assert "internal_error" not in resp.text
+
+                    for symbol in ("0700.US", "US.0700"):
+                        for method in ("post", "delete"):
+                            resp = getattr(client, method)(
+                                f"/api/watchlist?symbol={symbol}&market={market}"
+                                if market == "US" else f"/api/watchlist?symbol={symbol}&market=US"
+                            )
+                            assert resp.status_code == 400, (method, symbol, resp.text)
+                            assert resp.json()["error"]["code"] == "symbol_market_mismatch", resp.text
+                            assert "internal_error" not in resp.text
+
+            unhandled = [r.getMessage() for r in caplog.records if "unhandled error on" in r.getMessage()]
+            assert unhandled == [], unhandled
+            writes = [s for s in executed if "INSERT INTO watchlist" in s or s.startswith("DELETE FROM watchlist")]
+            assert writes == [], writes
+
+            # The correct spellings still reach the database untouched.
+            assert client.post("/api/watchlist?symbol=AAPL.US&market=US").status_code == 200
+            assert client.post("/api/watchlist?symbol=0700&market=HK").status_code == 200
+            rejected = client.post("/api/watchlist?symbol=600028.SH&market=US")
+            assert rejected.status_code == 400
+            assert rejected.json()["error"]["code"] == "symbol_market_mismatch"
+    finally:
+        app.dependency_overrides = {}
+
+
+class _InitCursor:
+    """Cursor good enough for ``init_db()``: records SQL, counts what it is told."""
+
+    def __init__(self, executed, rowcount):
+        self._executed = executed
+        self.rowcount = rowcount
+        self._rowcount = rowcount
+
+    def execute(self, sql, params=None):
+        self._executed.append(" ".join(str(sql).split()))
+        self.rowcount = self._rowcount
+
+    def fetchone(self):
+        # ``unservable_numeric_rows`` reads ``["n"]``, the fiscal-identity probe
+        # reads ``["groups"]``; both answer "nothing found".
+        return {"n": 0, "groups": 0}
+
+    def fetchall(self):
+        return []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class _InitConn:
+    """Connection handing the same recording cursor to every ``db_cursor()``."""
+
+    def __init__(self, executed, rowcount):
+        self._cursor = _InitCursor(executed, rowcount)
+
+    def cursor(self, **kw):
+        return self._cursor
+
+    def __enter__(self):
+        return self._cursor
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_init_db_removes_rows_whose_symbol_is_empty(caplog):
+    """A blank code stored by the old POST path must not survive startup."""
+    executed: list[str] = []
+
+    with caplog.at_level(logging.INFO, logger="app.db"):
+        with patch.object(db, "db_cursor", lambda *a, **kw: _InitConn(executed, 2)):
+            db.init_db()
+            db.init_db()
+
+    purge = [s for s in executed if s.startswith("DELETE FROM watchlist WHERE btrim(symbol)")]
+    assert len(purge) == 2, executed  # once per init_db(), i.e. idempotent
+    assert "UPPER(btrim(symbol)) = '.HK'" in purge[0], purge[0]
+    assert "DELETE" not in purge[0].split("WHERE", 1)[1].upper().replace("'", ""), \
+        "the purge must only match an empty symbol, never a real code"
+
+    messages = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert any("removed watchlist rows with an empty symbol: removed=2" in m for m in messages), messages
+
 
 
 # ── Issue #66: one market decision for read, sync and write paths ────────

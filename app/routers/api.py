@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from datetime import date, timedelta
 from ..auth import get_current_user, ensure_user
 from .. import db, config
-from ..symbol import normalize, sort_key, market_mismatch, resolve_stored_rows
+from ..symbol import normalize, normalize_user_symbol, sort_key, resolve_stored_rows
 from ..layer_cache import LayerCache
 from ..errors import AppError, NotFoundError, ForbiddenError
 from ..schemas import (
@@ -50,6 +50,28 @@ def invalidate_calendar_caches() -> None:
       own watchlist symbols in, Issue #72).
     """
     _earnings_cache.invalidate()
+
+
+def _watchlist_key(symbol: str, market: str) -> tuple[str, str]:
+    """Canonical ``(symbol, market)`` for a user watchlist write (Issue #117).
+
+    Both write paths shared a hand-written guard and then called ``normalize``,
+    and the two disagreed about ``0700.US`` (guard: US, normalizer: a bare
+    numeric code) — the uncaught ``ValueError`` became a 500.  The decision now
+    lives in one place, and every refusal carries a stable, language-neutral
+    code with a 400 (the same codes ``DELETE`` already answered, so no client
+    contract changes for an input it already handled).
+    """
+    try:
+        return normalize_user_symbol(symbol, market)
+    except ValueError as exc:
+        code = str(exc) or "invalid_symbol"
+        details = {
+            "invalid_market": "market must be US or HK",
+            "symbol_required": "symbol is required",
+            "symbol_market_mismatch": "symbol suffix does not match the requested market",
+        }.get(code, "invalid symbol")
+        raise AppError(code, details, 400) from None
 
 
 def _validate_window(start: date, end: date) -> None:
@@ -120,19 +142,10 @@ def api_watchlist(user=Depends(get_current_user)):
 def api_add_watchlist(symbol: str, market: str = "US", user=Depends(get_current_user)):
     """Add a stock to watchlist."""
     fincal_user = ensure_user(user["id"], user["email"], user["name"])
-    market = market.strip().upper()
-    if market not in ("US", "HK"):
-        raise AppError("invalid_market", "market must be US or HK", 400)
-    # A code carrying another exchange's suffix cannot be stored under ``US``:
-    # it would never match an earnings row (the sync skips it every week), so the
-    # watchlist entry would show an empty row forever (Issue #66).
-    if market_mismatch(symbol, market):
-        raise AppError(
-            "symbol_market_mismatch",
-            "symbol suffix does not match the requested market",
-            400,
-        )
-    normalized = normalize(symbol, market)
+    # One validation contract for both write paths (Issue #117): the guard and
+    # the normalizer must agree, every refusal is a client error with a stable
+    # code, and an empty code can never become a stored row.
+    normalized, market = _watchlist_key(symbol, market)
     with db.db_cursor() as cur:
         cur.execute(
             """INSERT INTO watchlist (user_id, symbol, market) VALUES (%s, %s, %s)
@@ -156,21 +169,10 @@ def api_add_watchlist(symbol: str, market: str = "US", user=Depends(get_current_
 def api_remove_watchlist(symbol: str, market: str = "US", user=Depends(get_current_user)):
     """Remove a stock from watchlist."""
     fincal_user = ensure_user(user["id"], user["email"], user["name"])
-    market = market.strip().upper()
-    # Same guard order as api_add_watchlist (Issues #66/#108): a request that
-    # cannot name a stored row is a client error (400), not a 500 from
-    # ``normalize()`` raising ``ValueError``, and not a silent 200 either.
-    if market not in ("US", "HK"):
-        raise AppError("invalid_market", "market must be US or HK", 400)
-    if not symbol.strip():
-        raise AppError("symbol_required", "symbol is required", 400)
-    if market_mismatch(symbol, market):
-        raise AppError(
-            "symbol_market_mismatch",
-            "symbol suffix does not match the requested market",
-            400,
-        )
-    normalized = normalize(symbol, market)
+    # Same contract as POST (Issues #66/#108/#117): a request that cannot name a
+    # stored row is a client error (400), not a 500 from ``normalize()`` raising
+    # ``ValueError``, and not a silent 200 either.
+    normalized, market = _watchlist_key(symbol, market)
     with db.db_cursor() as cur:
         cur.execute(
             "DELETE FROM watchlist WHERE user_id = %s AND symbol = %s AND market = %s",

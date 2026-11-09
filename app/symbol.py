@@ -202,6 +202,46 @@ def market_mismatch(symbol: str, market: str) -> bool:
     return False
 
 
+# ── User write-path entry point (Issue #117) ───────────────────────
+
+def normalize_user_symbol(symbol: str | None, market: str | None) -> tuple[str, str]:
+    """Canonical ``(symbol, market)`` for a code a *user* asked to store.
+
+    ``POST`` and ``DELETE /api/watchlist`` each used to run their own guard and
+    then call :func:`normalize`, and the two answered differently: for
+    ``0700.US`` :func:`market_mismatch` reads the suffix (US) and lets it
+    through, then ``normalize`` strips the suffix, sees a bare numeric code and
+    raises — an unhandled ``ValueError``, so the user got a 500
+    ``internal_error`` (and the log a full stack) for a spelling the
+    normalizer's own docstring advertises.  An empty code was never refused at
+    all: ``POST`` stored ``''`` under US, and ``''`` under HK became ``'.HK'``
+    because ``normalize`` appends the suffix — rows no reader can serve and
+    that ``DELETE`` (the only path that did check ``symbol_required``) could not
+    remove.
+
+    One entry point, one contract, the same shape the admin form already has
+    (:func:`app.admin_watchlist.normalize_managed_symbol`), with the codes the
+    user-facing query API reports: ``invalid_market`` / ``symbol_required`` /
+    ``symbol_market_mismatch``.  It refuses rather than guesses: ``0700.US`` is
+    not rewritten to ``0700.HK``, matching the read paths, which do not invent a
+    market for a stored row either (Issue #108).
+    """
+    m = str(market or "").strip().upper()
+    if m not in SERVED_MARKETS:
+        raise ValueError("invalid_market")
+    s = str(symbol or "").strip()
+    if not s:
+        raise ValueError("symbol_required")
+    if market_mismatch(s, m):
+        raise ValueError("symbol_market_mismatch")
+    try:
+        return normalize(s, m), m
+    except ValueError:
+        # ``normalize`` refuses shapes ``market_mismatch`` lets through
+        # (``0700.US`` reads as market US, then normalizes to bare digits).
+        raise ValueError("symbol_market_mismatch") from None
+
+
 # ── Stored (already-persisted) rows ────────────────────────────────
 
 def resolve_stored(symbol: str, market: str) -> tuple[str, str] | None:

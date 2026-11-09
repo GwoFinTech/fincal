@@ -335,7 +335,12 @@ watchlist_entry_not_found` when the row does not exist, instead of a false
 startup (`US.AAPL` / `aapl` → `AAPL`, a numeric code stored under `US` such as
 `0700` → `0700.HK` / `HK`; a six-digit Shenzhen fund code is never guessed and
 only counted in the log line `converged legacy numeric US watchlist rows`). A
-read path never raises on a stored row it cannot serve: `/api/earnings` and
+blank code is refused by both write paths with `400 symbol_required` — it used
+to be stored as `''` (US) or `'.HK'` (HK), and startup now deletes such rows
+(log line `removed watchlist rows with an empty symbol`). Neither write path
+guesses a market: `0700.US` / `US.0700` answer `400 symbol_market_mismatch`
+instead of becoming `0700.HK`. A read path never raises on a stored row it
+cannot serve: `/api/earnings` and
 `/ical/{token}?scope=watchlist` skip it and log one warning with the
 `symbol/market` pair, so one legacy row cannot take down a whole calendar or
 subscription.

@@ -579,6 +579,24 @@ def init_db():
                 rewritten_numeric_rows, removed_numeric_duplicates,
                 unservable_numeric_rows,
             )
+        # Empty codes were stored by the pre-#117 POST path, which rejected
+        # nothing: ``symbol=''`` landed under US as-is, and under HK as ``'.HK'``
+        # because ``normalize`` appends the suffix.  No reader can serve such a
+        # row and DELETE refused it with ``symbol_required``, so it is the same
+        # unremovable ghost row as #108 — deleted here, where the other legacy
+        # spellings converge.  The condition is the whole symbol being empty
+        # (or exactly the ``'.HK'`` a blank HK code produced), so no real code
+        # can match; the count is logged so the deletion can be reconciled.
+        cur.execute("""
+            DELETE FROM watchlist
+            WHERE btrim(symbol) = '' OR UPPER(btrim(symbol)) = '.HK'
+        """)
+        removed_empty_symbol_rows = cur.rowcount
+        if removed_empty_symbol_rows:
+            logger.info(
+                "removed watchlist rows with an empty symbol: removed=%d",
+                removed_empty_symbol_rows,
+            )
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS managed_watchlist (
