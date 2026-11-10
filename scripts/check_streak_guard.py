@@ -38,9 +38,10 @@ from app.phase3 import build_decision_metrics  # noqa: E402
 from app.universe import popular_stocks  # noqa: E402
 
 #: The decision path's history projection — it must stay identical to the query
-#: in ``app/routers/api.py`` (``test_the_acceptance_check_reads_what_the_endpoint_reads``
-#: locks the two together), because a missing attribution column silently turns
-#: the rule into ``currency_unknown``.
+#: in ``app/earnings.py`` (``fetch_earning_with_history``;
+#: ``test_the_acceptance_check_reads_what_the_endpoint_reads`` locks the two
+#: together), because a missing attribution column silently turns the rule into
+#: ``currency_unknown``.
 HISTORY_COLUMNS = (
     "id,fiscal_year,fiscal_quarter,report_date,eps_actual,revenue_actual,"
     "eps_estimate,estimate_currency,estimate_basis,estimate_source,"

@@ -197,6 +197,24 @@ def _beat_miss_streak(rows, fiscal_year: int, fiscal_quarter: int) -> dict:
     }
 
 
+def _unavailable_metrics(reason: str, fiscal_year: int, fiscal_quarter: int) -> dict:
+    """Every derived metric withheld for one stated cause, at ``count`` 0.
+
+    Issue #118: an unreleased quarter has no actual to compare against, so the
+    four ratios and the streak report the same language-independent reason the
+    rest of the panel reports — never an unexplained "—" (missing data) and never
+    a percentage built from a number the list withholds.
+    """
+    growth = _unavailable_growth()
+    for key, _metric, _span in GROWTH_METRICS:
+        growth[f"{key}_reason"] = reason
+    return {
+        "actual_growth": growth,
+        "beat_miss_streak": _no_streak(reason, {"fiscal_year": fiscal_year, "fiscal_quarter": fiscal_quarter}),
+        "price_reaction": {"status": "unavailable", "reason": "no_reliable_provider_configured", "source": None},
+    }
+
+
 def build_decision_metrics(rows, earning_id):
     """Calculate actual-only growth and contiguous EPS beat/miss streak for one earning."""
     by_id = {row.get("id"): row for row in rows}
@@ -205,6 +223,15 @@ def build_decision_metrics(rows, earning_id):
     if not current or not current.get("fiscal_year") or not current.get("fiscal_quarter"):
         return {"actual_growth": unavailable, "beat_miss_streak": _no_streak(), "price_reaction": {"status": "unavailable", "reason": "no_reliable_provider_configured", "source": None}}
     fy, fq = int(current["fiscal_year"]), int(current["fiscal_quarter"])
+    # Issue #118: the panel is opened on an event whose report date has not
+    # arrived. Its actuals are masked at the read boundary, and the derived
+    # metrics now say so too, instead of counting a not-yet-published quarter as
+    # a beat and printing 「超预期 4 季」 under a row that reads 「报告尚未发生」.
+    # Read from the (masked) row, so an unmasked future row cannot publish a
+    # number either.
+    unreleased = fiscal.unreleased_actuals_reason(current)
+    if unreleased:
+        return _unavailable_metrics(unreleased, fy, fq)
     lookup = _period_lookup(rows, earning_id)
     yoy = lookup.get((fy - 1, fq))
     qoq = lookup.get((fy - 1, 4) if fq == 1 else (fy, fq - 1))

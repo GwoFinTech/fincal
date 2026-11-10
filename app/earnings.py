@@ -117,6 +117,47 @@ def fetch_earnings_from_db(
     return rows
 
 
+def fetch_earning_with_history(earning_id: int) -> tuple[dict | None, list[dict]]:
+    """Read one earning **and** the symbol's period history through the read boundary.
+
+    Issue #118: ``/api/earnings/{id}/decision`` used to run its own
+    ``SELECT * FROM earnings WHERE id=%s`` and hand the raw row to
+    :func:`app.phase3.build_decision_metrics`, so it was the one outlet that never
+    met :func:`app.fiscal.hide_unreleased_actuals` — the panel printed
+    「报告尚未发生」 in the row and 「超预期 4 季 / +185.7% 环比」 underneath it.
+
+    Both the row the panel is open on and the history it is compared against now
+    take the same rule as the calendar, the two exports and the iCal feed, from
+    the same database day (``CURRENT_DATE``), so a derived metric can never read
+    a number the list withholds.
+    """
+    from . import db, fiscal
+
+    with db.db_cursor() as cur:
+        cur.execute(
+            "SELECT e.*, CURRENT_DATE AS read_today FROM earnings e WHERE e.id=%s",
+            (earning_id,),
+        )
+        earning = cur.fetchone()
+        if not earning:
+            return None, []
+        earning = dict(earning)
+        # The decision metrics judge comparability from the row's own attribution
+        # (Issues #61/#63/#64), so the history query must carry both sides of it:
+        # without estimate_* the row-level rule degrades to currency_unknown and
+        # every streak would read as unmatched (Issue #64 §4).
+        cur.execute("SELECT id,fiscal_year,fiscal_quarter,report_date,eps_actual,revenue_actual,eps_estimate,estimate_currency,estimate_basis,estimate_source,actual_currency,actual_basis,actual_source FROM earnings WHERE symbol=%s AND market=%s ORDER BY report_date", (earning["symbol"], earning["market"]))
+        history = [dict(row) for row in cur.fetchall()]
+
+    # One clock for both reads: the row's own ``CURRENT_DATE``, the same day the
+    # calendar path and the sync use (Issues #111/#118).
+    read_today = earning.pop("read_today", None)
+    masked = fiscal.hide_unreleased_actuals([earning] + history, read_today)
+    if masked:
+        logger.debug("masked %d future-dated actual(s) on the decision read path", masked)
+    return earning, history
+
+
 def seed_earnings_if_empty():
     """Seed DB with earnings data if empty — best effort, never fatal (Issue #74).
 

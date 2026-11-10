@@ -595,6 +595,16 @@ def has_unreleased_actuals(row, today=None) -> bool:
     return row.get("eps_actual") is not None or row.get("revenue_actual") is not None
 
 
+def unreleased_actuals_reason(row) -> str | None:
+    """The reason code a withheld actual carries, or ``None`` when nothing is withheld.
+
+    ``report_date_in_future`` means the row's numbers were masked at the read
+    boundary (Issues #111/#118): there is no actual to report, so every derived
+    metric has to state the same cause instead of looking like missing data.
+    """
+    return COMPARISON_REPORT_DATE_IN_FUTURE if has_unreleased_actuals(row) else None
+
+
 def hide_unreleased_actuals(rows, today=None) -> int:
     """Mask the actuals of future-dated rows in place; return how many were masked.
 

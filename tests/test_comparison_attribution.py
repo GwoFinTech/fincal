@@ -805,16 +805,25 @@ class DecisionGrowthContractTests(TestCase):
         })
 
     def test_the_endpoint_reads_the_attribution_it_judges(self):
-        """The history query must carry the columns the rule reads."""
-        source = (ROOT / "app" / "routers" / "api.py").read_text(encoding="utf-8")
+        """The history query must carry the columns the rule reads.
+
+        Issue #118 moved the projection out of the endpoint and into the shared
+        read entry point (``app.earnings.fetch_earning_with_history``), so the
+        check follows it there — and pins that the endpoint still delegates,
+        because a query nothing calls would satisfy a source scan.
+        """
+        source = (ROOT / "app" / "earnings.py").read_text(encoding="utf-8")
         history_query = next(line for line in source.splitlines()
                              if "FROM earnings WHERE symbol=%s AND market=%s" in line)
         for field in ("actual_currency", "actual_basis", "actual_source"):
             self.assertIn(field, history_query, f"the growth rule needs {field} in the history query")
+        endpoint_source = (ROOT / "app" / "routers" / "api.py").read_text(encoding="utf-8")
+        self.assertIn("fetch_earning_with_history", endpoint_source,
+                      "the decision endpoint must read through the shared entry point")
 
     def test_the_history_query_carries_both_sides_of_the_attribution(self):
         """Issue #64: the streak reads the estimate side too, so it must be sent."""
-        source = (ROOT / "app" / "routers" / "api.py").read_text(encoding="utf-8")
+        source = (ROOT / "app" / "earnings.py").read_text(encoding="utf-8")
         history_query = next(line for line in source.splitlines()
                              if "FROM earnings WHERE symbol=%s AND market=%s" in line)
         for field in ("estimate_currency", "estimate_basis", "estimate_source"):
@@ -1040,7 +1049,7 @@ class StreakAcceptanceCheckTests(TestCase):
 
     def test_the_acceptance_check_reads_what_the_endpoint_reads(self):
         """A missing attribution column would silently disable the whole rule."""
-        source = (ROOT / "app" / "routers" / "api.py").read_text(encoding="utf-8")
+        source = (ROOT / "app" / "earnings.py").read_text(encoding="utf-8")
         query = next(line for line in source.splitlines()
                      if "FROM earnings WHERE symbol=%s AND market=%s" in line)
         projected = query.split("SELECT", 1)[1].split(" FROM", 1)[0]

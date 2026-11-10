@@ -267,21 +267,17 @@ def api_earnings(
 @router.get("/earnings/{earning_id}/decision", response_model=DecisionResponse)
 def api_earning_decision(earning_id: int, user=Depends(get_current_user)):
     """Decision-support facts with source-specific unavailable states, never synthetic values."""
+    from ..earnings import fetch_earning_with_history
     from ..phase3 import build_decision_metrics, revision_trend
 
     ensure_user(user["id"], user["email"], user["name"])
+    # Issue #118: the row and its history come from the same read boundary as the
+    # calendar, both exports and the iCal feed, so this panel can neither publish
+    # an actual the list withholds nor count a quarter that has not reported.
+    earning, history = fetch_earning_with_history(earning_id)
+    if not earning:
+        raise NotFoundError("earning")
     with db.db_cursor() as cur:
-        cur.execute("SELECT * FROM earnings WHERE id=%s", (earning_id,))
-        earning = cur.fetchone()
-        if not earning:
-            raise NotFoundError("earning")
-        earning = dict(earning)
-        # The decision metrics judge comparability from the row's own attribution
-        # (Issues #61/#63/#64), so the history query must carry both sides of it:
-        # without estimate_* the row-level rule degrades to currency_unknown and
-        # every streak would read as unmatched (Issue #64 §4).
-        cur.execute("SELECT id,fiscal_year,fiscal_quarter,report_date,eps_actual,revenue_actual,eps_estimate,estimate_currency,estimate_basis,estimate_source,actual_currency,actual_basis,actual_source FROM earnings WHERE symbol=%s AND market=%s ORDER BY report_date", (earning["symbol"], earning["market"]))
-        history = [dict(row) for row in cur.fetchall()]
         cur.execute("SELECT captured_at,eps_estimate,revenue_estimate,source FROM earnings_estimate_snapshots WHERE earning_id=%s ORDER BY captured_at", (earning_id,))
         snapshots = [dict(row) for row in cur.fetchall()]
         cur.execute("SELECT currency_symbol,target_price,strong_buy,buy,hold,underperform,sell,recommendation,provider_updated_at,fetched_at,source FROM earnings_institution_ratings WHERE symbol=%s AND market=%s AND source='longbridge'", (earning["symbol"], earning["market"]))
