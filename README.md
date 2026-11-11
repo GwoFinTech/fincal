@@ -716,7 +716,7 @@ Run it by hand with `python3 scripts/check_service_health.py`; it is read-only
 ## Tech Stack
 
 - **Backend:** Python 3.12, FastAPI, psycopg2, uvicorn
-- **Frontend:** Vue 3 (CDN), single-file HTML SPA
+- **Frontend:** Vue 3 (vendored prod build, no runtime CDN), single-file HTML SPA
 - **Database:** PostgreSQL 13+
 - **Deployment:** Docker Compose, Traefik v3
 - **Data:** Longbridge CLI, Futu OpenD API
