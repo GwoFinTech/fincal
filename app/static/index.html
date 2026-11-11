@@ -6,8 +6,12 @@
   <title>FinCal — 财报日历</title>
   <link rel="stylesheet" href="/assets/tailwind.css">
   <script src="/assets/vendor/vue.global.prod.js"></script>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <!-- No third-party subresources here (Issue #119), and no host name in this
+       comment either — scripts/deploy.sh greps the file for them. Inter used to
+       be linked as a Google Fonts stylesheet; a <link rel=stylesheet> in <head>
+       is render blocking, so when that host was unreachable the SPA never
+       painted at all (180s+, no DOM). Inter is now only used if the OS has it
+       installed — the stack below already falls back to the system CJK font. -->
   <style>
     * { font-family: -apple-system, 'Inter', 'Noto Sans CJK SC', system-ui, sans-serif; }
 

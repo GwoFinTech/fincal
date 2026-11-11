@@ -12,23 +12,28 @@ if [ -n "$(git -C "$SRC" status --porcelain)" ]; then
     echo "WARNING: working tree has uncommitted changes"
 fi
 
-# Frontend asset gate (Issue #42): the SPA must not depend on runtime CDNs.
-# The vendored Vue prod build and the prerendered Tailwind CSS are committed
-# artifacts; fail the deploy if they are missing/empty or if index.html still
-# references a runtime CDN (unpkg / cdn.tailwindcss.com). fonts.googleapis.com
-# is a progressive enhancement only (system-ui fallback), so it is allowed.
+# Frontend asset gate (Issue #42, tightened by #119): the SPA must not depend on
+# runtime CDNs. The vendored Vue prod build and the prerendered Tailwind CSS are
+# committed artifacts; fail the deploy if they are missing/empty or if index.html
+# references any off-site subresource. Fonts are included: the old
+# fonts.googleapis.com stylesheet was called a "progressive enhancement", but a
+# <link rel=stylesheet> in <head> is render blocking — when that host was
+# unreachable the page never painted. Only font *files* can degrade safely, and
+# they are not fetched from a third party either.
 VENDOR="$SRC/app/static/assets/vendor/vue.global.prod.js"
 FRONTEND_CSS="$SRC/app/static/assets/tailwind.css"
 INDEX_HTML="$SRC/app/static/index.html"
-echo "=== Frontend asset gate (Issue #42) ==="
+echo "=== Frontend asset gate (Issue #42/#119) ==="
 if [ ! -s "$VENDOR" ]; then
     echo "FAIL: vendor Vue prod build missing or empty: $VENDOR"; exit 1
 fi
 if [ ! -s "$FRONTEND_CSS" ]; then
     echo "FAIL: prerendered tailwind.css missing or empty: $FRONTEND_CSS"; exit 1
 fi
-if grep -qE 'unpkg\.com|cdn\.tailwindcss\.com' "$INDEX_HTML"; then
-    echo "FAIL: index.html still references a runtime CDN (unpkg/cdn.tailwindcss.com)"; exit 1
+if grep -qE 'fonts\.(googleapis|gstatic)\.com|unpkg\.com|cdn\.tailwindcss\.com' "$INDEX_HTML"; then
+    echo "FAIL: index.html references a third-party runtime asset (fonts.googleapis.com / fonts.gstatic.com / unpkg.com / cdn.tailwindcss.com)"
+    grep -nE 'fonts\.(googleapis|gstatic)\.com|unpkg\.com|cdn\.tailwindcss\.com' "$INDEX_HTML"
+    exit 1
 fi
 echo "Frontend assets OK"
 
