@@ -504,6 +504,17 @@ def advisory_lock(lock_key: int, *, timeout: float = 0) -> Iterator[bool]:
     released automatically when the context exits, including on abnormal exit.
     """
     with db.db_connection() as conn:
+        # The lock has to outlive the whole stage on ONE session, and a psycopg2
+        # connection opens a transaction on the first ``execute`` — so the session
+        # sat "idle in transaction" for the entire run and the server killed it at
+        # ``idle_in_transaction_session_timeout`` (15 s in production). The advisory
+        # lock went with it: every stage silently lost its mutual exclusion ~15 s
+        # after acquiring it while the process still believed it held the lock, and
+        # the unlock at the end raised ``server closed the connection unexpectedly``
+        # (measured: an 11-minute Futu backfill, after ``finish_run`` had recorded
+        # success). Autocommit leaves the session merely idle, so the lock survives
+        # the stage; verified against the production server (still held at +160 s).
+        conn.autocommit = True
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             if timeout > 0:
                 cur.execute("SET lock_timeout = %s", (int(timeout * 1000),))
@@ -520,8 +531,18 @@ def advisory_lock(lock_key: int, *, timeout: float = 0) -> Iterator[bool]:
             yield acquired
         finally:
             if acquired:
-                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                    cur.execute("SELECT pg_advisory_unlock(%s)", (lock_key,))
+                try:
+                    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                        cur.execute("SELECT pg_advisory_unlock(%s)", (lock_key,))
+                except psycopg2.Error as exc:
+                    # A session that died released its advisory locks server-side,
+                    # so the stage was protected for less time than it believed —
+                    # but the work is already committed, and turning that into an
+                    # exception fails a stage that recorded its result successfully.
+                    logger.warning(
+                        "advisory unlock on lock %s failed (the session already "
+                        "released it): %s", lock_key, exc,
+                    )
 
 
 # Lock keys for different sync stages (must be stable, unique per resource)
