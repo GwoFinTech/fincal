@@ -821,7 +821,7 @@ def sync_earnings_dates(ctx, run_id: int, symbols: list[str],
     stats = stats if stats is not None else FutuStageStats()
     limiter = get_rate_limiter()
     batch = []
-    cutoff = date.today() - timedelta(days=365)
+    cutoff = date.today() - timedelta(days=config.SYNC_FUTU_LOOKBACK_DAYS)
     # Issue #78: the stage is budgeted 1500s and its row must reflect real
     # progress, so the reaper ages it from a live heartbeat rather than from its
     # start (throttled to one write per minute, not one per symbol).
@@ -934,7 +934,7 @@ def sync_actuals(ctx, run_id: int, symbols: list[str],
                 futu_code, "IncomeStatement",
                 lambda: ctx.get_financials_statements(
                     futu_code, statement_type=FUTU_STATEMENT_INCOME,
-                    financial_type=9, num=4,
+                    financial_type=9, num=config.SYNC_FUTU_STATEMENT_PERIODS,
                 ),
                 limiter, stats,
                 timeout_seconds=config.FUTU_ACTUALS_TIMEOUT_SECONDS,

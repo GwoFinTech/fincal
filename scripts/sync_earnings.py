@@ -60,6 +60,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.db import db_cursor
 from app.symbol import from_lb_calendar_info, normalize
 from app.config import stage_timeout
+from app import config
 from app.sync_audit import check_cancelled, SyncCancelledError, HeartbeatThrottle
 from app.sync_quality import SyncQuality
 from app import fiscal
@@ -320,28 +321,100 @@ def next_calendar_cursor(api_next_date: str, last_report_date: str, current_star
 CALENDAR_PAGE_COUNT = 10000
 
 
-def fetch_calendar(market: str, start: str, end: str) -> list[dict]:
-    """Fetch all earnings calendar pages from Longbridge, paginating via next_date."""
+def _is_rate_limited(text: str) -> bool:
+    """True when a failed calendar call looks like the provider's quota answer.
+
+    Longbridge refuses with error ``429002`` and a message that varies by
+    localisation, so the check matches the code and the wording both ways round.
+    A refused call is *retryable* (wait and ask again); a malformed payload or a
+    pagination stall is not — retrying those only multiplies the failure.
+    """
+    lowered = (text or "").lower()
+    markers = ("429002", "429", "频率", "rate limit", "rate_limit", "too frequent",
+               "too many requests", "quota")
+    return any(marker in lowered for marker in markers)
+
+
+def fetch_calendar_page(market: str, start: str, end: str, *,
+                        interval_seconds: float | None = None,
+                        max_retries: int | None = None,
+                        sleep=None) -> dict:
+    """Run one calendar CLI call, paced and retried on a quota refusal.
+
+    Pacing is the point: a deep backfill is roughly one call per calendar day, so
+    the interval is what keeps the run under the provider's per-window limit
+    instead of tripping ``429002`` and failing the whole stage. A refusal waits
+    out an exponential backoff and asks again (the provider's answer to a burst
+    is transient); anything else raises immediately, as before.
+    """
+    import time as _time
+
+    pause = config.SYNC_CALENDAR_INTERVAL_SECONDS if interval_seconds is None else interval_seconds
+    retries = config.SYNC_CALENDAR_MAX_RETRIES if max_retries is None else max_retries
+    base = config.SYNC_CALENDAR_RETRY_BASE_SECONDS
+    do_sleep = sleep or _time.sleep
+    cmd = [
+        "longbridge", "finance-calendar", "report",
+        "--market", market,
+        "--start", start,
+        "--end", end,
+        "--count", str(CALENDAR_PAGE_COUNT),
+        "--format", "json",
+    ]
+    last_error = ""
+    for attempt in range(retries + 1):
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            if result.returncode != 0:
+                last_error = (result.stderr or result.stdout or "")[:300]
+                if _is_rate_limited(last_error) and attempt < retries:
+                    backoff = base * (2 ** attempt)
+                    logger.warning(
+                        "%s calendar refused (%s); waiting %.1fs before retry %d/%d",
+                        market, last_error.strip()[:120], backoff, attempt + 1, retries,
+                    )
+                    do_sleep(backoff)
+                    continue
+                raise RuntimeError(f"longbridge_cli_failed:{market}:{last_error[:200]}")
+            data = json.loads(result.stdout)
+        except RuntimeError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - classified below
+            text = str(exc)
+            if _is_rate_limited(text) and attempt < retries:
+                backoff = base * (2 ** attempt)
+                logger.warning("%s calendar error (%s); waiting %.1fs before retry %d/%d",
+                               market, text[:120], backoff, attempt + 1, retries)
+                do_sleep(backoff)
+                continue
+            raise
+        if pause:
+            do_sleep(pause)
+        return data
+    raise RuntimeError(f"longbridge_cli_failed:{market}:{last_error[:200]}")
+
+
+def fetch_calendar(market: str, start: str, end: str, *,
+                   interval_seconds: float | None = None) -> list[dict]:
+    """Fetch all earnings calendar pages from Longbridge, paginating via next_date.
+
+    Every call goes through :func:`fetch_calendar_page`, so a deep window is paced
+    and a quota refusal is retried instead of failing the stage (a 3-year backfill
+    is ~1,100 calls per market). ``max_iterations`` follows the window: the old
+    fixed 800 stopped a run that legitimately needed more pages, which on a deep
+    window would have truncated the history silently.
+    """
     all_pages = []
     cursor_start = start
     # Empty calendar days must be advanced explicitly: this endpoint does not
     # seek to the next non-empty day when ``start`` itself has no releases.
-    max_iterations = 800
+    window_days = max((date.fromisoformat(end) - date.fromisoformat(start)).days, 0)
+    max_iterations = max(800, window_days + 200)
 
     for i in range(max_iterations):
-        cmd = [
-            "longbridge", "finance-calendar", "report",
-            "--market", market,
-            "--start", cursor_start,
-            "--end", end,
-            "--count", str(CALENDAR_PAGE_COUNT),
-            "--format", "json",
-        ]
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-            if result.returncode != 0:
-                raise RuntimeError(f"longbridge_cli_failed:{market}:{i}:{result.stderr[:200]}")
-            data = json.loads(result.stdout)
+            data = fetch_calendar_page(market, cursor_start, end,
+                                       interval_seconds=interval_seconds)
         except Exception as exc:
             logger.error(f"Fetch error iteration {i}: {exc}")
             raise RuntimeError(f"longbridge_fetch_failed:{market}:{i}") from exc
@@ -1165,11 +1238,18 @@ def run_terminal_state(stats: SyncStats) -> tuple[str, str | None]:
     return ("success", None)
 
 
-def sync_earnings(run_id: int, stats: SyncStats | None = None) -> SyncStats:
+def sync_earnings(run_id: int, stats: SyncStats | None = None, *,
+                  lookback_days: int | None = None,
+                  interval_seconds: float | None = None) -> SyncStats:
     """Full sync with wide date range, batched inserts.
 
     ``run_id`` is polled at each market/batch checkpoint so an admin cancel
     stops the job promptly instead of burning the full API budget (Issue #28).
+
+    ``lookback_days`` overrides :data:`app.config.SYNC_LOOKBACK_DAYS` for this run
+    only (history backfill), and ``interval_seconds`` overrides the pacing between
+    calendar calls — a deep window is ~1 call per calendar day, so the quiet time
+    is what keeps it inside the provider's rate limit.
 
     Returns the run's :class:`SyncStats`: what was fetched, what each committed
     batch actually wrote, and the reschedule conflicts the identity guards
@@ -1178,7 +1258,8 @@ def sync_earnings(run_id: int, stats: SyncStats | None = None) -> SyncStats:
     counters of a run that ends in an exception.
     """
     today = date.today()
-    start = (today - timedelta(days=180)).isoformat()
+    depth = config.SYNC_LOOKBACK_DAYS if lookback_days is None else lookback_days
+    start = (today - timedelta(days=depth)).isoformat()
     end = (today + timedelta(days=365)).isoformat()
 
     run_stats = stats if stats is not None else SyncStats()
@@ -1197,7 +1278,10 @@ def sync_earnings(run_id: int, stats: SyncStats | None = None) -> SyncStats:
     for market in ["US", "HK"]:
         check_cancelled(run_id)
         logger.info(f"=== Fetching {market} earnings [{start} → {end}] ===")
-        pages = fetch_calendar(market, start, end)
+        # Only pass the pacing override when a run asked for one, so the default
+        # call keeps its exact signature (the sync tests stand in for it).
+        fetch_kwargs = {} if interval_seconds is None else {"interval_seconds": interval_seconds}
+        pages = fetch_calendar(market, start, end, **fetch_kwargs)
         run_stats.pages += len(pages)
         logger.info(f"  Total pages received: {len(pages)}")
         canonical_periods = build_fiscal_period_index(pages, closings)

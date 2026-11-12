@@ -208,6 +208,39 @@ ICAL_TOKEN_CACHE_TTL_SECONDS = max(1.0, float(os.getenv("ICAL_TOKEN_CACHE_TTL_SE
 # a prediction outside the window has no other channel to reach the subscriber.
 CALENDAR_FORWARD_DAYS = int(os.getenv("CALENDAR_FORWARD_DAYS", "420"))
 
+# Sync history depth and pacing.
+#
+# `SYNC_LOOKBACK_DAYS` is how far back the Longbridge calendar sync reaches. It
+# was a hard-coded 180 days, which caps a symbol's stored history at ~2–4
+# quarters — and a period ratio needs the same quarter one *year* earlier, so
+# 同比 was structurally unavailable for almost every row (measured 2026-11-12:
+# 4,150 of 9,989 symbols had exactly 4 past quarters, and only 634 periods in the
+# whole table had a prior-year counterpart). Raising it is a *read* of older
+# provider data, so the default stays 180 days (`sync_all.sh` unchanged) and a
+# one-off run passes `--lookback-days` / the environment variable instead.
+SYNC_LOOKBACK_DAYS = int(os.getenv("SYNC_LOOKBACK_DAYS", "180"))
+
+#: Futu's own history window (dates + actuals). Futu answers per symbol, so this
+#: is the depth of a symbol's stored history when Longbridge is unavailable.
+SYNC_FUTU_LOOKBACK_DAYS = int(os.getenv("SYNC_FUTU_LOOKBACK_DAYS", "365"))
+
+#: Report periods requested from one income-statement call. This is a parameter
+#: of a single call, not extra calls, so raising it costs no API budget — it only
+#: returns older periods (measured 2026-11-12: ``num=12`` gave AAPL 2024/Q1…2026/Q4
+#: and 0700.HK 2015/Q1…2026/Q2). The scheduled sync keeps 4 because the deeper
+#: periods can only land on rows that already exist, and the calendar window is
+#: 180 days; a history backfill pairs this with a deeper dates window.
+SYNC_FUTU_STATEMENT_PERIODS = int(os.getenv("SYNC_FUTU_STATEMENT_PERIODS", "4"))
+
+# The Longbridge calendar is one CLI call per page and the provider rate-limits
+# per window (error ``429002``). Backfilling years of history is ~1 call per
+# calendar day, so a deep run must be paced deliberately: `..._INTERVAL_SECONDS`
+# is the quiet time between calls, and a refused call is retried with
+# exponential backoff up to `..._MAX_RETRIES` before the stage fails.
+SYNC_CALENDAR_INTERVAL_SECONDS = float(os.getenv("SYNC_CALENDAR_INTERVAL_SECONDS", "0.5"))
+SYNC_CALENDAR_MAX_RETRIES = int(os.getenv("SYNC_CALENDAR_MAX_RETRIES", "4"))
+SYNC_CALENDAR_RETRY_BASE_SECONDS = float(os.getenv("SYNC_CALENDAR_RETRY_BASE_SECONDS", "5"))
+
 # Capacity and window bounds for the `/api/earnings` response cache (Issue #86).
 #
 # `LayerCache` used to be an unbounded dict: every distinct `start`/`end` a
