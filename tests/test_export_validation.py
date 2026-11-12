@@ -189,7 +189,10 @@ def test_export_csv_headers_include_provenance_and_consensus():
     app.dependency_overrides = {}
 
     assert csv_resp.status_code == 200, f"Expected 200, got {csv_resp.status_code}"
-    header_line = csv_resp.text.splitlines()[0]
+    # Issue #128: the CSV now opens with a UTF-8 BOM so Excel reads 中文 correctly.
+    # `utf-8-sig` is the decode that strips it — the same three bytes otherwise
+    # ride on the first field name (`\ufeffsymbol`), which is the recorded risk.
+    header_line = csv_resp.content.decode("utf-8-sig").splitlines()[0]
     headers = header_line.split(",")
     for f in ("date_source", "date_status", "estimate_source", "actual_source",
               "consensus_currency", "consensus_eps_gaap", "consensus_eps_adjusted",

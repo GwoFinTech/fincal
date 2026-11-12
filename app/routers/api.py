@@ -575,6 +575,11 @@ def api_export(start: date, end: date, format: Literal["csv", "json"] = "csv", u
         return data
 
     output = io.StringIO()
+    # Issue #128: Excel for Windows reads a BOM-less UTF-8 CSV through the local
+    # code page, so 「腾讯控股」 opens as mojibake unless the user goes through
+    # 导入 → 选择 UTF-8 every time. The BOM costs three bytes and every other
+    # reader (pandas, csv, LibreOffice) skips it.
+    output.write("\ufeff")
     writer = csv.writer(output)
     # Derive the column set from the actual rows so the CSV field set stays in
     # lockstep with the JSON export (which returns `data` verbatim). This keeps
