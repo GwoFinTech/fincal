@@ -32,6 +32,66 @@
   // MAX_FUTURE_DAYS = 420); tests/test_frontend_structure.py pins the match.
   const WATCHLIST_NEXT_WINDOW_DAYS = 420;
 
+  // ── 「本周财报」 digest (Issue #133) ────────────────────────────────
+  // The calendar's highest-frequency question is 「这周/下周谁要发」, which the
+  // month grid answers only by scanning 30+ cells. The digest is a second *view*
+  // of the batch the calendar already holds (displayed month ±1), never a second
+  // request — so its rows cannot disagree with the grid's.
+  const WEEK_AHEAD_DAYS = 7;
+  // A season peak carries 700+ events on a single date (2026-11-13: 709 US +
+  // 165 HK), so a digest that listed them all would be longer than the month it
+  // summarises. Per day: the first few plus an exact 「还有 N 场」 remainder that
+  // opens the day list, where the full set already renders.
+  const WEEK_AHEAD_MAX_PER_DAY = 5;
+  const WEEKDAY_LABELS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+  // 盘前 → 盘中 → 待定 → 盘后 is the order a trading day reads in.
+  const BEFORE_AFTER_RANK = { before: 0, during: 1, after: 3 };
+
+  // `YYYY-MM-DD` → `M/D`; built from the parts, never through `Date.parse`,
+  // which reads a bare date string as UTC and would shift the day (#46).
+  function monthDayLabel(ymd) {
+    const parts = String(ymd == null ? '' : ymd).split('-');
+    if (parts.length !== 3) return String(ymd == null ? '' : ymd);
+    return Number(parts[1]) + '/' + Number(parts[2]);
+  }
+  function monthDayWeekday(ymd) {
+    const parts = String(ymd == null ? '' : ymd).split('-');
+    if (parts.length !== 3) return monthDayLabel(ymd);
+    const date = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
+    if (Number.isNaN(date.getTime())) return monthDayLabel(ymd);
+    return monthDayLabel(ymd) + ' ' + WEEKDAY_LABELS[date.getDay()];
+  }
+
+  // Group the loaded rows into the next `WEEK_AHEAD_DAYS` days, one entry per
+  // date that has an event. `isMine` is the account's own-symbol predicate (or
+  // null for the whole system range); `gridDates` is the date set the calendar
+  // is currently rendering, which a 「还有 N 场」 remainder needs: the day panel
+  // it opens only exists for a rendered cell.
+  function weekAheadGroups(rows, today, horizonEnd, isMine, gridDates) {
+    const byDate = new Map();
+    for (const e of rows || []) {
+      const date = e && e.report_date;
+      if (!date || date < today || date > horizonEnd) continue;
+      if (isMine && !isMine(e)) continue;
+      if (!byDate.has(date)) byDate.set(date, []);
+      byDate.get(date).push(e);
+    }
+    const hasGrid = Boolean(gridDates && gridDates.has);
+    return [...byDate.keys()].sort().map(date => {
+      const all = byDate.get(date).slice().sort((a, b) =>
+        (BEFORE_AFTER_RANK[a.before_after] ?? 2) - (BEFORE_AFTER_RANK[b.before_after] ?? 2)
+        || String(a.symbol).localeCompare(String(b.symbol)));
+      return {
+        date,
+        label: monthDayWeekday(date),
+        total: all.length,
+        rows: all.slice(0, WEEK_AHEAD_MAX_PER_DAY),
+        more: Math.max(0, all.length - WEEK_AHEAD_MAX_PER_DAY),
+        inGrid: hasGrid ? Boolean(gridDates.has(date)) : false,
+      };
+    });
+  }
+
   // ══════════════════════════════════════════════════════════════════
   // Composables (Issue #13 — domain logic extracted from setup)
   // ══════════════════════════════════════════════════════════════════
@@ -1161,6 +1221,47 @@
       const wl = useWatchlist(apiFetch, showToast, () => loadEarnings());
       cal.watchlist = wl.watchlist; // wire watchlist into calendar
 
+      // 4b. 「本周财报」 digest (Issue #133) — a view of the batch the calendar
+      // just loaded, scoped to the account's own symbols when it has any (the
+      // issue's 「无自选则列全部」). `covered` is the honesty bit: `earnings` is
+      // the *displayed month* ±1, so once the calendar is paged away from today
+      // an empty digest means 「未加载」, and it must say so instead of 「本周无财报」.
+      const weekAheadOpen = ref(false);
+      const weekAhead = computed(() => {
+        const today = localTodayYmd();
+        const horizonEnd = localDaysFromTodayYmd(WEEK_AHEAD_DAYS - 1);
+        const range = calendarWindowRange(cal.currentDate.value);
+        const mineOnly = wl.watchlist.value.length > 0;
+        const covered = range.start <= today && range.end >= horizonEnd;
+        const gridDates = new Set(cal.calendarCells.value.map(c => localYmd(c.date)));
+        const groups = covered
+          ? weekAheadGroups(earnings.value, today, horizonEnd, mineOnly ? wl.isMine : null, gridDates)
+          : [];
+        return {
+          covered,
+          mineOnly,
+          total: groups.reduce((sum, group) => sum + group.total, 0),
+          rangeLabel: monthDayLabel(today) + ' → ' + monthDayLabel(horizonEnd),
+          groups,
+        };
+      });
+
+      // A digest row opens the same detail panel a calendar badge does. When the
+      // date is in the rendered grid the day context comes with it, so the
+      // panel's 「返回」 lands on that day's list rather than the previous day's.
+      function selectWeekEarning(e) {
+        if (!e) return;
+        const cell = cal.calendarCells.value.find(c => localYmd(c.date) === e.report_date) || null;
+        cal.selectEarning(e, cell, apiFetch);
+      }
+      // The 「还有 N 场」 remainder: the day panel already renders the full day,
+      // so selecting that cell is the whole feature. A date outside the rendered
+      // grid has no cell — `weekAhead.groups[].inGrid` hides the control there.
+      function selectWeekDay(date) {
+        const cell = cal.calendarCells.value.find(c => localYmd(c.date) === date);
+        if (cell) cal.selectCell(cell);
+      }
+
       // 5. iCal (its default scope follows the watchlist — Issue #109)
       const ical = useIcal(user, wl.watchlist, wl.watchlistLoaded);
 
@@ -1217,13 +1318,22 @@
         }, { flush: 'post' });  // the dialog ref only exists after the DOM update
 
       // ── Earnings loading ─────────────────────────────────────
+      // The request window is the displayed month ±1. It lives in one helper
+      // because the 「本周财报」 digest (#133) has to know whether the loaded
+      // batch even covers the next seven days: an empty answer outside that
+      // window is 「未加载」, not 「本周无财报」.
+      function calendarWindowRange(d) {
+        return {
+          start: localYmd(new Date(d.getFullYear(), d.getMonth() - 1, 1)),
+          end: localYmd(new Date(d.getFullYear(), d.getMonth() + 2, 0)),
+        };
+      }
+
       async function loadEarnings() {
         loading.value = true;
         error.value = null;
         try {
-          const d = cal.currentDate.value;
-          const start = localYmd(new Date(d.getFullYear(), d.getMonth() - 1, 1));
-          const end = localYmd(new Date(d.getFullYear(), d.getMonth() + 2, 0));
+          const { start, end } = calendarWindowRange(cal.currentDate.value);
           const params = new URLSearchParams({ start, end, watchlistOnly: watchlistOnly.value });
           const data = await apiFetch(`/api/earnings?${params}`);
           if (data) {
@@ -1360,6 +1470,8 @@
         selectCell: cal.selectCell, clearSelection: cal.clearSelection,
         isSelectedDay: cal.isSelectedDay,
         calendarWeeks: cal.calendarWeeks, cellTabIndex: cal.cellTabIndex,
+        // 「本周财报」 digest (Issue #133)
+        weekAhead, weekAheadOpen, selectWeekEarning, selectWeekDay,
         onGridKeydown: (event) => {
           // The cell keeps its own Enter/Space handler; this one owns navigation.
           if (event.metaKey || event.ctrlKey || event.altKey) return;

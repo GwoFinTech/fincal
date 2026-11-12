@@ -173,6 +173,26 @@
     .detail-label { color: var(--text-muted); font-size: 12px; }
     .detail-value { color: var(--text); font-size: 12px; font-weight: 500; text-align: right; }
 
+    /* ── 「本周财报」 digest (Issue #133) ── */
+    /* Every row here is a <button> that opens the event's detail panel and
+       reuses `.detail-row`'s metrics, so the UA button skin and the centred
+       label have to be reset explicitly. */
+    .week-toggle { width: 100%; text-align: left; background: transparent; cursor: pointer; }
+    .week-row { width: 100%; text-align: left; background: transparent; cursor: pointer; border-radius: 6px; padding: 8px 4px; }
+    .week-row:hover { background: var(--surface-raised); }
+    .week-row:focus-visible, .week-toggle:focus-visible, .week-more:focus-visible { outline: 2px solid var(--primary-light); outline-offset: 1px; }
+    /* A fixed EPS column keeps the figures aligned whether or not a row has one;
+       many HK rows carry no estimate at all. */
+    .week-eps { width: 52px; text-align: right; flex-shrink: 0; }
+    .week-more { color: var(--primary-light); cursor: pointer; padding: 2px 0 0 4px; }
+    .week-more:hover { text-decoration: underline; }
+    /* The company name is the only elastic part of a row: it truncates first. */
+    .week-row .week-company { max-width: 150px; }
+    @media (max-width: 420px) { .week-row .week-company { max-width: 96px; } }
+    /* Under `sm` the row keeps code / company / session / EPS; the fiscal label
+       is the first thing a 390px row can live without. */
+    @media (max-width: 639px) { .week-row .week-fq { display: none; } }
+
     /* ── Calendar workspace ── */
     .calendar-workspace { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; align-items: start; }
     .calendar-main { min-width: 0; }
@@ -422,6 +442,63 @@
         <span>{{ error || writeError }}</span>
         <button @click="dismissErrors" style="color:#f87171;">&times;</button>
       </div>
+
+      <!-- 「本周财报」 digest (Issue #133): the calendar already holds these rows,
+           so this is a second *view* of one batch — never a second request. It
+           starts collapsed because it is a summary: an expanded digest must not
+           push the month grid below the fold (709 US + 165 HK events sat on a
+           single date of the 2026-11 season peak). -->
+      <section class="surface mb-2" aria-label="本周财报">
+        <button type="button" class="week-toggle flex items-center justify-between gap-2 px-3 py-2"
+                :aria-expanded="weekAheadOpen ? 'true' : 'false'" aria-controls="week-ahead-body"
+                @click="weekAheadOpen = !weekAheadOpen">
+          <span class="flex items-baseline gap-2 min-w-0">
+            <span class="text-[13px] font-semibold shrink-0">本周财报</span>
+            <span class="text-[11px] truncate" style="color:var(--text-muted);">{{ weekAhead.rangeLabel }} · {{ weekAhead.mineOnly ? '你的自选' : '全部标的' }}</span>
+          </span>
+          <span class="flex items-center gap-2 shrink-0">
+            <span v-if="!weekAhead.covered" class="text-[11px]" style="color:var(--text-muted);">不在当前视图</span>
+            <span v-else-if="loading && !earnings.length" class="text-[11px]" style="color:var(--text-muted);">读取中…</span>
+            <span v-else-if="error" class="text-[11px]" style="color:#f87171;">读取失败</span>
+            <span v-else-if="weekAhead.total" class="text-[12px] font-semibold">{{ weekAhead.total }} 场</span>
+            <span v-else class="text-[11px]" style="color:var(--text-muted);">本周无财报</span>
+            <svg class="w-3.5 h-3.5" :style="weekAheadOpen ? 'transform:rotate(180deg);' : ''" style="color:var(--text-muted);" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+          </span>
+        </button>
+        <div v-show="weekAheadOpen" id="week-ahead-body" class="px-3 pb-3" style="border-top:1px solid var(--border);">
+          <p v-if="!weekAhead.covered" class="pt-3 text-[12px]" style="color:var(--text-muted);">当前日历视图（{{ monthLabel }}）的取数窗口不包含本周；切回「今天」即可看到最近 7 天的财报。</p>
+          <p v-else-if="error" class="pt-3 text-[12px]" style="color:#f87171;">本周财报读取失败：{{ error }}</p>
+          <div v-else-if="loading && !earnings.length" class="flex items-center gap-2 pt-3 text-[12px]" style="color:var(--text-muted);"><div class="spinner" style="width:14px;height:14px;"></div> 加载中…</div>
+          <p v-else-if="!weekAhead.total" class="pt-3 text-[12px]" style="color:var(--text-muted);">本周无财报{{ weekAhead.mineOnly ? '（你的自选）' : '' }}。</p>
+          <div v-else>
+            <div v-for="group in weekAhead.groups" :key="group.date" class="pt-3">
+              <div class="flex items-baseline justify-between gap-2">
+                <span class="text-[11px] font-medium" style="color:var(--text-secondary);">{{ group.label }}</span>
+                <span class="text-[10px]" style="color:var(--text-muted);">{{ group.total }} 场</span>
+              </div>
+              <button v-for="row in group.rows" :key="row.id != null ? row.id : row.symbol + row.market + row.report_date" type="button"
+                      class="week-row detail-row"
+                      :aria-label="(row.symbol + ' ' + (row.company_name || '') + ' 查看详情').trim()"
+                      @click="selectWeekEarning(row)">
+                <span class="flex items-baseline gap-1.5 min-w-0">
+                  <span class="text-[12px] font-semibold shrink-0">{{ row.symbol }}</span>
+                  <span class="week-company text-[11px] truncate" style="color:var(--text-muted);">{{ row.company_name || '—' }}</span>
+                </span>
+                <span class="flex items-baseline gap-2 shrink-0">
+                  <span v-if="row.before_after === 'before'" class="before-tag">盘前</span>
+                  <span v-else-if="row.before_after === 'after'" class="after-tag">盘后</span>
+                  <span v-else-if="row.before_after === 'during'" class="text-[10px]" style="color:var(--text-muted);">盘中</span>
+                  <span v-else class="text-[10px]" style="color:var(--text-muted);">待定</span>
+                  <span class="week-fq text-[10px]" style="color:var(--text-muted);">{{ periodLabel(row) }}</span>
+                  <span class="week-eps detail-value">{{ fmtNum(row.eps_estimate) }}</span>
+                </span>
+              </button>
+              <button v-if="group.more && group.inGrid" type="button" class="week-more text-[11px]" @click="selectWeekDay(group.date)">还有 {{ group.more }} 场 → 在当天列表查看</button>
+              <p v-else-if="group.more" class="week-more text-[11px]" style="cursor:default;color:var(--text-muted);">另有 {{ group.more }} 场（该日期不在当前日历格内）</p>
+            </div>
+          </div>
+        </div>
+      </section>
 
       <!-- Calendar grid -->
       <!-- Issue #126: a grid keeps ONE tab stop. Every cell used to be

@@ -7,6 +7,7 @@ fincal aggregates earnings report dates from [Longbridge](https://longbridge.com
 ## Features
 
 - **Earnings Calendar** — month/week view with report dates, EPS & revenue estimates, actuals, and surprise percentages
+- **This Week's Digest** — the next seven days above the calendar, grouped by date and scoped to your own watchlist (the whole tracked range when there is none); each row opens the event's detail, and a crowded day links to its full list
 - **Prediction Engine** — predicts future earnings dates by projecting the company's own historical report dates for that quarter onto the target year (nearest to the median month/day expectation, never a weekend the company does not use)
 - **Watchlist** — personal stock list with per-user persistence
 - **iCal Subscription** — one-click `.ics` feed URL for Apple Calendar, Google Calendar, Outlook, etc.
