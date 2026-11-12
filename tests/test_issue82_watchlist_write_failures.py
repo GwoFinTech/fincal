@@ -201,7 +201,11 @@ class TestSourceContract(TestCase):
     def test_api_fetch_keeps_its_return_shape(self):
         """`null` still means "not 2xx" for the dozen read call sites."""
         body = function_body(fc.read_app_js(), "apiFetch")
-        self.assertEqual(body.count("return null;"), 3)  # 401, 404, catch
+        # 401, 404, an abort (Issue #131: cancelled searches are not failures) and
+        # the catch-all. Each of them still hands the caller `null`, never a
+        # partial payload, so read call sites keep one shape to check.
+        self.assertEqual(body.count("return null;"), 4)
+        self.assertIn("if (e && e.name === 'AbortError') return null;", body)
         self.assertIn("return res.json();", body)
 
     def test_read_error_is_not_the_write_surface(self):

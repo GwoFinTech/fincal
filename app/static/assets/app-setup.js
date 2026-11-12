@@ -90,6 +90,10 @@
         }
         return res.json();
       } catch (e) {
+        // A cancelled request is not a failure: `AbortController` supersedes the
+        // previous search on every keystroke (Issue #131), and nobody should see
+        // a 「请求失败: aborted」 toast for their own next key.
+        if (e && e.name === 'AbortError') return null;
         if (expectOk) writeError.value = '本次改动未生效：' + e.message;
         else error.value = e.message;
         showToast('请求失败: ' + e.message);
@@ -482,12 +486,26 @@
     });
 
     let searchTimer;
+    // Issue #131: typing「0700」then「0700.HK」issues two requests, and responses
+    // arrive in whatever order the network decides. Without cancellation the
+    // slower, older one lands last and the list silently shows results for a
+    // query the box no longer contains. So: abort the one in flight, and ignore
+    // any answer whose sequence is stale even if it was already decoded.
+    let searchController = null;
+    let searchSeq = 0;
     async function doSearch() {
       clearTimeout(searchTimer);
+      if (searchController) searchController.abort();
+      const seq = ++searchSeq;
       if (searchQuery.value.length < 1) { searchResults.value = []; searchLoading.value = false; return; }
       searchLoading.value = true;
       searchTimer = setTimeout(async () => {
-        const data = await apiFetch(`/api/search?q=${encodeURIComponent(searchQuery.value)}`);
+        const controller = new AbortController();
+        searchController = controller;
+        const query = searchQuery.value;
+        const data = await apiFetch(`/api/search?q=${encodeURIComponent(query)}`, { signal: controller.signal });
+        if (seq !== searchSeq) return; // a newer keystroke owns the results now
+        if (searchController === controller) searchController = null;
         searchResults.value = data || [];
         searchLoading.value = false;
       }, 300);

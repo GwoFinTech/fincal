@@ -279,13 +279,20 @@ def function_source(js: str, name: str) -> str:
     instead of re-implementing its rules in Python — a copied formula would
     keep passing after the served code changed.
     """
-    pattern = re.compile(rf"(?m)^[ \t]*function {re.escape(name)}\(")
+    pattern = re.compile(rf"(?m)^[ \t]*(?:async[ \t]+)?function {re.escape(name)}\(")
     match = pattern.search(js)
     if not match:
         raise ValueError(f"function {name}() not found")
     masked = mask_code(js)
-    opening = masked.index("{", match.end())
-    return js[match.start():_matching_brace(masked, opening) + 1]
+    # Skip the parameter list first: a default argument can contain an object
+    # literal (`opts = {}`), and taking the first `{` after the name would then
+    # extract `{}` instead of the body.
+    closing_paren = _matching_brace(masked.replace("(", "{").replace(")", "}"), match.end() - 1)
+    opening = masked.index("{", closing_paren)
+    # Start at the declaration keyword (including `async`) so the extracted text
+    # is a complete statement when the function is `async function` (e.g. `apiFetch`).
+    start = match.start() + (len(match.group(0)) - len(match.group(0).lstrip()))
+    return js[start:_matching_brace(masked, opening) + 1]
 
 
 def dangling_bindings(html: str, exposed: set[str]) -> set[str]:
