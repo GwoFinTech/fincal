@@ -1025,6 +1025,14 @@
       if (urlInitial.tab) appTab.value = urlInitial.tab;
       const initialMonth = url.monthDate(urlInitial.month);
       if (initialMonth) cal.currentDate.value = initialMonth;
+      // The day can only be resolved once the month's cells exist (after the
+      // first load), and a history step can change the month under it — so it
+      // lives here as pending state that `loadEarnings()` applies, not as a
+      // one-shot call after mount.
+      let pendingDateKey = urlInitial.date;
+      // Set while a `popstate` is being applied: the watchers below must not
+      // write the address bar back while it is being read.
+      let restoringFromHistory = false;
 
       // 4. Watchlist (needs loadEarnings callback)
       const wl = useWatchlist(apiFetch, showToast, () => loadEarnings());
@@ -1101,6 +1109,8 @@
               : data;
             if (appTab.value === 'calendar') {
               cal.selectedDay.value = cal.calendarCells.value.find(cell => cell.isToday) || null;
+              // A link (or a history step) names a day; it wins over 「today」.
+              if (pendingDateKey) applyDateKey(pendingDateKey);
             }
           }
         } finally {
@@ -1118,25 +1128,55 @@
       }
       // A tab or month change is a step the reader may want to undo, so it pushes;
       // selecting a day is a click-through inside the same view, so it replaces —
-      // otherwise every cell tap would need its own 后退 press.
-      watch([appTab, cal.currentDate], () => url.pushUrl(currentUrlState()));
+      // otherwise every cell tap would need its own 后退 press. A `popstate`
+      // already *is* the history change, so it must not write one back.
+      watch([appTab, cal.currentDate], () => {
+        if (!restoringFromHistory) url.pushUrl(currentUrlState());
+      });
       watch(() => (cal.selectedDay.value ? localYmd(cal.selectedDay.value.date) : ''),
-        () => url.replaceUrl(currentUrlState()));
+        () => { if (!restoringFromHistory) url.replaceUrl(currentUrlState()); });
 
-      // The linked day can only be resolved once the month's cells exist, i.e.
-      // after the first load; anything that is not in the window keeps the
-      // default (today) instead of inventing a selection.
-      function applyLinkedDate() {
-        if (!urlInitial.date) return;
-        const cell = cal.calendarCells.value.find(c => localYmd(c.date) === urlInitial.date);
-        if (!cell) return;
+      // Point the selection at a day of the currently rendered month; a key that
+      // is not in the window keeps whatever the load already chose (today).
+      function applyDateKey(key) {
+        if (!key) return false;
+        const cell = cal.calendarCells.value.find(c => localYmd(c.date) === key);
+        if (!cell) return false;
         cal.selectedEarning.value = null;
         cal.decision.value = null;
         cal.selectedDay.value = cell;
+        return true;
+      }
+
+      // 后退/前进 only moves the address bar; the view has to follow it, or the
+      // reader sees yesterday's month under today's URL. Everything the link
+      // carries is re-applied, and the write-watchers stay quiet while it happens.
+      async function applyHistoryState() {
+        const state = url.parseUrlState(typeof window !== 'undefined' ? window.location.search : '');
+        const month = url.monthDate(state.month);
+        restoringFromHistory = true;
+        try {
+          appTab.value = state.tab || 'calendar';
+          if (month) cal.currentDate.value = month;
+          pendingDateKey = state.date;
+          cal.selectedEarning.value = null;
+          cal.decision.value = null;
+          // One load for the restored month, and the day applied after it: the
+          // month watcher would otherwise race the restore and reset the day.
+          await loadEarnings();
+          pendingDateKey = '';
+          loadTabData(appTab.value);
+          await nextTick();
+        } finally {
+          restoringFromHistory = false;
+        }
+      }
+      if (typeof window !== 'undefined' && window.addEventListener) {
+        window.addEventListener('popstate', () => { applyHistoryState(); });
       }
 
       // ── Lifecycle ────────────────────────────────────────────
-      watch(cal.currentDate, loadEarnings);
+      watch(cal.currentDate, () => { if (!restoringFromHistory) loadEarnings(); });
 
       // The watchlist data must not follow the calendar month; it is refreshed
       // when the page is (re)entered so a long calendar session cannot show a
@@ -1167,7 +1207,6 @@
           await wl.loadNextEarnings();
         }
         await loadEarnings();
-        applyLinkedDate();
         loadTabData(appTab.value);
       });
 

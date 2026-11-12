@@ -143,15 +143,40 @@ class UrlWiringTests(TestCase):
 
     def test_the_linked_day_is_applied_once_the_cells_exist(self):
         js = fc.read_app_js()
-        mount = js.index("onMounted(async () => {")
-        applied = js.index("applyLinkedDate();", mount)
-        self.assertGreater(applied, js.index("await loadEarnings();", mount))
-        self.assertIn("localYmd(c.date) === urlInitial.date", js)
+        # The day is pending state, applied by the load that builds the cells —
+        # a one-shot call after mount could not survive a month switch.
+        self.assertIn("let pendingDateKey = urlInitial.date;", js)
+        self.assertIn("localYmd(c.date) === key", js)
 
     def test_the_page_writes_its_state_on_view_and_selection_changes(self):
         js = fc.read_app_js()
-        self.assertIn("watch([appTab, cal.currentDate], () => url.pushUrl(currentUrlState()));", js)
-        self.assertIn("() => url.replaceUrl(currentUrlState()));", js)
+        self.assertIn("watch([appTab, cal.currentDate], () => {", js)
+        self.assertIn("if (!restoringFromHistory) url.pushUrl(currentUrlState());", js)
+        self.assertIn("if (!restoringFromHistory) url.replaceUrl(currentUrlState());", js)
+
+    def test_a_history_step_restores_the_view_not_just_the_address(self):
+        """后退 moved the URL but left the old month on screen, because nothing
+        listened for `popstate` — the write-watchers had no way back."""
+        js = fc.read_app_js()
+        self.assertIn("window.addEventListener('popstate', () => { applyHistoryState(); });", js)
+        handler = js[js.index("async function applyHistoryState()"):]
+        handler = handler[:handler.index("window.addEventListener('popstate'")]
+        # Whatever the link carries has to be re-applied, and the writes muted.
+        for token in ("appTab.value = state.tab || 'calendar'",
+                      "cal.currentDate.value = month",
+                      "pendingDateKey = state.date",
+                      "restoringFromHistory = true",
+                      "await loadEarnings();",
+                      "loadTabData(appTab.value);",
+                      "restoringFromHistory = false"):
+            self.assertIn(token, handler)
+
+    def test_a_restored_day_is_not_overwritten_by_the_month_load(self):
+        """`loadEarnings()` settles 「today」 first; the link's day must win."""
+        js = fc.read_app_js()
+        load = js[js.index("async function loadEarnings()"):]
+        load = load[:load.index("// ── Address bar writes")]
+        self.assertIn("if (pendingDateKey) applyDateKey(pendingDateKey);", load)
 
     def test_a_tab_named_by_the_link_still_loads_its_data(self):
         """`appTab` is already set when the watcher registers, so the watch alone

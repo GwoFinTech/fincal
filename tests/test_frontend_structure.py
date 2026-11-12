@@ -165,7 +165,9 @@ def test_watchlist_next_report_has_its_own_forward_only_window():
     assert "if (tab === 'watchlist' && user.value) wl.loadNextEarnings();" in js
     assert js.count("await loadNextEarnings();") == 2
     assert "await wl.loadNextEarnings();" in js
-    assert "watch(cal.currentDate, loadEarnings)" in js
+    # Still the month that reloads the calendar — now guarded so a history step
+    # (Issue #125) does not fire a second request while it restores the view.
+    assert "watch(cal.currentDate, () => { if (!restoringFromHistory) loadEarnings(); });" in js
 
     # Template: reflected values, an algorithmic-date marker and an empty state
     # that no longer claims a period is "待确认" when there is no report date.
