@@ -270,6 +270,24 @@ def template_roots(html: str) -> dict[str, set[str]]:
     return roots
 
 
+def function_source(js: str, name: str) -> str:
+    """Source of a top-level ``function <name>()`` in the SPA bundle.
+
+    Braces inside string literals and comments must not end the body, so the
+    match runs on the masked copy and the result is sliced from the original
+    (same offsets).  Probes extract one composable and evaluate it under node
+    instead of re-implementing its rules in Python — a copied formula would
+    keep passing after the served code changed.
+    """
+    pattern = re.compile(rf"(?m)^[ \t]*function {re.escape(name)}\(")
+    match = pattern.search(js)
+    if not match:
+        raise ValueError(f"function {name}() not found")
+    masked = mask_code(js)
+    opening = masked.index("{", match.end())
+    return js[match.start():_matching_brace(masked, opening) + 1]
+
+
 def dangling_bindings(html: str, exposed: set[str]) -> set[str]:
     """Root template identifiers that ``setup()`` does not expose.
 

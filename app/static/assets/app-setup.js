@@ -682,7 +682,19 @@
     function metricDelta(actual, estimate) {
       return actual == null || estimate == null ? null : Number(actual) - Number(estimate);
     }
-    function fmtNum(n) { return n == null ? '—' : Number(n).toFixed(2); }
+    // Issue #120: two decimals cannot carry a sub-cent EPS. `2068.HK` reported
+    // -0.0038 and `NET` -0.00263, both rendered `-0.00`, while the same row's
+    // 「较预期」 was computed from the real value — a row that contradicted
+    // itself. Keep two decimals from 0.1 up (the normal case, and the trailing
+    // zero convention the prices already follow); below that keep at least three
+    // significant digits, capped at six decimals. Zero is still `0.00`.
+    function fmtNum(n) {
+      if (n == null) return '—';
+      const v = Number(n);
+      if (!Number.isFinite(v)) return '—';
+      if (v === 0 || Math.abs(v) >= 0.1) return v.toFixed(2);
+      return v.toFixed(Math.min(6, 2 + Math.ceil(-Math.log10(Math.abs(v)))));
+    }
     // The month cell is ~50px wide on a phone, where `2068.HK 26Q3` was simply
     // sliced by the cell's overflow. The suffix is redundant inside the calendar —
     // the badge is colour-coded per market and the legend says so — so narrow
