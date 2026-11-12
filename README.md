@@ -378,23 +378,37 @@ user id + 5 options (Issue #112 — never the subscription token), so one
 subscriber can legitimately mint 12 keys, and a slot count said nothing about
 memory.
 
-**Compression (Issue #99).** Responses are gzipped by the application
-(`GZipMiddleware`, `minimum_size=1024`, `compresslevel=6`) as the outermost
-layer, so validators (`ETag`, `Last-Modified`) keep describing one uncompressed
-representation — they are emitted as weak validators (`W/"…"`) because one
-resource now has two content-codings. Do **not** also add Traefik
-`compress@docker`: the edge would either recode an already-coded body or skip
-it, a redundant layer either way. Two consequences worth knowing:
+**Compression (Issue #99).** Responses are gzipped by
+`app.compression.CompressedResponses` — mounted in `app/main.py` as
+`add_middleware(CompressedResponses, minimum_size=1024, compresslevel=6)`, i.e.
+the outermost layer — and **not** by Starlette's `GZipMiddleware`. The stock
+middleware compares `minimum_size` against the *first* body message only, so any
+response emitted in more than one message (every response that passed through
+this app's error/ETag layers, both `BaseHTTPMiddleware`, plus `StaticFiles`
+responses) was coded regardless of size: the 253 B `/api/admin/health` probe went
+out gzip-*larger*. Ours buffers until the body is known to be at least
+`minimum_size`, then streams like the stock middleware does:
 
-- The whitelisted JSON endpoints (`/api/search`, `/api/popular`,
-  `/api/export`, …) are re-serialized by the ETag middleware as a single body,
-  so they keep `Content-Length` and small ones (< 1 KiB) stay identity.
-- Streamed paths (month view, iCal feed, health probe) reach the gzip layer as
-  body chunks — both middlewares are `BaseHTTPMiddleware`, which re-emits every
-  response as a stream — so `minimum_size` cannot fire there and the coded
-  response is sent chunked (no `Content-Length`). 304 answers carry
-  `Vary: Accept-Encoding` explicitly, since nothing compresses a bodyless
-  response.
+- A body under `minimum_size` (1024 B) is sent identity, byte for byte: small
+  JSON answers, the health probe, tiny static files.
+- `text/event-stream` is never buffered — a stream promises that the first
+  message leaves immediately.
+- A response that already carries `content-encoding` is forwarded untouched, as
+  is any request whose `Accept-Encoding` does not include `gzip`: no double
+  coding, no recoding.
+- Strong ETags of coded responses are weakened (`W/"…"`, RFC 7232 §2.3.1),
+  because the two content-codings are only semantically identical. The ETag
+  layer already mints weak validators; compression also weakens the *strong*
+  validators `StaticFiles` creates from file stat, so one resource with two
+  codings never asserts byte-identity.
+
+Do **not** also add Traefik `compress@docker`: the edge would either recode an
+already-coded body or skip it, a redundant layer either way. One consequence
+worth knowing: the whitelisted JSON endpoints (`/api/search`, `/api/popular`,
+`/api/export`, …) are re-serialized by the ETag middleware as a single body, so
+they keep `Content-Length`, and the size decision above is made on that body.
+304 answers carry `Vary: Accept-Encoding` explicitly, since nothing compresses a
+bodyless response.
 
 ## Development
 
