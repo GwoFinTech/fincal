@@ -707,7 +707,17 @@
           <button @click="showAdmin=false" class="ui-btn ui-btn-ghost" style="padding:4px;" aria-label="关闭管理面板">✕</button>
         </div>
         <div v-if="adminLoading" class="flex items-center gap-2 text-[12px] text-zinc-500"><div class="spinner"></div>加载中...</div>
-        <template v-else>
+          <!-- Issue #124: the panel only listed sync runs, so the audit trail and
+               the diagnostics snapshot the backend already serves could only be
+               read with curl. Panes load on demand inside the same dialog. -->
+          <div class="flex items-center gap-1.5 mb-3 flex-wrap" role="tablist" aria-label="管理面板分区">
+            <button v-for="tab in adminTabs" :key="tab.value" type="button" role="tab"
+                    :aria-selected="adminTab === tab.value ? 'true' : 'false'"
+                    class="ui-btn" :class="adminTab === tab.value ? 'ui-btn-primary' : 'ui-btn-outline'"
+                    style="min-height:30px;padding:0 10px;font-size:12px;"
+                    @click="selectAdminTab(tab.value)">{{ tab.label }}</button>
+          </div>
+          <template v-if="adminTab === 'managed'">
           <div class="grid md:grid-cols-2 gap-3 mb-4">
             <div class="surface p-3"><div class="text-[11px] text-zinc-500 mb-1">自选数据来源</div><div class="text-[13px] font-medium">{{ adminSource.configured || '—' }}</div><div class="text-[11px] text-zinc-500 mt-1">{{ adminSource.transport === 'database' ? 'PostgreSQL · ' + adminSource.location : 'FinCal 本地数据库' }}</div><div class="text-[11px] mt-2" :class="adminSource.external_dependency ? 'text-amber-400' : 'text-emerald-400'">{{ adminSource.external_dependency ? '外部来源可用时合并 FinCal 本地自选' : '不依赖外部系统' }}</div></div>
             <div class="surface p-3"><div class="text-[11px] text-zinc-500 mb-1">当前外部/合并自选</div><div class="text-[22px] font-semibold">{{ adminSource.symbol_count || 0 }}</div><div v-if="adminSource.error_code" class="text-[11px] text-red-400">{{ adminSource.error_code }}</div></div>
@@ -717,6 +727,42 @@
           <div class="surface mb-4 overflow-hidden"><div v-if="!managedWatchlist.length" class="p-3 text-[12px] text-zinc-500">暂无 FinCal 自建自选。</div><div v-for="item in managedWatchlist" :key="item.id" class="flex items-center justify-between px-3 py-2 border-b last:border-0" style="border-color:var(--border);"><span class="text-[13px] font-medium">{{ item.symbol }} <span class="badge" :class="'badge-'+item.market">{{ item.market }}</span></span><span class="flex gap-1"><button @click="editManaged(item)" class="ui-btn ui-btn-ghost" style="font-size:11px;padding:3px 6px;">编辑</button><button @click="deleteManaged(item.id)" class="ui-btn ui-btn-ghost" style="font-size:11px;padding:3px 6px;color:#f87171;">删除</button></span></div></div>
           <div class="section-title">同步记录</div>
           <div class="surface overflow-hidden"><div v-if="!syncRuns.length" class="p-3 text-[12px] text-zinc-500">暂无记录；下一次同步将自动写入。</div><div v-for="run in syncRuns" :key="run.id" class="px-3 py-2 border-b last:border-0 text-[12px]" style="border-color:var(--border);"><div class="flex justify-between gap-3"><span class="font-medium">{{ run.stage }} · {{ run.source }}</span><span :class="run.status==='success'?'text-emerald-400':run.status==='failed'?'text-red-400':'text-amber-400'">{{ run.status }}</span></div><div class="text-zinc-500 mt-1">{{ fmtDateTime(run.started_at) }} · 标的 {{ run.symbol_count }} · 记录 {{ run.record_count }}<span v-if="run.error_code"> · {{ run.error_code }}</span></div></div></div>
+          </template>
+
+          <template v-else-if="adminTab === 'audit'">
+            <div class="section-title">审计日志 <span class="text-zinc-500 font-normal">最近 50 条；details 渲染前按 #114 口径脱敏</span></div>
+            <div v-if="auditLoading" class="flex items-center gap-2 text-[12px] text-zinc-500"><div class="spinner"></div>加载审计日志...</div>
+            <div v-else-if="auditError" class="surface p-3 text-[12px]" style="color:#f87171;">审计日志加载失败：{{ auditError }}<button type="button" class="ui-btn ui-btn-outline ml-2" style="min-height:28px;padding:0 8px;font-size:12px;" @click="loadAudit">重试</button></div>
+            <div v-else-if="!auditEntries.length" class="surface p-3 text-[12px] text-zinc-500">暂无审计记录；同步类与自选增删改都会写入。</div>
+            <div v-else class="surface overflow-hidden">
+              <div v-for="entry in auditEntries" :key="entry.id" class="px-3 py-2 border-b last:border-0 text-[12px]">
+                <div class="flex items-baseline justify-between gap-2">
+                  <span class="font-medium min-w-0 break-all">{{ entry.action }}</span>
+                  <span class="shrink-0 text-[11px] text-zinc-500">{{ fmtDateTime(entry.created_at) }}</span>
+                </div>
+                <div class="text-[11px] text-zinc-500 mt-1 break-all">{{ entry.actor_email || entry.actor_id || '—' }} · {{ entry.target || '—' }}</div>
+                <details class="mt-1">
+                  <summary class="cursor-pointer text-[11px] text-zinc-500">details</summary>
+                  <pre class="text-[11px] mt-1 whitespace-pre-wrap break-all" style="color:var(--text-secondary);">{{ auditDetailsText(entry) }}</pre>
+                </details>
+              </div>
+            </div>
+          </template>
+
+          <template v-else>
+            <div class="section-title">诊断 <span class="text-zinc-500 font-normal">本进程启动以来的计数；部署或重启后归零</span></div>
+            <div v-if="diagnosticsLoading" class="flex items-center gap-2 text-[12px] text-zinc-500"><div class="spinner"></div>加载诊断...</div>
+            <div v-else-if="diagnosticsError" class="surface p-3 text-[12px]" style="color:#f87171;">诊断加载失败：{{ diagnosticsError }}<button type="button" class="ui-btn ui-btn-outline ml-2" style="min-height:28px;padding:0 8px;font-size:12px;" @click="loadDiagnostics">重试</button></div>
+            <template v-else>
+              <div v-for="section in diagnosticsSections(diagnostics)" :key="section.key" class="surface mb-3 overflow-hidden">
+                <div class="px-3 py-2 text-[12px] font-medium border-b" style="border-color:var(--border);">{{ section.title }}</div>
+                <div class="px-3 py-2">
+                  <div v-if="!section.rows.length" class="text-[12px] text-zinc-500">暂无数据。</div>
+                  <div v-for="row in section.rows" :key="row.label" class="detail-row"><span class="detail-label break-all">{{ row.label }}</span><span class="detail-value break-all">{{ row.value }}</span></div>
+                </div>
+              </div>
+            </template>
+          </template>
         </template>
       </div>
     </div>

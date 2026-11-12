@@ -442,6 +442,139 @@
     const syncRuns = ref([]);
     const managedForm = ref({ id: null, symbol: '', market: 'US' });
 
+    // Issue #124: the panel only ever listed sync runs, although the backend has
+    // served the audit trail (`GET /api/admin/audit-log`) and the diagnostics
+    // snapshot (`GET /api/admin/diagnostics`) all along — answering 「谁改过自选」
+    // or 「缓存有没有命中」 meant SSH + SQL. Three panes, loaded on demand: opening
+    // the dialog must not pay for two extra reads nobody asked for.
+    const ADMIN_TABS = [
+      { value: 'managed', label: '自选与同步' },
+      { value: 'audit', label: '审计' },
+      { value: 'diagnostics', label: '诊断' },
+    ];
+    const adminTab = ref('managed');
+    const auditEntries = ref([]);
+    const auditLoading = ref(false);
+    const auditError = ref(null);
+    const diagnostics = ref(null);
+    const diagnosticsLoading = ref(false);
+    const diagnosticsError = ref(null);
+
+    // ── Audit details: render-time redaction (Issue #124, same rule as #114) ──
+    // `details` is free-form JSONB written by several call sites. Rendering it
+    // verbatim would put whatever a future caller stored on screen, so the keys
+    // that name a credential are blanked and an iCal path keeps only its prefix.
+    const REDACTED = '[REDACTED]';
+    const SECRET_KEY = /(token|secret|passw|credential|api[_-]?key|private)/i;
+    const ICAL_PATH = /(\/ical\/)[A-Za-z0-9_-]{16,}/g;
+
+    function redactDetails(details) {
+      if (!details || typeof details !== 'object') return {};
+      const walk = (value) => {
+        if (typeof value === 'string') return value.replace(ICAL_PATH, '$1' + REDACTED);
+        if (Array.isArray(value)) return value.map(walk);
+        if (value && typeof value === 'object') {
+          const nested = {};
+          for (const [key, inner] of Object.entries(value)) {
+            nested[key] = SECRET_KEY.test(key) ? REDACTED : walk(inner);
+          }
+          return nested;
+        }
+        return value;
+      };
+      const out = {};
+      for (const [key, value] of Object.entries(details)) {
+        out[key] = SECRET_KEY.test(key) ? REDACTED : walk(value);
+      }
+      return out;
+    }
+    function auditDetailsText(entry) {
+      try { return JSON.stringify(redactDetails(entry && entry.details)); } catch (e) { return '—'; }
+    }
+
+    async function loadAudit() {
+      auditLoading.value = true;
+      auditError.value = null;
+      try {
+        const data = await apiFetch('/api/admin/audit-log?limit=50');
+        if (data === null || data === undefined) {
+          auditError.value = '接口未返回数据';
+          return;
+        }
+        auditEntries.value = data;
+      } finally {
+        auditLoading.value = false;
+      }
+    }
+
+    // Four read-only blocks in the shape the operator asks the question:
+    // what the caches did, how the providers behaved, whether the pipeline is
+    // fresh, and how many future-dated rows still carry actuals (#111).
+    function diagnosticsSections(diag) {
+      if (!diag) return [];
+      const pct = (value) => (typeof value === 'number' ? (value * 100).toFixed(1) + '%' : '—');
+      const cache = diag.cache || {};
+      const cacheRows = [
+        { label: '命中 / 未命中', value: (cache.hits ?? 0) + ' / ' + (cache.misses ?? 0) },
+        { label: '命中率', value: pct(cache.hit_rate) },
+        { label: '返回旧值次数', value: String(cache.stale_returns ?? 0) },
+        { label: '刷新成功 / 失败', value: (cache.refresh_ok ?? 0) + ' / ' + (cache.refresh_fail ?? 0) },
+      ];
+      for (const [name, stats] of Object.entries(diag.cache_by_name || {})) {
+        cacheRows.push({
+          label: name + ' 命中率',
+          value: pct(stats.hit_rate) + '（' + (stats.hits ?? 0) + ' / ' + ((stats.hits ?? 0) + (stats.misses ?? 0)) + '）',
+        });
+      }
+      const providerRows = Object.entries(diag.providers || {}).map(([name, stats]) => ({
+        label: name,
+        value: (stats.calls ?? 0) + ' 次 · 成功率 ' + pct(stats.success_rate) + ' · ' + (stats.avg_ms ?? 0) + 'ms'
+          + (stats.errors && Object.values(stats.errors).some(Boolean)
+            ? ' · 错误 ' + Object.entries(stats.errors).filter(([, n]) => n).map(([kind, n]) => kind + ' ' + n).join(', ')
+            : ''),
+      }));
+      const fresh = diag.freshness || {};
+      const freshRows = [
+        { label: '总体', value: (fresh.status || '—') + (fresh.error_code ? ' · ' + fresh.error_code : '') },
+        { label: '判定阈值', value: (fresh.threshold_hours ?? '—') + ' 小时' },
+        { label: '落后 / 失败条目', value: String((fresh.stale || []).length) + ' / ' + String((fresh.failed || []).length) },
+        { label: '从未成功条目', value: String((fresh.never || []).length) },
+      ];
+      for (const name of [...(fresh.stale || []), ...(fresh.failed || []), ...(fresh.never || [])].slice(0, 8)) {
+        freshRows.push({ label: '· ' + name, value: '需关注' });
+      }
+      return [
+        { key: 'cache', title: '缓存', rows: cacheRows },
+        { key: 'providers', title: '外部提供方', rows: providerRows },
+        { key: 'freshness', title: '数据新鲜度', rows: freshRows },
+        { key: 'future_reported', title: '未来日期带实际值', rows: [
+          { label: '行数', value: String(diag.future_reported ?? 0) },
+          { label: '说明', value: '应为 0；大于 0 表示有未发生的事件已带实际值' },
+        ] },
+      ];
+    }
+
+    async function loadDiagnostics() {
+      diagnosticsLoading.value = true;
+      diagnosticsError.value = null;
+      try {
+        const data = await apiFetch('/api/admin/diagnostics');
+        if (data === null || data === undefined) {
+          diagnosticsError.value = '接口未返回数据';
+          return;
+        }
+        diagnostics.value = data;
+      } finally {
+        diagnosticsLoading.value = false;
+      }
+    }
+
+    function selectAdminTab(tab) {
+      adminTab.value = tab;
+      if (tab === 'audit') loadAudit();
+      if (tab === 'diagnostics') loadDiagnostics();
+    }
+
     async function openAdmin() {
       showAdmin.value = true;
       adminLoading.value = true;
@@ -454,6 +587,8 @@
       }
       if (runs) syncRuns.value = runs;
       adminLoading.value = false;
+      if (adminTab.value === 'audit') await loadAudit();
+      else if (adminTab.value === 'diagnostics') await loadDiagnostics();
     }
 
     function resetManaged() { managedForm.value = { id: null, symbol: '', market: 'US' }; }
@@ -476,6 +611,10 @@
     return {
       showAdmin, adminLoading, adminSource, managedWatchlist, syncRuns, managedForm,
       openAdmin, resetManaged, editManaged, saveManaged, deleteManaged, fmtDateTime,
+      // Issue #124
+      adminTabs: ADMIN_TABS, adminTab, selectAdminTab,
+      auditEntries, auditLoading, auditError, loadAudit, auditDetailsText, redactDetails,
+      diagnostics, diagnosticsLoading, diagnosticsError, diagnosticsSections, loadDiagnostics,
     };
   }
 
@@ -950,6 +1089,15 @@
         managedWatchlist: admin.managedWatchlist, syncRuns: admin.syncRuns, managedForm: admin.managedForm,
         openAdmin: admin.openAdmin, saveManaged: admin.saveManaged, editManaged: admin.editManaged,
         deleteManaged: admin.deleteManaged, resetManaged: admin.resetManaged, fmtDateTime: admin.fmtDateTime,
+        // Admin panes (Issue #124): the audit trail and the diagnostics snapshot
+        // were reachable only through curl before.
+        adminTabs: admin.adminTabs, adminTab: admin.adminTab, selectAdminTab: admin.selectAdminTab,
+        auditEntries: admin.auditEntries, auditLoading: admin.auditLoading, auditError: admin.auditError,
+        loadAudit: admin.loadAudit, auditDetailsText: admin.auditDetailsText,
+        redactDetails: admin.redactDetails,
+        diagnostics: admin.diagnostics, diagnosticsLoading: admin.diagnosticsLoading,
+        diagnosticsError: admin.diagnosticsError, diagnosticsSections: admin.diagnosticsSections,
+        loadDiagnostics: admin.loadDiagnostics,
         // System universe (read-only)
         systemUniverse: su.systemUniverse, universeLoading: su.universeLoading,
         usUniverse: su.usUniverse, hkUniverse: su.hkUniverse,
