@@ -254,6 +254,73 @@
     };
   }
 
+  // ── useUrlState: the address bar carries the view (Issue #125) ─────
+  // Everything the page showed — tab, month, selected day — lived only in refs.
+  // A refresh dropped the reader back to today, a shared link landed the
+  // recipient on *their* default view, and 后退 left the site instead of
+  // stepping back through the calendar. `?tab=&month=&date=` is written with
+  // `pushState` for a tab/month change (a real navigation step) and
+  // `replaceState` for the selection (a click-through must not fill the history).
+  function useUrlState(host) {
+    const TABS = ['calendar', 'watchlist', 'universe'];
+    const who = host === undefined ? (typeof window !== 'undefined' ? window : null) : host;
+    const MONTH = /^(\d{4})-(\d{2})$/;
+    const DAY = /^\d{4}-\d{2}-\d{2}$/;
+
+    function monthKey(date) {
+      if (!date || typeof date.getFullYear !== 'function') return '';
+      return date.getFullYear() + '-' + String(date.getMonth() + 1).padStart(2, '0');
+    }
+    // Returns null for anything the calendar cannot render — a 13th month, a
+    // truncated year, an empty string — so a bad link falls back instead of
+    // producing `new Date(NaN)`.
+    function monthDate(key) {
+      const match = MONTH.exec(String(key || ''));
+      if (!match) return null;
+      const year = Number(match[1]);
+      const month = Number(match[2]);
+      if (month < 1 || month > 12 || year < 1970 || year > 2999) return null;
+      return new Date(year, month - 1, 1);
+    }
+    function parseUrlState(search) {
+      const params = new URLSearchParams(String(search || '').replace(/^\?/, ''));
+      const tab = params.get('tab');
+      const month = params.get('month');
+      const day = params.get('date');
+      // `''` means 「user's default」 — never `undefined`, so the caller can tell
+      // "not in the link" from "in the link but unusable".
+      return {
+        tab: TABS.includes(tab) ? tab : '',
+        month: monthDate(month) ? month : '',
+        date: DAY.test(String(day || '')) ? day : '',
+      };
+    }
+    // An unusable value is not written back: a link must not carry `?tab=nonsense`
+    // for the next reader to copy.
+    function buildUrlState(state) {
+      const params = new URLSearchParams();
+      if (state && TABS.includes(state.tab)) params.set('tab', state.tab);
+      if (state && monthDate(state.month)) params.set('month', state.month);
+      if (state && DAY.test(String(state.date || ''))) params.set('date', state.date);
+      const query = params.toString();
+      return query ? '?' + query : '';
+    }
+    function write(mode, state) {
+      const query = buildUrlState(state);
+      if (!who || !who.history || !who.location) return query;
+      const url = query || who.location.pathname || '';
+      if (mode === 'push') who.history.pushState({}, '', url);
+      else who.history.replaceState({}, '', url);
+      return query;
+    }
+
+    return {
+      TABS, monthKey, monthDate, parseUrlState, buildUrlState,
+      pushUrl: (state) => write('push', state),
+      replaceUrl: (state) => write('replace', state),
+    };
+  }
+
   // ── useWatchlist: search + CRUD + own "next earnings" source ────
   function useWatchlist(apiFetch, showToast, loadEarnings) {
     const watchlist = ref([]);
@@ -945,6 +1012,15 @@
       // 3. Calendar
       const cal = useCalendar(earnings, null, watchlistOnly);
 
+      // 3b. Address bar (Issue #125). Read once, before the first load, so a
+      // shared link renders the view it names; the month is applied to
+      // `currentDate` immediately because the earnings request window follows it.
+      const url = useUrlState();
+      const urlInitial = url.parseUrlState(typeof window !== 'undefined' ? window.location.search : '');
+      if (urlInitial.tab) appTab.value = urlInitial.tab;
+      const initialMonth = url.monthDate(urlInitial.month);
+      if (initialMonth) cal.currentDate.value = initialMonth;
+
       // 4. Watchlist (needs loadEarnings callback)
       const wl = useWatchlist(apiFetch, showToast, () => loadEarnings());
       cal.watchlist = wl.watchlist; // wire watchlist into calendar
@@ -1027,19 +1103,50 @@
         }
       }
 
+      // ── Address bar writes (Issue #125) ──────────────────────
+      function currentUrlState() {
+        return {
+          tab: appTab.value,
+          month: url.monthKey(cal.currentDate.value),
+          date: cal.selectedDay.value ? localYmd(cal.selectedDay.value.date) : '',
+        };
+      }
+      // A tab or month change is a step the reader may want to undo, so it pushes;
+      // selecting a day is a click-through inside the same view, so it replaces —
+      // otherwise every cell tap would need its own 后退 press.
+      watch([appTab, cal.currentDate], () => url.pushUrl(currentUrlState()));
+      watch(() => (cal.selectedDay.value ? localYmd(cal.selectedDay.value.date) : ''),
+        () => url.replaceUrl(currentUrlState()));
+
+      // The linked day can only be resolved once the month's cells exist, i.e.
+      // after the first load; anything that is not in the window keeps the
+      // default (today) instead of inventing a selection.
+      function applyLinkedDate() {
+        if (!urlInitial.date) return;
+        const cell = cal.calendarCells.value.find(c => localYmd(c.date) === urlInitial.date);
+        if (!cell) return;
+        cal.selectedEarning.value = null;
+        cal.decision.value = null;
+        cal.selectedDay.value = cell;
+      }
+
       // ── Lifecycle ────────────────────────────────────────────
       watch(cal.currentDate, loadEarnings);
 
       // The watchlist data must not follow the calendar month; it is refreshed
       // when the page is (re)entered so a long calendar session cannot show a
       // stale "下次财报" (Issue #56).
-      watch(appTab, (tab) => {
+      // Factored out because a tab named by the address bar (Issue #125) reaches
+      // the page without passing through the watch: `appTab` is already set when
+      // the watcher is registered, so the entry load has to be callable directly.
+      function loadTabData(tab) {
         if (tab === 'watchlist' && user.value) wl.loadNextEarnings();
         // The universe is the same range for everyone and changes only when an
         // admin edits the source, so it is read on entry instead of being kept
         // in step with the calendar month.
         if (tab === 'universe' && user.value) su.loadUniverse();
-      });
+      }
+      watch(appTab, loadTabData);
 
       onMounted(async () => {
         try {
@@ -1055,6 +1162,8 @@
           await wl.loadNextEarnings();
         }
         await loadEarnings();
+        applyLinkedDate();
+        loadTabData(appTab.value);
       });
 
       // ── Public API ───────────────────────────────────────────
