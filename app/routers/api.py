@@ -4,6 +4,7 @@ Issue #7: layer cache for earnings and popular stocks.
 OpenAPI: all endpoints have response_model for schema generation.
 """
 import logging
+from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException
 from datetime import date, timedelta
 from ..auth import get_current_user, ensure_user
@@ -550,8 +551,15 @@ def api_search_stocks(q: str, user=Depends(get_current_user)):
 
 
 @router.get("/export")
-def api_export(start: date, end: date, format: str = "csv", user=Depends(get_current_user)):
-    """Export earnings data as CSV or JSON."""
+def api_export(start: date, end: date, format: Literal["csv", "json"] = "csv", user=Depends(get_current_user)):
+    """Export earnings data as CSV or JSON.
+
+    Issue #127: `format` used to be a bare `str` with a single `== "json"` branch,
+    so `format=jsoon`, `format=JSON` or `format=xlsx` all returned a **CSV** with
+    HTTP 200 — a typo produced a file with the wrong format and no signal at all.
+    Declaring the enum makes FastAPI answer 422 and name the allowed values; the
+    Content-Type below now follows the branch that actually ran.
+    """
     from ..earnings import fetch_earnings_from_db
     from ..universe import popular_stocks
     from fastapi.responses import StreamingResponse
