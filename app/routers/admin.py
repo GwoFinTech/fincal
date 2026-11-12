@@ -66,6 +66,17 @@ def admin_user(user=Depends(get_current_user)):
     return require_admin(user)
 
 
+def _actor_id(user: dict) -> str | None:
+    """Audit actor as text; the log column is text, the identity may be numeric."""
+    value = user.get("id")
+    return None if value is None else str(value)
+
+
+def _managed_target(row: dict) -> str:
+    """``managed_watchlist:12`` — stable enough to grep, unlike the symbol alone."""
+    return f"managed_watchlist:{row.get('id')}"
+
+
 def _normalize_managed(payload: ManagedInput) -> tuple[str, str]:
     """Validate a managed-watchlist entry, mapping the code to the admin error
     contract: a symbol/market mismatch keeps its own language-neutral code so the
@@ -117,7 +128,8 @@ def list_managed_watchlist(_: dict = Depends(admin_user)):
 
 
 @router.post("/watchlist", status_code=201)
-def add_managed_watchlist(payload: ManagedInput, _: dict = Depends(admin_user)):
+def add_managed_watchlist(payload: ManagedInput, user: dict = Depends(admin_user)):
+    from ..audit import log_admin_action
     symbol, market = _normalize_managed(payload)
     with db.db_cursor() as cur:
         cur.execute(
@@ -127,6 +139,13 @@ def add_managed_watchlist(payload: ManagedInput, _: dict = Depends(admin_user)):
             (symbol, market),
         )
         row = dict(cur.fetchone())
+        # Issue #123: the managed list decides what the calendar, the export and
+        # the iCal feed contain, so a wrong row added or removed here is exactly
+        # the change an operator later has to explain. Written through the same
+        # cursor as the change: no 「已写入但审计失败」 500, no silently missing row.
+        log_admin_action("add_managed_watchlist", actor_id=_actor_id(user),
+                         actor_email=user.get("email"), target=_managed_target(row),
+                         details={"symbol": row["symbol"], "market": row["market"]}, cur=cur)
     # A managed symbol joins the default calendar/export universe, which is
     # cached; drop those caches so the change is visible immediately instead of
     # after the TTL (Issue #58).
@@ -135,11 +154,15 @@ def add_managed_watchlist(payload: ManagedInput, _: dict = Depends(admin_user)):
 
 
 @router.put("/watchlist/{watchlist_id}", response_model=ManagedWatchlistItem)
-def update_managed_watchlist(watchlist_id: int, payload: ManagedInput, _: dict = Depends(admin_user)):
+def update_managed_watchlist(watchlist_id: int, payload: ManagedInput, user: dict = Depends(admin_user)):
+    from ..audit import log_admin_action
     symbol, market = _normalize_managed(payload)
     with db.db_cursor() as cur:
-        cur.execute("SELECT 1 FROM managed_watchlist WHERE id=%s", (watchlist_id,))
-        if not cur.fetchone():
+        # The previous identity is part of the record: 「谁把这行从 AAPL 改成 MSFT」
+        # cannot be answered from the new value alone (Issue #123).
+        cur.execute("SELECT id, symbol, market FROM managed_watchlist WHERE id=%s", (watchlist_id,))
+        before = cur.fetchone()
+        if not before:
             raise NotFoundError("managed_watchlist")
         cur.execute("SELECT id FROM managed_watchlist WHERE symbol=%s AND market=%s AND id != %s", (symbol, market, watchlist_id))
         if cur.fetchone():
@@ -150,16 +173,30 @@ def update_managed_watchlist(watchlist_id: int, payload: ManagedInput, _: dict =
             (symbol, market, watchlist_id),
         )
         row = dict(cur.fetchone())
+        log_admin_action("update_managed_watchlist", actor_id=_actor_id(user),
+                         actor_email=user.get("email"), target=_managed_target(row),
+                         details={"before": {"symbol": before["symbol"], "market": before["market"]},
+                                  "after": {"symbol": row["symbol"], "market": row["market"]}},
+                         cur=cur)
     invalidate_symbol_universe()  # symbol identity changed → universe is stale (Issue #58)
     return row
 
 
 @router.delete("/watchlist/{watchlist_id}")
-def delete_managed_watchlist(watchlist_id: int, _: dict = Depends(admin_user)):
+def delete_managed_watchlist(watchlist_id: int, user: dict = Depends(admin_user)):
+    from ..audit import log_admin_action
     with db.db_cursor() as cur:
-        cur.execute("DELETE FROM managed_watchlist WHERE id=%s", (watchlist_id,))
-        if cur.rowcount != 1:
+        # RETURNING keeps the deleted row, because after this statement it no
+        # longer exists to be described (Issue #123).
+        cur.execute("DELETE FROM managed_watchlist WHERE id=%s RETURNING id, symbol, market",
+                    (watchlist_id,))
+        deleted = cur.fetchone()
+        if not deleted:
             raise NotFoundError("managed_watchlist")
+        log_admin_action("delete_managed_watchlist", actor_id=_actor_id(user),
+                         actor_email=user.get("email"), target=_managed_target(deleted),
+                         details={"deleted": {"symbol": deleted["symbol"], "market": deleted["market"]}},
+                         cur=cur)
     invalidate_symbol_universe()  # removed symbol must leave the calendar too (Issue #58)
     return {"status": "removed"}
 
@@ -181,8 +218,8 @@ def list_sync_runs(limit: int = 50, _: dict = Depends(admin_user)):
 
 @router.post("/sync-runs/{run_id}/cancel", response_model=SyncRunCancelResult)
 def cancel_sync_run(run_id: int, user=Depends(admin_user)):
-    from ..sync_audit import request_cancel
     from ..audit import log_admin_action
+    from ..sync_audit import request_cancel
     cancelled = request_cancel(run_id)
     if not cancelled:
         raise ConflictError("run_not_cancellable", "run is not in running state")
@@ -193,8 +230,8 @@ def cancel_sync_run(run_id: int, user=Depends(admin_user)):
 
 @router.post("/sync-runs/recover", response_model=SyncRunRecoverResult)
 def recover_stale_runs(user=Depends(admin_user)):
-    from ..sync_audit import recover_stale_runs
     from ..audit import log_admin_action
+    from ..sync_audit import recover_stale_runs
     count = recover_stale_runs()
     log_admin_action("recover_stale_runs", actor_id=str(user.get("id")), actor_email=user.get("email"),
                      details={"recovered": count})
@@ -413,9 +450,9 @@ def retry_sync_run(run_id: int, user=Depends(admin_user)):
     ``consume_retry_requests``), leaving the usual terminal state and
     ``record_count`` on the fulfilling run.
     """
+    from ..audit import log_admin_action
     from ..freshness import SYNC_STAGES
     from ..sync_audit import RETRY_EXECUTOR, RETRY_REASON_CODE, request_retry
-    from ..audit import log_admin_action
 
     with db.db_cursor() as cur:
         cur.execute(
