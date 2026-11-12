@@ -567,7 +567,14 @@
             </div>
             <div v-if="decision" class="section-title">预期修正趋势</div>
             <div v-if="decision" class="surface p-3 mb-3">
-              <template v-if="decision.revision_trend.status === 'available'"><div class="detail-row"><span class="detail-label">EPS（首笔 → 最新）</span><span class="detail-value">{{ fmtNum(decision.revision_trend.eps.first) }} → {{ fmtNum(decision.revision_trend.eps.latest) }}（{{ decision.revision_trend.eps.direction === 'up' ? '上修' : decision.revision_trend.eps.direction === 'down' ? '下修' : '持平' }}）</span></div><div class="detail-row"><span class="detail-label">营收（首笔 → 最新）</span><span class="detail-value">{{ fmtBigNum(decision.revision_trend.revenue.first) }} → {{ fmtBigNum(decision.revision_trend.revenue.latest) }}</span></div></template>
+              <template v-if="decision.revision_trend.status === 'available'">
+                <!-- Issue #121: each metric carries its own direction. When that
+                     metric had fewer than two non-null snapshots the backend says
+                     `unavailable`; printing 「持平」 there asserted a comparison that
+                     was never made, beside a revenue cell that already read 「—」. -->
+                <div class="detail-row"><span class="detail-label">EPS（首笔 → 最新）</span><span class="detail-value"><template v-if="revisionIsComparable(decision.revision_trend.eps)">{{ fmtNum(decision.revision_trend.eps.first) }} → {{ fmtNum(decision.revision_trend.eps.latest) }}（{{ revisionDirectionLabel(decision.revision_trend.eps.direction) }}）</template><template v-else>{{ revisionDirectionLabel('unavailable') }}</template></span></div>
+                <div class="detail-row"><span class="detail-label">营收（首笔 → 最新）</span><span class="detail-value"><template v-if="revisionIsComparable(decision.revision_trend.revenue)">{{ fmtBigNum(decision.revision_trend.revenue.first) }} → {{ fmtBigNum(decision.revision_trend.revenue.latest) }}（{{ revisionDirectionLabel(decision.revision_trend.revenue.direction) }}）</template><template v-else>{{ revisionDirectionLabel('unavailable') }}</template></span></div>
+              </template>
               <p v-else class="text-[12px]" style="color:var(--text-muted);">快照历史不足，暂无法判断修正方向。</p>
               <p class="mt-2 text-[11px] leading-4" style="color:var(--text-muted);">来源：Longbridge 财报日历快照；比较首笔与最新已采集一致预期。</p>
             </div>

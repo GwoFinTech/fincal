@@ -682,6 +682,20 @@
     function metricDelta(actual, estimate) {
       return actual == null || estimate == null ? null : Number(actual) - Number(estimate);
     }
+    // Issue #121: `revision_trend.<metric>.direction` is `unavailable` when that
+    // metric had fewer than two non-null snapshots, but the panel's ternary chain
+    // only knew `up`/`down` and sent everything else to 「持平」 — a verdict about
+    // a comparison that was never made (the revenue half of the same row printed
+    // 「—」, so the row contradicted itself). 「持平」 belongs to `flat` alone.
+    function revisionDirectionLabel(direction) {
+      if (direction === 'up') return '上修';
+      if (direction === 'down') return '下修';
+      if (direction === 'flat') return '持平';
+      return '无历史样本（可比快照不足 2 次）';
+    }
+    function revisionIsComparable(series) {
+      return Boolean(series) && series.direction !== 'unavailable';
+    }
     // Issue #120: two decimals cannot carry a sub-cent EPS. `2068.HK` reported
     // -0.0038 and `NET` -0.00263, both rendered `-0.00`, while the same row's
     // 「较预期」 was computed from the real value — a row that contradicted
@@ -756,6 +770,7 @@
       growthValue, growthReason, growthNote, growthCell, growthSuppressedNote,
       beatMissStreak, beatMissStreakText, beatMissStreakNote,
       metricDelta, fmtNum, fmtPct, signedPct, fmtBigNum,
+      revisionDirectionLabel, revisionIsComparable,
       compactSymbol, currenciesDiffer, currencyOf, comparisonShortNote,
       estimateSourceLabel, hasLongbridgeConsensus, fqLabel, periodLabel,
     };
