@@ -213,11 +213,23 @@
       if (panel) panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
     function selectCell(cell) {
-      if (cell.earnings.length === 0) return;
+      // Issue #122: an empty day used to return here, so `selectedDay` kept the
+      // previous day's value — the panel header and list stayed on A after
+      // tapping B, and nothing on screen distinguished 「B 日没有财报」 from
+      // 「点击没生效」. Selecting a day is navigation, not a filter: every day
+      // is selectable and the panel renders its own empty state.
+      if (!cell || !cell.date) return;
       selectedEarning.value = null;
       decision.value = null;
       selectedDay.value = cell;
       revealSelectionPanel();
+    }
+    // `calendarCells` is recomputed whenever the month changes, so the stored
+    // `selectedDay` object is no longer the live one; identity would stop
+    // matching after a single navigation. Compare the date instead.
+    function isSelectedDay(cell) {
+      return Boolean(cell && cell.date && selectedDay.value && selectedDay.value.date)
+        && sameDay(selectedDay.value.date, cell.date);
     }
     function clearSelection() {
       selectedEarning.value = null;
@@ -238,7 +250,7 @@
       viewMode, currentDate, selectedEarning, decision, selectedDay,
       weekdays, monthLabel, calendarCells,
       prevMonth, nextMonth, goToday, selectEarning, selectCell, clearSelection,
-      cellAriaLabel,
+      cellAriaLabel, isSelectedDay,
     };
   }
 
@@ -918,6 +930,7 @@
         icalDialog, adminDialog, trapTab,
         prevMonth: cal.prevMonth, nextMonth: cal.nextMonth, goToday: cal.goToday,
         selectCell: cal.selectCell, clearSelection: cal.clearSelection,
+        isSelectedDay: cal.isSelectedDay,
         selectEarning: (e, day) => cal.selectEarning(e, day, apiFetch),
         // Watchlist
         watchlist: wl.watchlist, searchQuery: wl.searchQuery, searchResults: wl.searchResults,

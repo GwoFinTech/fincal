@@ -114,7 +114,7 @@
     .surface-raised { border-radius: 8px; }
 
     /* ── Calendar ── */
-    .calendar-cell { min-height: 112px; padding: 7px; position: relative; overflow: hidden; cursor: pointer; transition: background 0.15s; }
+    .calendar-cell { min-height: 112px; padding: 7px; position: relative; overflow: hidden; cursor: pointer; background: var(--bg); transition: background 0.15s; }
     .calendar-cell .before-tag, .calendar-cell .after-tag { display: none; }
     /* The badge's metrics live here, not in an inline style: an inline
        `font-size:10px;padding:1px 5px` wins over the narrow-screen rules below,
@@ -145,6 +145,11 @@
       font-size: 14px; border: 1px solid var(--border); }
     .detail-value, .ui-dialog table { font-variant-numeric: tabular-nums; }
     .calendar-cell.out { opacity: 0.35; }
+    /* Issue #122: the selected day had no visible state at all, so a tap on an
+       empty day (which also did not change the panel) looked like a dead click.
+       The background lives in the rule above, not in an inline style, so this
+       state can override it. */
+    .calendar-cell.selected { background: var(--surface-raised); box-shadow: inset 0 0 0 2px var(--primary-light); }
     .calendar-cell.today .day-num { background: var(--primary); color: white; width: 24px; height: 24px; border-radius: 50%; display: flex; align-items: center; justify-content: center; }
     .calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 1px; background: var(--border); border-radius: 12px; overflow: hidden; }
     .weekday-header { background: var(--surface); padding: 8px; font-size: 11px; font-weight: 500; color: var(--text-muted); text-align: center; text-transform: uppercase; }
@@ -413,8 +418,8 @@
         <div class="calendar-grid" style="border-radius:0;border-top:1px solid var(--border);">
           <div v-for="(cell, idx) in calendarCells" :key="idx"
                class="calendar-cell"
-               :class="{ 'out': !cell.inMonth, 'today': cell.isToday }"
-               style="background:var(--bg);"
+               :class="{ 'out': !cell.inMonth, 'today': cell.isToday, 'selected': isSelectedDay(cell) }"
+               :aria-current="isSelectedDay(cell) ? 'date' : null"
                tabindex="0"
                :aria-label="cellAriaLabel(cell)"
                @click="selectCell(cell)"
