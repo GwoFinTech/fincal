@@ -193,7 +193,7 @@
     function goToday() { currentDate.value = new Date(); }
 
     async function selectEarning(e, day, apiFetch) {
-      if (day) selectedDay.value = day;
+      if (day) { selectedDay.value = day; focusedDate.value = day.date; }
       selectedEarning.value = e;
       decision.value = null;
       revealSelectionPanel();
@@ -222,6 +222,7 @@
       selectedEarning.value = null;
       decision.value = null;
       selectedDay.value = cell;
+      focusedDate.value = cell.date;
       revealSelectionPanel();
     }
     // `calendarCells` is recomputed whenever the month changes, so the stored
@@ -230,6 +231,102 @@
     function isSelectedDay(cell) {
       return Boolean(cell && cell.date && selectedDay.value && selectedDay.value.date)
         && sameDay(selectedDay.value.date, cell.date);
+    }
+    // ── Roving tabindex (Issue #126) ────────────────────────────────
+    // #95 made a cell keyboard-operable by giving *every* cell `tabindex="0"`,
+    // so a month grid became ~35 tab stops and the next control was 35 presses
+    // away. A grid keeps exactly one tab stop: the cell that currently owns the
+    // focus, moved with the arrow keys. The badges inside a cell are taken out
+    // of the tab order for the same reason — the cell opens the day's list, and
+    // that list's rows are real buttons.
+    const focusedDate = ref(null);
+    const calendarWeeks = computed(() => {
+      const cells = calendarCells.value;
+      const weeks = [];
+      for (let i = 0; i < cells.length; i += 7) weeks.push(cells.slice(i, i + 7));
+      return weeks;
+    });
+    // Which cell owns the tab stop: the focused one while it is in the rendered
+    // window, otherwise the selection, then today, then the first in-month day.
+    // A history step or a month change can move the window under the focus, and
+    // falling back through this chain keeps exactly one cell at 0.
+    const focusIndex = computed(() => {
+      const cells = calendarCells.value;
+      if (!cells.length) return -1;
+      const key = focusedDate.value ? localYmd(focusedDate.value) : '';
+      const focused = key ? cells.findIndex(c => localYmd(c.date) === key) : -1;
+      if (focused >= 0) return focused;
+      const selected = cells.findIndex(c => isSelectedDay(c));
+      if (selected >= 0) return selected;
+      const today = cells.findIndex(c => c.isToday);
+      if (today >= 0) return today;
+      const inMonth = cells.findIndex(c => c.inMonth);
+      return inMonth >= 0 ? inMonth : 0;
+    });
+    function cellTabIndex(cell) {
+      const anchor = calendarCells.value[focusIndex.value];
+      return anchor && localYmd(anchor.date) === localYmd(cell.date) ? 0 : -1;
+    }
+    function focusCellDom(date) {
+      if (!date || typeof document === 'undefined') return;
+      nextTick(() => {
+        const el = document.querySelector('.calendar-cell[data-date="' + localYmd(date) + '"]');
+        if (el && el.focus) el.focus();
+      });
+    }
+    function moveFocus(targetIndex) {
+      const cells = calendarCells.value;
+      const index = focusIndex.value;
+      if (index < 0) return false;
+      const days = targetIndex - index;
+      if (!days) return true;
+      if (targetIndex >= 0 && targetIndex < cells.length) {
+        const cell = cells[targetIndex];
+        focusedDate.value = cell.date;
+        focusCellDom(cell.date);
+        return true;
+      }
+      // Past the rendered window: step the month, keep the weekday slot.
+      const anchor = cells[index].date;
+      const next = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() + days);
+      focusedDate.value = next;
+      currentDate.value = viewMode.value === 'week'
+        ? next
+        : new Date(next.getFullYear(), next.getMonth(), 1);
+      focusCellDom(next);
+      return true;
+    }
+    // PageUp/PageDown keep the day of the month, clamped to the target month's
+    // length (Jan 31 → Feb 28), instead of overflowing into March.
+    function moveFocusByMonth(delta) {
+      const cells = calendarCells.value;
+      const index = focusIndex.value;
+      const anchor = index >= 0 ? cells[index].date : new Date();
+      const year = anchor.getFullYear();
+      const month = anchor.getMonth() + delta;
+      const lastDay = new Date(year, month + 1, 0).getDate();
+      const next = new Date(year, month, Math.min(anchor.getDate(), lastDay));
+      focusedDate.value = next;
+      currentDate.value = viewMode.value === 'week'
+        ? next
+        : new Date(next.getFullYear(), next.getMonth(), 1);
+      focusCellDom(next);
+      return true;
+    }
+    const GRID_KEYS = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'];
+    function handleGridKey(key) {
+      const cells = calendarCells.value;
+      if (!cells.length || !GRID_KEYS.includes(key)) return false;
+      const index = focusIndex.value;
+      const row = 7;
+      if (key === 'ArrowLeft') return moveFocus(index - 1);
+      if (key === 'ArrowRight') return moveFocus(index + 1);
+      if (key === 'ArrowUp') return moveFocus(index - row);
+      if (key === 'ArrowDown') return moveFocus(index + row);
+      if (key === 'Home') return moveFocus(index - (index % row));
+      if (key === 'End') return moveFocus(index + (row - 1 - (index % row)));
+      if (key === 'PageUp') return moveFocusByMonth(-1);
+      return moveFocusByMonth(1);
     }
     function clearSelection() {
       selectedEarning.value = null;
@@ -251,6 +348,7 @@
       weekdays, monthLabel, calendarCells,
       prevMonth, nextMonth, goToday, selectEarning, selectCell, clearSelection,
       cellAriaLabel, isSelectedDay,
+      calendarWeeks, cellTabIndex, handleGridKey, focusIndex,
     };
   }
 
@@ -1223,6 +1321,12 @@
         prevMonth: cal.prevMonth, nextMonth: cal.nextMonth, goToday: cal.goToday,
         selectCell: cal.selectCell, clearSelection: cal.clearSelection,
         isSelectedDay: cal.isSelectedDay,
+        calendarWeeks: cal.calendarWeeks, cellTabIndex: cal.cellTabIndex,
+        onGridKeydown: (event) => {
+          // The cell keeps its own Enter/Space handler; this one owns navigation.
+          if (event.metaKey || event.ctrlKey || event.altKey) return;
+          if (cal.handleGridKey(event.key)) event.preventDefault();
+        },
         selectEarning: (e, day) => cal.selectEarning(e, day, apiFetch),
         // Watchlist
         watchlist: wl.watchlist, searchQuery: wl.searchQuery, searchResults: wl.searchResults,

@@ -411,16 +411,27 @@
       </div>
 
       <!-- Calendar grid -->
+      <!-- Issue #126: a grid keeps ONE tab stop. Every cell used to be
+           `tabindex="0"`, so a month was ~35 stops before the next control;
+           roving tabindex puts the anchors on the arrow keys instead. The row
+           wrappers are `display: contents`, so the CSS grid layout (and the two
+           visual `.calendar-grid` rows) is untouched. -->
       <div class="surface" style="padding:0;overflow:hidden;">
-        <div class="calendar-grid" style="border-radius:0;">
-          <div v-for="d in weekdays" :key="d" class="weekday-header">{{ d }}</div>
-        </div>
-        <div class="calendar-grid" style="border-radius:0;border-top:1px solid var(--border);">
-          <div v-for="(cell, idx) in calendarCells" :key="idx"
+        <div role="grid" aria-label="财报日历" style="display:contents;" @keydown="onGridKeydown">
+          <div class="calendar-grid" role="presentation" style="border-radius:0;">
+            <div role="row" style="display:contents;">
+              <div v-for="d in weekdays" :key="d" role="columnheader" class="weekday-header">{{ d }}</div>
+            </div>
+          </div>
+          <div class="calendar-grid" role="presentation" style="border-radius:0;border-top:1px solid var(--border);">
+            <div v-for="(week, wi) in calendarWeeks" :key="wi" role="row" style="display:contents;">
+          <div v-for="cell in week" :key="cell.date.getTime()"
+               role="gridcell"
                class="calendar-cell"
                :class="{ 'out': !cell.inMonth, 'today': cell.isToday, 'selected': isSelectedDay(cell) }"
                :aria-current="isSelectedDay(cell) ? 'date' : null"
-               tabindex="0"
+               :data-date="cell.date.getFullYear() + '-' + String(cell.date.getMonth() + 1).padStart(2, '0') + '-' + String(cell.date.getDate()).padStart(2, '0')"
+               :tabindex="cellTabIndex(cell)"
                :aria-label="cellAriaLabel(cell)"
                @click="selectCell(cell)"
                @keydown.enter.prevent="selectCell(cell)"
@@ -438,6 +449,7 @@
               </template>
               <button v-for="e in cell.earnings.slice(0, 4)" :key="e.id != null ? e.id : e.symbol+e.market+e.report_date+(e.report_type||'')"
                    type="button"
+                   tabindex="-1"
                    class="badge" :class="[('badge-' + e.market), { 'badge-mine': isMine(e), 'badge-predicted': e.is_predicted }]"
                    :title="e.company_name + (e.is_predicted ? ' (预测)' : '')"
                    :aria-label="e.symbol + (e.company_name ? ' ' + e.company_name : '') + (e.is_predicted ? ' 预测' : '')"
@@ -452,6 +464,8 @@
                 <span v-if="e.is_predicted" class="predicted-tag">预</span>
               </button>
               <div v-if="cell.earnings.length > 4" class="text-[10px]" style="color:var(--text-muted);">+{{ cell.earnings.length - 4 }}</div>
+            </div>
+          </div>
             </div>
           </div>
         </div>

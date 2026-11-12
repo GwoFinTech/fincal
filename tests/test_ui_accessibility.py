@@ -110,7 +110,10 @@ def test_a_calendar_cell_is_a_named_keyboard_control():
     start = html.index('class="calendar-cell"')
     cell = html[start:html.index(">", html.index('@keydown.space.prevent="selectCell(cell)"', start))]
 
-    assert 'tabindex="0"' in cell
+    # Issue #126: the tab stop is now roving — one cell at 0, the rest at -1 —
+    # so the literal `tabindex="0"` became a binding. A cell that always took a
+    # stop made the month grid 35 stops wide.
+    assert ':tabindex="cellTabIndex(cell)"' in cell
     assert ':aria-label="cellAriaLabel(cell)"' in cell
     assert '@keydown.enter.prevent="selectCell(cell)"' in cell
     assert '@keydown.space.prevent="selectCell(cell)"' in cell

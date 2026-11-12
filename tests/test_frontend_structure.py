@@ -44,7 +44,9 @@ def test_selection_keeps_day_context_and_lazy_detail_loading():
 
     assert '@click.stop="selectEarning(e, cell)"' in html
     assert "async function selectEarning(e, day" in js
-    assert "if (day) selectedDay.value = day;" in js
+    # The day context is still stored; Issue #126 also moves the keyboard focus
+    # anchor, so the roving tab stop follows the selection.
+    assert "if (day) { selectedDay.value = day; focusedDate.value = day.date; }" in js
     assert "selectedEarning.value = null;" in js
     assert "decision.value = null;" in js
     assert "selectedDay.value = cell;" in js
