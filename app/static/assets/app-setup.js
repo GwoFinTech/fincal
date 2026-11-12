@@ -600,16 +600,21 @@
             ? ' · 错误 ' + Object.entries(stats.errors).filter(([, n]) => n).map(([kind, n]) => kind + ' ' + n).join(', ')
             : ''),
       }));
+      // `app/freshness.check_freshness()` names its buckets `stale_stages` /
+      // `failed_stages` / `never_run_stages` / `stale_data`, and the derived
+      // tables are a separate list from the stages — reading the wrong key here
+      // would render zeros while the payload says two stages failed.
       const fresh = diag.freshness || {};
+      const names = (value) => (Array.isArray(value) && value.length ? value.join('、') : '无');
       const freshRows = [
         { label: '总体', value: (fresh.status || '—') + (fresh.error_code ? ' · ' + fresh.error_code : '') },
         { label: '判定阈值', value: (fresh.threshold_hours ?? '—') + ' 小时' },
-        { label: '落后 / 失败条目', value: String((fresh.stale || []).length) + ' / ' + String((fresh.failed || []).length) },
-        { label: '从未成功条目', value: String((fresh.never || []).length) },
+        { label: '失败阶段', value: names(fresh.failed_stages) },
+        { label: '落后阶段', value: names(fresh.stale_stages) },
+        { label: '从未运行阶段', value: names(fresh.never_run_stages) },
+        { label: '落后数据表', value: names(fresh.stale_data) },
+        { label: '检查时间', value: fresh.checked_at ? new Date(fresh.checked_at).toLocaleString('zh-CN', { hour12: false }) : '—' },
       ];
-      for (const name of [...(fresh.stale || []), ...(fresh.failed || []), ...(fresh.never || [])].slice(0, 8)) {
-        freshRows.push({ label: '· ' + name, value: '需关注' });
-      }
       return [
         { key: 'cache', title: '缓存', rows: cacheRows },
         { key: 'providers', title: '外部提供方', rows: providerRows },

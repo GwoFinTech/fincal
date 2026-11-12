@@ -57,8 +57,14 @@ const DIAG = {
   cache_by_name: { earnings: { hits: 10, misses: 2, hit_rate: 0.833 } },
   providers: { kurumi: { calls: 4, success: 3, success_rate: 0.75, avg_ms: 120.5,
                          errors: { timeout: 1, rate_limited: 0, connection: 0, invalid_response: 0 } } },
-  freshness: { status: 'degraded', error_code: 'stage_stale', threshold_hours: 192,
-               stale: ['longbridge'], failed: [], never: ['consensus'] },
+  // The real shape served by `app/freshness.check_freshness()`: the buckets are
+  // `stale_stages` / `failed_stages` / `never_run_stages` / `stale_data`, and the
+  // derived tables are listed apart from the stages.
+  freshness: { status: 'degraded', error_code: 'sync_stage_run_failed',
+               threshold_hours: 192, checked_at: '2026-11-12T03:50:49.717382+00:00',
+               stale_stages: [], never_run_stages: [],
+               failed_stages: ['longbridge', 'consensus'],
+               stale_data: ['earnings_consensus', 'earnings_forecast_eps'] },
   future_reported: 2,
 };
 
@@ -182,6 +188,11 @@ class AdminPaneTests(TestCase):
         fresh = {row["label"]: row["value"] for row in out["freshness_rows"]}
         self.assertIn("degraded", fresh["总体"])
         self.assertEqual(fresh["判定阈值"], "192 小时")
+        # The names, not zeros: reading `stale`/`failed`/`never` (which the payload
+        # never had) printed "0 / 0" beside a degraded status.
+        self.assertEqual(fresh["失败阶段"], "longbridge、consensus")
+        self.assertEqual(fresh["落后阶段"], "无")
+        self.assertEqual(fresh["落后数据表"], "earnings_consensus、earnings_forecast_eps")
 
         future = {row["label"]: row["value"] for row in out["future_rows"]}
         self.assertEqual(future["行数"], "2")
