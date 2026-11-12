@@ -161,12 +161,21 @@ def test_watchlist_next_report_has_its_own_forward_only_window():
     assert "watchlistInsight(item, earnings.value)" not in js
     assert "watchlistInsight: wl.watchlistInsight," in js
 
-    # Lifecycle: first paint, entering the tab, and watchlist mutations all
-    # refresh the watchlist's own data (the calendar month must not be a
-    # trigger for it).
-    assert "if (tab === 'watchlist' && user.value) wl.loadNextEarnings();" in js
-    assert js.count("await loadNextEarnings();") == 2
-    assert "await wl.loadNextEarnings();" in js
+    # Lifecycle: entering the tab and watchlist mutations refresh the
+    # watchlist's own data (the calendar month must not be a trigger for it), and
+    # Issue #132 moved the forward window off the first paint — the calendar
+    # loads only the symbol list, which `isMine()` needs for the ☆ markers.
+    assert "if (tab === 'watchlist' && user.value) {" in js
+    assert "wl.loadNextEarnings();" in js
+    assert js.count("await loadNextEarnings();") == 2, "the two write paths refresh it"
+    first_paint = js[js.index("onMounted(async () => {"):]
+    first_paint = first_paint[:first_paint.index("loadTabData(appTab.value);")]
+    assert "await wl.loadNextEarnings()" not in first_paint, (
+        "the 420-day watchlist window must not load on the calendar first paint"
+    )
+    assert "await wl.loadWatchlist();" in first_paint, (
+        "the symbol list stays: isMine() draws the calendar's ☆ markers from it"
+    )
     # Still the month that reloads the calendar — now guarded so a history step
     # (Issue #125) does not fire a second request while it restores the view.
     assert "watch(cal.currentDate, () => { if (!restoringFromHistory) loadEarnings(); });" in js

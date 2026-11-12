@@ -1308,7 +1308,15 @@
       // the page without passing through the watch: `appTab` is already set when
       // the watcher is registered, so the entry load has to be callable directly.
       function loadTabData(tab) {
-        if (tab === 'watchlist' && user.value) wl.loadNextEarnings();
+        // Issue #132: entering 自选 is what triggers its forward window; the
+        // calendar first paint no longer pays for it. The list itself is read
+        // here too so a deep link straight into the tab still fills the tables
+        // (the mount only loads it when a user is present, which is the same
+        // condition, but this keeps the tab self-sufficient).
+        if (tab === 'watchlist' && user.value) {
+          if (!wl.watchlistLoaded.value) wl.loadWatchlist();
+          wl.loadNextEarnings();
+        }
         // The universe is the same range for everyone and changes only when an
         // admin edits the source, so it is read on entry instead of being kept
         // in step with the calendar month.
@@ -1326,8 +1334,13 @@
           ical.updateIcalUrl();
         }
         if (user.value) {
+          // Issue #132: the calendar first paint used to fetch the 420-day
+          // forward window (`/api/earnings?watchlistOnly=true`) that only the
+          // 自选 tab renders. Most visits never open that tab, so the request is
+          // now issued on entry (`loadTabData`). The symbol list itself stays on
+          // first paint: `isMine()` needs it for the calendar's ☆ markers, and
+          // it is two orders of magnitude smaller than the window.
           await wl.loadWatchlist();
-          await wl.loadNextEarnings();
         }
         await loadEarnings();
         loadTabData(appTab.value);
