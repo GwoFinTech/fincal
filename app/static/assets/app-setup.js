@@ -1060,9 +1060,16 @@
     function fmtBigNum(n) {
       if (n == null) return '—';
       const v = Number(n);
+      if (!isFinite(v)) return '—';
       if (Math.abs(v) >= 1e12) return (v / 1e12).toFixed(2) + 'T';
       if (Math.abs(v) >= 1e9) return (v / 1e9).toFixed(2) + 'B';
       if (Math.abs(v) >= 1e6) return (v / 1e6).toFixed(1) + 'M';
+      // Issue #130: below 1e6 this used to fall through to `toLocaleString()`,
+      // so a HK small cap printed `1,234,567` beside `113.35B` and `9.21M` — no
+      // unit, widest cell in the column, and the magnitude had to be counted by
+      // eye. `K` completes the ladder (2/2/1/1 decimals, same as its neighbours);
+      // below 1000 the bare number is already readable.
+      if (Math.abs(v) >= 1e3) return (v / 1e3).toFixed(1) + 'K';
       return v.toLocaleString();
     }
     function estimateSourceLabel(e) {
