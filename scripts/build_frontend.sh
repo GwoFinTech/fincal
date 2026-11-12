@@ -27,11 +27,25 @@ if [ ! -x ./node_modules/.bin/tailwindcss ]; then
 fi
 
 echo "--- Tailwind: $ROOT/app/static/index.html + app-setup.js → app/static/assets/tailwind.css ---"
-./node_modules/.bin/tailwindcss \
-  -c "$ROOT/frontend/tailwind.config.js" \
-  -i "$ROOT/frontend/input.css" \
-  -o "$ROOT/app/static/assets/tailwind.css" \
-  --minify
+# The config's `content` globs are relative to the repo root, so the CLI has to
+# run there. `tailwindcss` used to be invoked from the scratch build dir, where
+# those globs match nothing: it emitted a utility-less stylesheet (a few KB of
+# preflight only) and printed "No utility classes were detected". Anything built
+# that way silently drops classes such as `hidden sm:table-cell`.
+(
+  cd "$ROOT"
+  "$BUILD/node_modules/.bin/tailwindcss" \
+    -c "$ROOT/frontend/tailwind.config.js" \
+    -i "$ROOT/frontend/input.css" \
+    -o "$ROOT/app/static/assets/tailwind.css" \
+    --minify
+)
+# A build that scanned nothing is indistinguishable from a real one until the UI
+# breaks, so fail loudly instead.
+if ! grep -q 'table-cell\|\.grid' "$ROOT/app/static/assets/tailwind.css"; then
+  echo "FAIL: tailwind.css contains no utilities — check the content globs in frontend/tailwind.config.js"
+  exit 1
+fi
 
 echo "--- Vendor Vue $VUE_VERSION → app/static/assets/vendor/vue.global.prod.js ---"
 mkdir -p "$ROOT/app/static/assets/vendor"

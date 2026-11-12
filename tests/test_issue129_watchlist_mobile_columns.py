@@ -12,6 +12,7 @@ so 代码/公司 · 下次财报 · EPS 预期 · 操作 fit in 390px. Desktop k
 Layout itself can only be proven in a browser, so these are the structural pins;
 the 390×844 pass is recorded on the issue.
 """
+import re
 import sys
 from pathlib import Path
 from unittest import TestCase
@@ -84,3 +85,68 @@ class WatchlistPhoneColumnsTests(TestCase):
             ("操作", '<th class="text-right px-4 py-2 font-medium">操作</th>'),
         ):
             self.assertEqual(self.html.count(klass), 2, label)
+
+
+# ── The class has to exist in the *shipped* stylesheet ───────────────────
+# `hidden sm:table-cell` hides the column on a phone, but `sm:table-cell` is a
+# Tailwind utility that only exists in the committed `tailwind.css`. That file is
+# pre-rendered (`scripts/build_frontend.sh`) and is the source of truth for
+# deploys, so a markup change without a rebuild is invisible in code review and
+# in the markup tests — and the column stays hidden at *every* width. That is
+# exactly what happened to this issue's fix on its first deploy.
+
+ESCAPED = '.[]/%:#(),!*+~<>="'
+
+
+def _escape(token: str) -> str:
+    return "".join("\\" + ch if ch in ESCAPED else ch for ch in token)
+
+
+def _shipped_css() -> str:
+    return (fc.ROOT / "app" / "static" / "assets" / "tailwind.css").read_text(encoding="utf-8")
+
+
+def _local_style_block() -> str:
+    return "\n".join(re.findall(r"<style[^>]*>(.*?)</style>", fc.read_index(), re.S))
+
+
+def _static_classes() -> set[str]:
+    tokens: set[str] = set()
+    for attr in re.findall(r'(?<!:)class="([^"]*)"', fc.read_index()):
+        if "{{" in attr or "$" in attr:
+            continue
+        tokens.update(attr.split())
+    return {t for t in tokens if not t.startswith("{") and not t.endswith("}")}
+
+
+class ShippedStylesheetCoversTheMarkupTests(TestCase):
+    def test_every_static_class_is_in_the_prerendered_tailwind_css(self):
+        css = _shipped_css()
+        local = _local_style_block()
+        missing = sorted(
+            token for token in _static_classes()
+            if f".{_escape(token)}" not in css
+            and not re.search(r"\." + re.escape(token) + r"[\s,{:.]", local)
+        )
+        self.assertEqual(
+            missing, [],
+            "these classes are used in index.html but missing from "
+            "app/static/assets/tailwind.css — run `bash scripts/build_frontend.sh`: " + ", ".join(missing),
+        )
+
+    def test_the_phone_rule_utility_exists(self):
+        css = _shipped_css()
+        assert ".sm\\:table-cell" in css and "@media (min-width:640px)" in css, (
+            "without `sm:table-cell` in the shipped CSS, `hidden` wins at every width "
+            "and the revenue column disappears on desktop too"
+        )
+
+    def test_the_build_script_runs_tailwind_from_the_repo_root(self):
+        script = (fc.ROOT / "scripts" / "build_frontend.sh").read_text(encoding="utf-8")
+        # The content globs are relative to the repo root, so the CLI must run
+        # there; from the scratch build dir it matches nothing and emits a
+        # utility-less stylesheet.
+        assert 'cd "$ROOT"' in script
+        assert '"$BUILD/node_modules/.bin/tailwindcss"' in script
+        assert "contains no utilities" in script, "a scan that matched nothing must fail the build"
+
