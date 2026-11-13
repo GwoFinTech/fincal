@@ -5,6 +5,7 @@ Futu API format:          MARKET.TICKER with 5-digit HK (e.g. US.AAPL, HK.00700)
 Longbridge API format:    TICKER.MARKET  (same as internal — uppercase)
 """
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -200,6 +201,67 @@ def market_mismatch(symbol: str, market: str) -> bool:
     if m == "US":
         return market_of(s) != "US"
     return False
+
+
+# ── Canonical form of a code the user typed (Issue #136) ───────────
+
+#: A code is ASCII: letters, digits, and the ``.`` / ``-`` that class shares and
+#: preferred shares carry (``BRK.A``, ``MKC.V``, ``ABC-PD``).  This is what
+#: separates ``00700`` from ``腾讯`` or ``TENCENT HOLDINGS``: ``market_of`` alone
+#: would call *any* suffix-less word US and hand ``腾讯`` back as a "code".
+_CODE_ALPHABET = re.compile(r"^[A-Z0-9][A-Z0-9.\-]*$")
+
+#: Longest ticker still read as a ticker.  The longest US listing ticker is five
+#: characters (``GOOGL``) plus a one-letter class suffix; a longer token is a
+#: word or a pasted URL, and treating it as a code would only add a predicate
+#: that can never match.
+_CODE_TICKER_MAX = 12
+
+#: Longest whole query still read as a code (``US.AAPL`` is 7; the bound only
+#: keeps an oversized token out of the normalize path).
+_CODE_MAX_LEN = 20
+
+
+def canonical_code(text: str | None) -> str | None:
+    """The canonical internal symbol for a code the user typed, or ``None``.
+
+    The watchlist search is the only way to add a symbol the calendar does not
+    already show, and it matched the query text with a bare ``ILIKE``: the write
+    path accepted ``00700`` / ``09988`` / ``AAPL.US`` / ``US.AAPL``
+    (:func:`normalize_user_symbol`), but searching those same spellings returned
+    nothing, so the codes Futu and Longbridge *display* — the first spelling a
+    user has in hand — read as "FinCal has never heard of this stock"
+    (Issue #136).
+
+    So the search asks this function what the typed text *would* be stored as,
+    and matches that spelling in addition to the literal text.  One definition of
+    "canonical" (:func:`market_of` → :func:`bare_ticker` → :func:`normalize`),
+    the same chain the write path uses, so search and write cannot drift apart.
+
+    ``None`` means "this is not code-shaped at all": empty, containing anything
+    outside the code alphabet (a Chinese name, a word with a space, a LIKE
+    metacharacter), longer than any ticker, or carrying a suffix from an exchange
+    FinCal does not serve (``600028.SH``).  It never invents a market either:
+    ``0700.US`` stays unservable rather than being rewritten to ``0700.HK``
+    (:func:`resolve_stored`).  A plain word such as ``TENCENT`` is code-shaped and
+    comes back as itself — an equality that matches no symbol, so the name tiers
+    below it decide the answer exactly as before.
+    """
+    s = str(text or "").strip().upper()
+    if not s or len(s) > _CODE_MAX_LEN or not _CODE_ALPHABET.match(s):
+        return None
+    market = market_of(s)
+    if market is None:
+        return None
+    ticker = bare_ticker(s)
+    if not ticker or len(ticker) > _CODE_TICKER_MAX:
+        return None
+    try:
+        return normalize(ticker, market)
+    except ValueError:
+        # ``normalize`` refuses the shapes ``market_mismatch`` lets through
+        # (``0700.US`` reads as US, then normalizes to bare digits).
+        return None
 
 
 # ── User write-path entry point (Issue #117) ───────────────────────

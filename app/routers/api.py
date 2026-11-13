@@ -9,7 +9,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from datetime import date, timedelta
 from ..auth import get_current_user, ensure_user
 from .. import db, config
-from ..symbol import normalize, normalize_user_symbol, sort_key, resolve_stored_rows
+from ..symbol import (
+    canonical_code,
+    normalize,
+    normalize_user_symbol,
+    sort_key,
+    resolve_stored_rows,
+)
 from ..layer_cache import LayerCache
 from ..errors import AppError, NotFoundError, ForbiddenError
 from ..schemas import (
@@ -460,8 +466,19 @@ def api_universe(user=Depends(get_current_user)):
 #   * still *finds* a symbol by any spelling that is attached to it anywhere — its own
 #     rows (including a rename it no longer uses) or its cached name — so narrowing the
 #     display name does not narrow the search;
-#   * orders the matches by relevance — exact code, code prefix, code substring,
-#     then name-only — with `market, symbol` keeping each tier stable.
+#   * orders the matches by relevance — exact *canonical* code, exact code,
+#     code prefix, code substring, then name-only — with `market, symbol` keeping
+#     each tier stable.
+#
+# The code tier reads the query through `symbol.canonical_code` (Issue #136):
+# `ILIKE` alone matched the typed text literally, so the write path's own
+# accepted spellings (`00700`, `09988`, `AAPL.US`, `US.AAPL` — what Futu and
+# Longbridge display) searched to zero rows while `POST /api/watchlist` stored
+# them happily.  `_search_pattern` stays literal; the canonical spelling joins
+# the `WHERE` as an equality and outranks every substring tier, which also puts
+# `0700.HK` ahead of `7001.HK` for `q=700`.  `%(canon)s` is `NULL` for a name
+# query, and `symbol = NULL` is `NULL` — never true — so a name search keeps
+# exactly the ladder it had.
 _SEARCH_SQL = f"""
 WITH {_AUTHORITATIVE_NAME_CTE},
 symbols AS (
@@ -478,6 +495,7 @@ named AS (
 SELECT symbol, market, COALESCE(row_name, cached_name, '') AS company_name
 FROM named
 WHERE symbol ILIKE %(like)s
+   OR symbol = %(canon)s
    OR COALESCE(row_name, cached_name) ILIKE %(like)s
    OR cached_name ILIKE %(like)s
    OR EXISTS (
@@ -487,10 +505,11 @@ WHERE symbol ILIKE %(like)s
       )
 ORDER BY
     CASE
-        WHEN upper(symbol) = upper(%(exact)s) THEN 0
-        WHEN symbol ILIKE %(prefix)s THEN 1
-        WHEN symbol ILIKE %(like)s THEN 2
-        ELSE 3
+        WHEN symbol = %(canon)s THEN 0
+        WHEN upper(symbol) = upper(%(exact)s) THEN 1
+        WHEN symbol ILIKE %(prefix)s THEN 2
+        WHEN symbol ILIKE %(like)s THEN 3
+        ELSE 4
     END,
     market, symbol
 LIMIT %(limit)s
@@ -509,12 +528,17 @@ def _search_pattern(q: str) -> str:
 
 
 def search_stocks(cur, q: str, limit: int = 20) -> list[dict]:
-    """One row per symbol matching ``q``, most relevant first (Issue #69)."""
+    """One row per symbol matching ``q``, most relevant first (Issue #69).
+
+    ``q`` is matched both literally and as the canonical code it would be stored
+    as (Issue #136), so ``00700`` finds ``0700.HK`` and ``AAPL.US`` finds ``AAPL``.
+    """
     like = _search_pattern(q)
     cur.execute(_SEARCH_SQL, {
         "like": like,
         "prefix": like[1:] if len(like) > 1 else like,   # strip the leading wildcard
         "exact": q.strip(),
+        "canon": canonical_code(q),
         "limit": limit,
     })
     return [dict(row) for row in cur.fetchall()]

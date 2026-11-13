@@ -88,11 +88,12 @@ def test_statement_finds_a_symbol_by_its_cached_and_historical_names():
 
 
 def test_statement_ranks_an_exact_code_before_a_name_substring():
-    """The ladder is exact code → code prefix → code substring → name only."""
+    """The ladder is exact canonical code → exact code → prefix → substring → name."""
     ladder = _SEARCH_SQL.split("ORDER BY", 1)[1]
-    assert ladder.index("upper(symbol) = upper(%(exact)s) THEN 0") < \
-        ladder.index("symbol ILIKE %(prefix)s THEN 1") < \
-        ladder.index("symbol ILIKE %(like)s THEN 2") < ladder.index("ELSE 3")
+    assert ladder.index("symbol = %(canon)s THEN 0") < \
+        ladder.index("upper(symbol) = upper(%(exact)s) THEN 1") < \
+        ladder.index("symbol ILIKE %(prefix)s THEN 2") < \
+        ladder.index("symbol ILIKE %(like)s THEN 3") < ladder.index("ELSE 4")
     # Each tier stays stable, and the page is still 20 rows.
     assert "market, symbol" in ladder
     assert "LIMIT %(limit)s" in _SEARCH_SQL
@@ -107,6 +108,8 @@ def test_search_wires_the_parameters_the_statement_declares():
     assert params["like"] == "%0700%"
     assert params["prefix"] == "0700%"
     assert params["exact"] == "0700"
+    # The canonical spelling travels with the query (Issue #136).
+    assert params["canon"] == "0700.HK"
     assert params["limit"] == 20
 
 
@@ -132,7 +135,8 @@ def test_the_metacharacter_escapes_reach_the_statement():
     """`q=%` must search for a percent sign, not return the first page of the table."""
     cur = _RecordingCursor(rows=[])
     search_stocks(cur, "%")
-    assert cur.executed[0][1] == {"like": "%\\%%", "prefix": "\\%%", "exact": "%", "limit": 20}
+    assert cur.executed[0][1] == {"like": "%\\%%", "prefix": "\\%%", "exact": "%",
+                                  "canon": None, "limit": 20}
     search_stocks(cur, "_")
     assert cur.executed[1][1]["like"] == "%\\_%"
 
