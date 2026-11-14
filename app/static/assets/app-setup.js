@@ -576,13 +576,21 @@
     // failure toast it already shows must not be overwritten by a success toast
     // for a change that never happened — nor by a refresh (`loadEarnings`
     // clears the read error) racing the explanation into oblivion.
+    //
+    // Issue #137: `already_exists` is a *200*, so #82's `if (!added)` guard
+    // cannot see it and the row count never changed while the toast said 「已添加」.
+    // The candidate rows are toggles now, but a stale list (another tab, another
+    // device, a watchlist written after this page loaded) still lands here — and
+    // then the honest answer is 「已在自选」.
     async function addToWatchlist(symbol, market) {
       const added = await apiFetch(`/api/watchlist?symbol=${encodeURIComponent(symbol)}&market=${encodeURIComponent(market)}`, { method: 'POST', expectOk: true });
       if (!added) return;
       await loadWatchlist();
       await loadEarnings();
       await loadNextEarnings();
-      showToast('已添加 ' + symbol);
+      // The refresh above is what makes the row flip to 「已自选」, so both
+      // branches still refresh; only the sentence changes.
+      showToast((added.status === 'already_exists' ? '已在自选 ' : '已添加 ') + symbol);
       searchQuery.value = '';
       searchResults.value = [];
     }

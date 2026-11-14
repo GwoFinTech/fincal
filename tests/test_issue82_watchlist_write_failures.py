@@ -171,12 +171,19 @@ def prefix_source() -> str:
 
     Pins that the probe can actually see the bug: without the ``if (!ok)``
     guards and without ``expectOk``, a 401 has to render 「已添加」 again.
+    #137's status read is reverted as well — it inspects the body of a write
+    that #82's pre-fix code never checked, so leaving it in would crash instead
+    of reproducing the false success.
     """
     js = fc.read_app_js()
     js, n_guards = re.subn(r"^\s*if \(!(?:added|removed)\) return;\n", "", js, flags=re.M)
     assert n_guards == 2, f"expected 2 write guards, removed {n_guards}"
     js, n_flags = re.subn(r", expectOk: true", "", js)
     assert n_flags == 2, f"expected 2 expectOk flags, removed {n_flags}"
+    js, n_status = re.subn(
+        r"\(added\.status === 'already_exists' \? '已在自选 ' : '已添加 '\)", "'已添加 '", js
+    )
+    assert n_status == 1, f"expected 1 status branch (#137), removed {n_status}"
     return js
 
 
@@ -184,7 +191,10 @@ class TestSourceContract(TestCase):
     def test_write_paths_check_the_result_before_toasting_success(self):
         """Acceptance 1: the guard must precede the 「已添加 / 已移除」 toast."""
         js = fc.read_app_js()
-        for name, toast in (("addToWatchlist", "showToast('已添加"), ("removeFromWatchlist", "showToast('已移除")):
+        # #137 moved the add toast's sentence behind a status check
+        # (`showToast((added.status === ... : '已添加 ') + symbol);`), so the
+        # pinned literal is the sentence rather than the call's opening quote.
+        for name, toast in (("addToWatchlist", "'已添加 '"), ("removeFromWatchlist", "showToast('已移除")):
             body = function_body(js, name)
             guard = re.search(r"if \(!(\w+)\) return;", body)
             self.assertIsNotNone(guard, f"{name} has no return-value guard")

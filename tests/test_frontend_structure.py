@@ -72,7 +72,13 @@ def test_watchlist_page_reuses_search_and_mutation_apis_without_calendar_pills()
     html, js = _read_all()
 
     assert "@input=\"doSearch\"" in html
-    assert "@click=\"addToWatchlist(r.symbol, r.market)\"" in html
+    # Issue #137: a candidate row is a membership-aware toggle — the same
+    # ☆/★ convention as the calendar panel — so an already-added symbol is
+    # labelled 「已自选」 and clicking it removes it instead of re-POSTing an
+    # `already_exists` 200 and calling that success.
+    assert "@click=\"toggleWatchlist(r.symbol, r.market)\"" in html
+    assert "@click=\"addToWatchlist(r.symbol, r.market)\"" not in html
+    assert "@click=\"toggleWatchlist(s.symbol, s.market)\"" in html
     assert "@click=\"removeFromWatchlist(w.symbol, w.market)\"" in html
     assert "async function addToWatchlist(" in js
     assert "async function removeFromWatchlist(" in js
