@@ -278,8 +278,8 @@
     <!-- Calendar controls: month/week is deliberately scoped to the calendar tab. -->
     <div v-if="appTab === 'calendar'" class="max-w-[1600px] mx-auto px-4 py-3 flex flex-wrap items-center gap-2">
       <div class="flex border-b" style="border-color:var(--border);">
-        <button @click="viewMode='month'" :class="viewMode==='month' ? 'tab-active' : 'tab-inactive'" class="pb-1.5 px-2.5 text-[13px] font-medium transition">月</button>
-        <button @click="viewMode='week'" :class="viewMode==='week' ? 'tab-active' : 'tab-inactive'" class="pb-1.5 px-2.5 text-[13px] font-medium transition">周</button>
+        <button @click="setViewMode('month')" :class="viewMode==='month' ? 'tab-active' : 'tab-inactive'" class="pb-1.5 px-2.5 text-[13px] font-medium transition">月</button>
+        <button @click="setViewMode('week')" :class="viewMode==='week' ? 'tab-active' : 'tab-inactive'" class="pb-1.5 px-2.5 text-[13px] font-medium transition">周</button>
       </div>
 
       <div class="flex items-center gap-1.5">

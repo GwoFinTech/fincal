@@ -190,6 +190,9 @@
   // ── useCalendar: calendar navigation + cell computation ─────────
   function useCalendar(earnings, watchlist, watchlistOnly) {
     const viewMode = ref('month');
+    // The grid anchor. The month branch only reads its year/month; the week
+    // branch reads the whole date, so entering 周 parks the exact day here
+    // (Issue #138) instead of leaving it at 当月 1 日.
     const currentDate = ref(new Date());
     const selectedEarning = ref(null);
     const decision = ref(null);
@@ -219,6 +222,8 @@
         startDate = new Date(year, month, 1 - firstDay.getDay());
         endDate = new Date(year, month + 1, 0 + (6 - lastDay.getDay()));
       } else {
+        // The week is built around the anchor's own date, not its month — which
+        // is why `setViewMode('week')` parks the selected day here first (#138).
         const dayOfWeek = d.getDay();
         startDate = new Date(year, month, d.getDate() - dayOfWeek);
         endDate = new Date(year, month, d.getDate() + (6 - dayOfWeek));
@@ -245,6 +250,31 @@
       }
       return cells;
     });
+
+    // 周视图的锚点（Issue #138）：选中日 → 当月里的今天 → 当前锚点。
+    // 「今天」只在它落在正在看的那个月时才算锚点——翻了几个月之后切「周」，
+    // 用户要看的是那个月的一周，不是「今天」那一周。
+    function weekAnchorDate() {
+      const selected = selectedDay.value && selectedDay.value.date;
+      if (selected) return new Date(selected.getFullYear(), selected.getMonth(), selected.getDate());
+      const anchor = currentDate.value;
+      const today = new Date();
+      return today.getFullYear() === anchor.getFullYear() && today.getMonth() === anchor.getMonth()
+        ? today
+        : null;
+    }
+    // 月视图的月份导航只把锚点停在当月 1 日，用户选中的那天只活在 `selectedDay`
+    // 里；两者一分叉，切「周」看到的就是 1 日那一周，而右侧面板仍停在选中日——
+    // 同屏出现两个互相矛盾的「当前日期」。切换视图是两个视图对齐锚点的唯一时机：
+    // 进周视图时把锚点搬到选中日，不动选中状态（翻周仍是纯导航）。
+    function setViewMode(mode) {
+      if (mode !== 'month' && mode !== 'week') return;
+      if (mode === viewMode.value) return;
+      viewMode.value = mode;
+      if (mode !== 'week') return;
+      const anchor = weekAnchorDate();
+      if (anchor) currentDate.value = anchor;
+    }
 
     function prevMonth() {
       const d = currentDate.value;
@@ -410,6 +440,7 @@
     return {
       viewMode, currentDate, selectedEarning, decision, selectedDay,
       weekdays, monthLabel, calendarCells,
+      setViewMode,
       prevMonth, nextMonth, goToday, selectEarning, selectCell, clearSelection,
       cellAriaLabel, isSelectedDay,
       calendarWeeks, cellTabIndex, handleGridKey, focusIndex,
@@ -1349,9 +1380,17 @@
               ? data.filter(e => wl.watchlist.value.some(w => w.symbol === e.symbol && w.market === e.market))
               : data;
             if (appTab.value === 'calendar') {
+              // Issue #138: a reload rebuilds the grid; it must not also throw the
+              // selection away. Turning the anchor towards the selected day (which
+              // a cross-month 周 entry does) triggers exactly this load, and the
+              // old code parked `selectedDay` on 「今天」 no matter what the reader
+              // had just opened. A day that is still in the new grid wins; a day
+              // that is not falls back to today, as before.
+              const keepKey = cal.selectedDay.value ? localYmd(cal.selectedDay.value.date) : '';
               cal.selectedDay.value = cal.calendarCells.value.find(cell => cell.isToday) || null;
               // A link (or a history step) names a day; it wins over 「today」.
               if (pendingDateKey) applyDateKey(pendingDateKey);
+              else if (keepKey) applyDateKey(keepKey);
             }
           }
         } finally {
@@ -1367,11 +1406,16 @@
           date: cal.selectedDay.value ? localYmd(cal.selectedDay.value.date) : '',
         };
       }
+      // The month is what a calendar *loads* and what a link carries. Moving the
+      // anchor inside that month — entering 周 parks the selected day there
+      // (Issue #138) — changes neither, so it must not refetch the window nor
+      // push a second, identical history entry.
+      const anchorMonth = computed(() => url.monthKey(cal.currentDate.value));
       // A tab or month change is a step the reader may want to undo, so it pushes;
       // selecting a day is a click-through inside the same view, so it replaces —
       // otherwise every cell tap would need its own 后退 press. A `popstate`
       // already *is* the history change, so it must not write one back.
-      watch([appTab, cal.currentDate], () => {
+      watch([appTab, anchorMonth], () => {
         if (!restoringFromHistory) url.pushUrl(currentUrlState());
       });
       watch(() => (cal.selectedDay.value ? localYmd(cal.selectedDay.value.date) : ''),
@@ -1417,7 +1461,7 @@
       }
 
       // ── Lifecycle ────────────────────────────────────────────
-      watch(cal.currentDate, () => { if (!restoringFromHistory) loadEarnings(); });
+      watch(anchorMonth, () => { if (!restoringFromHistory) loadEarnings(); });
 
       // The watchlist data must not follow the calendar month; it is refreshed
       // when the page is (re)entered so a long calendar session cannot show a
@@ -1469,7 +1513,7 @@
         // State
         user, earnings, appTab, watchlistOnly, loading, error, writeError, toast, appConfig,
         // Calendar
-        viewMode: cal.viewMode, currentDate: cal.currentDate,
+        viewMode: cal.viewMode, setViewMode: cal.setViewMode, currentDate: cal.currentDate,
         selectedEarning: cal.selectedEarning, decision: cal.decision, selectedDay: cal.selectedDay,
         weekdays: cal.weekdays, monthLabel: cal.monthLabel, calendarCells: cal.calendarCells,
         cellAriaLabel: cal.cellAriaLabel,

@@ -150,7 +150,9 @@ class UrlWiringTests(TestCase):
 
     def test_the_page_writes_its_state_on_view_and_selection_changes(self):
         js = fc.read_app_js()
-        self.assertIn("watch([appTab, cal.currentDate], () => {", js)
+        # The month key, not the ref (Issue #138): the 周 entry point parks the
+        # selected day in `currentDate`, which is not a new address-bar state.
+        self.assertIn("watch([appTab, anchorMonth], () => {", js)
         self.assertIn("if (!restoringFromHistory) url.pushUrl(currentUrlState());", js)
         self.assertIn("if (!restoringFromHistory) url.replaceUrl(currentUrlState());", js)
 

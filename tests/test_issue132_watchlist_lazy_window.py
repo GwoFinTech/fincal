@@ -70,6 +70,9 @@ class WatchlistLazyWindowTests(TestCase):
         add = js[js.index("async function addToWatchlist("):]
         add = add[:add.index("async function removeFromWatchlist(")]
         assert "await loadWatchlist();" in add and "await loadNextEarnings();" in add
-        # The calendar month keeps reloading only the calendar.
-        assert "watch(cal.currentDate, () => { if (!restoringFromHistory) loadEarnings(); });" in js
-        assert not re.search(r"watch\(cal\.currentDate, [^)]*loadNextEarnings", js)
+        # The calendar month keeps reloading only the calendar. The trigger is the
+        # month key, not the ref: entering 周 parks the selected day in
+        # `currentDate` without changing the month (Issue #138), and that move
+        # must not refetch the window.
+        assert "watch(anchorMonth, () => { if (!restoringFromHistory) loadEarnings(); });" in js
+        assert not re.search(r"watch\(anchorMonth, [^)]*loadNextEarnings", js)

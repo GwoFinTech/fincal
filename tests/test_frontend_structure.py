@@ -183,8 +183,9 @@ def test_watchlist_next_report_has_its_own_forward_only_window():
         "the symbol list stays: isMine() draws the calendar's ☆ markers from it"
     )
     # Still the month that reloads the calendar — now guarded so a history step
-    # (Issue #125) does not fire a second request while it restores the view.
-    assert "watch(cal.currentDate, () => { if (!restoringFromHistory) loadEarnings(); });" in js
+    # (Issue #125) does not fire a second request while it restores the view, and
+    # so moving the anchor inside a month (Issue #138) does not refetch at all.
+    assert "watch(anchorMonth, () => { if (!restoringFromHistory) loadEarnings(); });" in js
 
     # Template: reflected values, an algorithmic-date marker and an empty state
     # that no longer claims a period is "待确认" when there is no report date.
