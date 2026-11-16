@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from datetime import date, timedelta
 from ..auth import get_current_user, ensure_user
 from .. import db, config
+from ..company_name import display_name
 from ..symbol import (
     canonical_code,
     normalize,
@@ -329,8 +330,11 @@ def api_popular(user=Depends(get_current_user)):
 # FinCal's own additions apart from the shared upstream list.
 #
 # One display name per ``(symbol, market)``, shared by the search list and the
-# read-only system-universe view: the newest *provider* row's name (algorithm
-# rows only copy a provider name), with the ``stock_names`` cache as fallback.
+# read-only system-universe view: the newest *provider* row's spelling, with the
+# ``stock_names`` cache as fallback.  Which of the two a reader actually sees is
+# ``company_name.display_name`` (Issue #139): both columns leave the statement and
+# the rule is applied once, in Python, so this list, the calendar and the iCal
+# feed cannot pick differently.
 _AUTHORITATIVE_NAME_CTE = """authoritative_name AS (
     SELECT DISTINCT ON (symbol, market) symbol, market, company_name
     FROM earnings
@@ -342,7 +346,8 @@ _AUTHORITATIVE_NAME_CTE = """authoritative_name AS (
 _UNIVERSE_NAME_SQL = f"""
 WITH {_AUTHORITATIVE_NAME_CTE}
 SELECT p.symbol, p.market,
-       COALESCE(a.company_name, NULLIF(sn.company_name, ''), '') AS company_name
+       a.company_name AS row_name,
+       NULLIF(sn.company_name, '') AS cached_name
 FROM unnest(%(symbols)s::text[], %(markets)s::text[]) AS p(symbol, market)
 LEFT JOIN authoritative_name a ON a.symbol = p.symbol AND a.market = p.market
 LEFT JOIN stock_names sn ON sn.symbol = p.symbol AND sn.market = p.market
@@ -378,9 +383,11 @@ def _managed_codes() -> set[str] | None:
 def _universe_names(pairs: list[tuple[str, str]]) -> dict[tuple[str, str], str]:
     """Display names for the universe, one per ``(symbol, market)``.
 
-    Same precedence the search list uses (``_AUTHORITATIVE_NAME_CTE``): the
-    newest provider row's name, then the ``stock_names`` cache.  A failure here
-    only costs the names — the range itself is what the page is for.
+    Same precedence the search list uses (``_AUTHORITATIVE_NAME_CTE`` plus the
+    cache, through ``company_name.display_name``): the newest provider row's
+    spelling normally, the Chinese cached name when only the provider's Latin one
+    exists (Issue #139).  A failure here only costs the names — the range itself
+    is what the page is for.
     """
     if not pairs:
         return {}
@@ -394,7 +401,8 @@ def _universe_names(pairs: list[tuple[str, str]]) -> dict[tuple[str, str], str]:
     except Exception as exc:
         logger.warning("system universe: name lookup failed: %s", exc)
         return {}
-    return {(row["symbol"], row["market"]): row["company_name"] or "" for row in rows}
+    return {(row["symbol"], row["market"]): display_name(row["row_name"], row["cached_name"])
+            for row in rows}
 
 
 @router.get("/universe", response_model=SystemUniverse)
@@ -454,15 +462,18 @@ def api_universe(user=Depends(get_current_user)):
 # The statement now:
 #   * keeps one row per `(symbol, market)`;
 #   * displays the name the rest of the product already shows for that symbol — the
-#     newest *provider* row's name.  Algorithm-owned rows are ranked last because they
+#     newest *provider* row's spelling.  Algorithm-owned rows are ranked last because they
 #     merely copy a provider name, and a symbol's newest rows are its predictions (the
 #     ordering rule `predict_earnings._COMPANY_NAME_SQL` uses, Issue #68).  The
 #     `stock_names` cache (Kurumi > Longbridge > Futu, `app/company_name.py`) is the
-#     fallback for a symbol whose own rows never carried a name: naming this list from
-#     the cache first instead would print a second spelling beside the one the calendar
-#     and the watchlist use — 23 of today's 65 multi-spelling symbols differ that way,
-#     and 21 of the 112 visible symbols would answer a code search with a name their
-#     calendar events never show;
+#     fallback for a symbol whose own rows never carried a name, and — when it holds
+#     the Chinese name while the rows only have the provider's Latin one — the name the
+#     reader actually sees, through `company_name.display_name` (Issue #139).  Both
+#     columns leave the statement and the rule is applied once, in Python: naming this
+#     list from the cache first instead would print a second spelling beside the one the
+#     calendar and the watchlist use — 23 of today's 65 multi-spelling symbols differ
+#     that way, and 21 of the 112 visible symbols would answer a code search with a name
+#     their calendar events never show;
 #   * still *finds* a symbol by any spelling that is attached to it anywhere — its own
 #     rows (including a rename it no longer uses) or its cached name — so narrowing the
 #     display name does not narrow the search;
@@ -492,7 +503,7 @@ named AS (
     LEFT JOIN authoritative_name a ON a.symbol = s.symbol AND a.market = s.market
     LEFT JOIN stock_names sn ON sn.symbol = s.symbol AND sn.market = s.market
 )
-SELECT symbol, market, COALESCE(row_name, cached_name, '') AS company_name
+SELECT symbol, market, row_name, cached_name
 FROM named
 WHERE symbol ILIKE %(like)s
    OR symbol = %(canon)s
@@ -532,6 +543,8 @@ def search_stocks(cur, q: str, limit: int = 20) -> list[dict]:
 
     ``q`` is matched both literally and as the canonical code it would be stored
     as (Issue #136), so ``00700`` finds ``0700.HK`` and ``AAPL.US`` finds ``AAPL``.
+    The displayed name is ``company_name.display_name`` of the row spelling and
+    the cache (Issue #139): searching 波音 answers ``BA 波音``, not ``BA Boeing``.
     """
     like = _search_pattern(q)
     cur.execute(_SEARCH_SQL, {
@@ -541,7 +554,13 @@ def search_stocks(cur, q: str, limit: int = 20) -> list[dict]:
         "canon": canonical_code(q),
         "limit": limit,
     })
-    return [dict(row) for row in cur.fetchall()]
+    results = []
+    for row in cur.fetchall():
+        item = dict(row)
+        item["company_name"] = display_name(item.pop("row_name", None),
+                                           item.pop("cached_name", None))
+        results.append(item)
+    return results
 
 
 @router.get("/search", response_model=list[SearchItem])

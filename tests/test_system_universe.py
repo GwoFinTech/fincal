@@ -180,8 +180,8 @@ def test_names_come_from_the_authoritative_row_per_symbol():
     resp, executed = _call({
         "FROM managed_watchlist": [],
         "LEFT JOIN authoritative_name": [
-            {"symbol": "AAPL", "market": "US", "company_name": "苹果"},
-            {"symbol": "NVDA", "market": "US", "company_name": ""},
+            {"symbol": "AAPL", "market": "US", "row_name": "Apple", "cached_name": "苹果"},
+            {"symbol": "NVDA", "market": "US", "row_name": "", "cached_name": None},
         ],
     })
 

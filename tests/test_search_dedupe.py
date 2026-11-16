@@ -63,13 +63,15 @@ def test_statement_keys_the_result_by_symbol_and_market():
 
 
 def test_statement_names_a_candidate_the_way_the_calendar_names_it():
-    """Displayed name: the newest provider row, with the cached name as fallback.
+    """Displayed name: the newest provider row, resolved by the shared rule.
 
-    Naming this list from the cache *first* would print a spelling the calendar and
-    the watchlist never show for that symbol — the defect class Issue #68 fixed one
-    surface over (23 of today's 65 multi-spelling symbols differ between the two).
+    The statement ships both spellings and `company_name.display_name` decides
+    (Issue #139): the row's own name normally — naming this list from the cache
+    *first* would print a spelling the calendar and the watchlist never show for
+    that symbol (23 of today's 65 multi-spelling symbols differ between the two)
+    — and the cached Chinese name when the row only has the provider's Latin one.
     """
-    assert "COALESCE(row_name, cached_name, '')" in _SEARCH_SQL
+    assert "SELECT symbol, market, row_name, cached_name" in _SEARCH_SQL
     assert "LEFT JOIN stock_names" in _SEARCH_SQL
     # Algorithm rows only copy a provider name, and a symbol's newest rows *are* its
     # predictions — ranking them last is what keeps the copy from being circular
@@ -116,7 +118,8 @@ def test_search_wires_the_parameters_the_statement_declares():
 def test_search_trims_the_exact_match_and_returns_dict_rows():
     # RealDictCursor (the read path's cursor) yields mapping rows; `search_stocks`
     # copies them into plain dicts so FastAPI can serialise them into `SearchItem`.
-    cur = _RecordingCursor(rows=[{"symbol": "AAPL", "market": "US", "company_name": "苹果"}])
+    cur = _RecordingCursor(rows=[{"symbol": "AAPL", "market": "US",
+                                  "row_name": "Apple", "cached_name": "苹果"}])
     rows = search_stocks(cur, " AAPL ")
     assert cur.executed[0][1]["exact"] == "AAPL"
     assert rows == [{"symbol": "AAPL", "market": "US", "company_name": "苹果"}]
@@ -187,10 +190,12 @@ def test_search_returns_the_universe_rows_untouched():
     """The DB answer *is* the response: nothing is appended to it."""
     from app.routers import api
 
-    rows = [{"symbol": "0700.HK", "market": "HK", "company_name": "腾讯控股"}]
+    rows = [{"symbol": "0700.HK", "market": "HK", "row_name": "TENCENT",
+             "cached_name": "腾讯控股"}]
     with mock.patch.object(api.db, "db_cursor", lambda: _RowsConn(rows)), \
             mock.patch("subprocess.run", side_effect=AssertionError("must not shell out")):
-        assert api.api_search_stocks("0700", user={"id": 1}) == rows
+        assert api.api_search_stocks("0700", user={"id": 1}) == [
+            {"symbol": "0700.HK", "market": "HK", "company_name": "腾讯控股"}]
 
 
 def test_a_miss_is_logged_rather_than_swallowed(caplog):

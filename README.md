@@ -251,6 +251,41 @@ side (Issue #59). `tests/test_calendar_window.py` and
 `tests/test_frontend_structure.py` pin the outlets to that horizon, and
 `app/routers/ical.py` no longer carries a window literal of its own.
 
+## Company names (one display name, two languages)
+
+A symbol has two names, each with one owner:
+
+| Column | Content | Written by |
+|--------|---------|-----------|
+| `earnings.company_name` | the spelling the provider wrote that row with | the Futu / Longbridge / prediction upserts |
+| `stock_names.company_name` | the resolved **display** name — Kurumi first, usually Chinese | `scripts/sync_stock_names.py` |
+| `earnings.company_name_en` | the Latin name an `en` subscription renders | same upserts, fill-only from the cache |
+
+The two never converged, so a Chinese UI showed `TENCENT` / `Boeing` for 38 of
+the 116 universe symbols while the Chinese name sat resolved in the cache — and
+a search for 波音 answered `BA Boeing` (Issue #139). The rule now lives in
+`app/company_name.py`:
+
+* `display_name(row_name, cached_name)` — the cached name wins **exactly when it
+  is Chinese and the row's own spelling is not**; otherwise the row's own name
+  (or the cache, when the row has none). A Latin cached name never replaces a
+  row's name, and a row that already carries Chinese is not second-guessed.
+* `english_name(row_name, name_en, cached_name_en)` — the stored Latin name
+  first, the cache as fill-only fallback, then the row's own spelling. That last
+  step matters: `display_name` may have just replaced a Latin row name with the
+  Chinese one, and dropping it would turn an `en` title Chinese (the bug #55
+  fixed).
+
+Both are applied at the read boundary — `earnings.fetch_earnings_from_db` (the
+calendar, the CSV/JSON exports and the iCal feed) and `/api/search` /
+`/api/universe` — and **not** backfilled into `earnings`. The provider syncs
+rewrite `company_name` on every upsert and `predict_earnings` converges
+algorithm rows onto the newest provider spelling, so a written-in Chinese name
+would be reverted by the next sync and one symbol would drift back to two
+spellings — the regression #68 closed. `tests/test_issue139_display_names.py`
+pins the rule, all four outlets (including a real-database, rolled-back check)
+and the invariant that both rows of a symbol display the same name.
+
 ## Architecture
 
 ```

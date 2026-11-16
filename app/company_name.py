@@ -95,6 +95,46 @@ def is_english_name(value) -> bool:
     return bool(text) and not has_cjk(text)
 
 
+def display_name(row_name, cached_name) -> str:
+    """The one name a reader sees for a symbol (Issue #139).
+
+    ``earnings.company_name`` is the spelling the provider that wrote that row
+    uses — Futu and Longbridge only carry Latin ones — while ``stock_names``
+    caches the *display* name resolved Kurumi-first (:func:`resolve_company_name_result`),
+    usually Chinese.  A Latin-only row therefore showed the English name to a
+    Chinese reader even though the Chinese one was already resolved and the
+    reader had just searched for it by that very name.
+
+    This is the single rule every read path applies: the cache wins exactly when
+    it is Chinese and the row's own name is not.  Applied at the read boundary
+    rather than backfilled into ``earnings`` on purpose: the provider syncs
+    rewrite ``company_name`` from their own payload on every upsert (and
+    ``predict_earnings`` converges algorithm rows onto the newest provider
+    spelling), so a written-in Chinese name would be reverted by the next sync
+    and a symbol would drift back to two spellings — the regression #68 closed.
+    """
+    row_text = str(row_name or "").strip()
+    cached_text = str(cached_name or "").strip()
+    if cached_text and has_cjk(cached_text) and not has_cjk(row_text):
+        return cached_text
+    return row_text or cached_text
+
+
+def english_name(row_name, name_en, cached_name_en) -> str:
+    """The Latin name an ``en`` subscription renders (Issues #55, #106, #139).
+
+    A stored row value always wins and the cache is the fill-only fallback.  The
+    row's own ``company_name`` is the last candidate because
+    :func:`display_name` may have just replaced it with the cached Chinese name;
+    discarding it would turn an English title Chinese — the bug #55 fixed.
+    """
+    for candidate in (name_en, cached_name_en, row_name):
+        text = str(candidate or "").strip()
+        if is_english_name(text):
+            return text
+    return ""
+
+
 def kurumi_symbol(symbol: str, market: str) -> str:
     if market == "HK":
         return (symbol.split(".")[0].lstrip("0") or "0") + ".HK"

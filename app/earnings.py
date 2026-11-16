@@ -61,6 +61,7 @@ def fetch_earnings_from_db(
         where = " AND ".join(conditions)
         cur.execute(
             f"""SELECT e.*, CURRENT_DATE AS read_today,
+                   sn.company_name AS stock_names_company_name,
                    sn.company_name_en AS stock_names_company_name_en,
                    c.currency AS consensus_currency, c.eps_gaap AS consensus_eps_gaap,
                    c.eps_adjusted AS consensus_eps_adjusted, c.revenue AS consensus_revenue,
@@ -87,16 +88,26 @@ def fetch_earnings_from_db(
     if masked:
         logger.debug("masked %d future-dated actual(s) on the read path", masked)
 
-    # Issue #106: ``earnings.company_name_en`` is filled by the write paths, but a
-    # row written by a path that does not know the Latin name (a prediction created
-    # before the symbol's name was resolved) would otherwise fall back to the
-    # Chinese name in the ``lang=en`` feed.  The name is already in
-    # ``stock_names``, so the single read entry point fills the gap from there —
-    # fill-only in memory, no write, and the row's own value always wins.
+    # Issue #139 (and #106 for the other language): a row's own ``company_name``
+    # is the provider's spelling — Futu and Longbridge only have Latin ones —
+    # while ``stock_names`` holds the resolved display name (Kurumi first, usually
+    # Chinese).  Both languages are settled here, at the single read entry point,
+    # so the calendar, the two exports and the iCal feed cannot disagree:
+    # ``company_name`` is the name a reader sees, ``company_name_en`` the Latin
+    # title of an ``en`` subscription.  In memory only — the database keeps what
+    # the providers wrote — and neither join column reaches a response.
+    from .company_name import display_name, english_name
+
     for row in rows:
-        fallback = str(row.pop("stock_names_company_name_en", None) or "").strip()
-        if not str(row.get("company_name_en") or "").strip() and fallback:
-            row["company_name_en"] = fallback
+        cached = row.pop("stock_names_company_name", None)
+        cached_en = row.pop("stock_names_company_name_en", None)
+        row_name = str(row.get("company_name") or "").strip()
+        display = display_name(row_name, cached)
+        if display:
+            row["company_name"] = display
+        latin = english_name(row_name, row.get("company_name_en"), cached_en)
+        if latin:
+            row["company_name_en"] = latin
 
     # One fiscal period is one event: collapsing here (the single read entry point
     # of the API, the CSV/JSON export and the iCal feed) keeps the three outlets

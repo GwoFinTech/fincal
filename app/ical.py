@@ -118,7 +118,8 @@ def _status_marker(date_status: str, title_lang: str) -> str:
 def _company_label(event: dict, title_lang: str) -> str:
     """The company name an event shows, in the feed's language (Issue #55).
 
-    ``company_name`` is the display name (Kurumi's, usually Chinese) and
+    ``company_name`` is the display name (Kurumi's, usually Chinese — the read
+    boundary resolves it with ``company_name.display_name``, Issue #139) and
     ``company_name_en`` the Latin one. An English feed uses the Latin name and
     falls back to the display name when the sync never resolved one — the
     documented rule: no empty titles, no double spaces, and never a fake
