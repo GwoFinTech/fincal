@@ -205,6 +205,19 @@
       return d.toLocaleDateString('zh-CN', { year: 'numeric', month: 'long' });
     });
 
+    // 工具栏中间的标签（Issue #140）：周视图下 `monthLabel` 说不清是哪一周——
+    // 跨月周只显示锚点所在的月份，而网格里躺着另一个月的格子。这里把首末日期
+    // 拼出来，格式与「本周财报」摘要（#133）的 `11/17 → 11/23` 一致（同一个
+    // `monthDayLabel`），所以两处的日期读法不会分叉。月视图仍是 `2026年11月`。
+    const calendarRangeLabel = computed(() => {
+      if (viewMode.value !== 'week') return monthLabel.value;
+      const d = currentDate.value;
+      const dayOfWeek = d.getDay();
+      const start = new Date(d.getFullYear(), d.getMonth(), d.getDate() - dayOfWeek);
+      const end = new Date(d.getFullYear(), d.getMonth(), d.getDate() + (6 - dayOfWeek));
+      return monthDayLabel(localYmd(start)) + ' → ' + monthDayLabel(localYmd(end));
+    });
+
     function sameDay(d1, d2) {
       return d1.getFullYear() === d2.getFullYear() && d1.getMonth() === d2.getMonth() && d1.getDate() === d2.getDate();
     }
@@ -439,8 +452,8 @@
 
     return {
       viewMode, currentDate, selectedEarning, decision, selectedDay,
-      weekdays, monthLabel, calendarCells,
-      setViewMode,
+      weekdays, monthLabel, calendarRangeLabel, calendarCells,
+      setViewMode, weekAnchorDate,
       prevMonth, nextMonth, goToday, selectEarning, selectCell, clearSelection,
       cellAriaLabel, isSelectedDay,
       calendarWeeks, cellTabIndex, handleGridKey, focusIndex,
@@ -456,6 +469,10 @@
   // `replaceState` for the selection (a click-through must not fill the history).
   function useUrlState(host) {
     const TABS = ['calendar', 'watchlist', 'universe'];
+    // Issue #140: 月 / 周 is view state like the month, so it belongs in the link.
+    // Only `week` is ever written: 月 is the default, so `view=month` never
+    // appears and every link written before this change keeps its exact bytes.
+    const VIEWS = ['month', 'week'];
     const who = host === undefined ? (typeof window !== 'undefined' ? window : null) : host;
     const MONTH = /^(\d{4})-(\d{2})$/;
     const DAY = /^\d{4}-\d{2}-\d{2}$/;
@@ -475,32 +492,58 @@
       if (month < 1 || month > 12 || year < 1970 || year > 2999) return null;
       return new Date(year, month - 1, 1);
     }
+    // `YYYY-MM-DD` → local Date, or null when the string names no real day. The
+    // regex alone accepts `2026-02-31`, which `new Date()` silently rolls over
+    // into March — a link would then anchor a week nobody asked for (Issue #140).
+    function dayDate(key) {
+      const text = String(key || '');
+      if (!DAY.test(text)) return null;
+      const year = Number(text.slice(0, 4));
+      const month = Number(text.slice(5, 7));
+      const day = Number(text.slice(8, 10));
+      const date = new Date(year, month - 1, day);
+      if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) return null;
+      return date;
+    }
     function parseUrlState(search) {
       const params = new URLSearchParams(String(search || '').replace(/^\?/, ''));
       const tab = params.get('tab');
       const month = params.get('month');
       const day = params.get('date');
+      const view = params.get('view');
       // `''` means 「user's default」 — never `undefined`, so the caller can tell
       // "not in the link" from "in the link but unusable".
-      return {
+      const state = {
         tab: TABS.includes(tab) ? tab : '',
         month: monthDate(month) ? month : '',
-        date: DAY.test(String(day || '')) ? day : '',
+        date: dayDate(day) ? day : '',
       };
+      // `view` is only present when the link names one. 月 is the default, and
+      // an explicit `view: ''` would make every state object — including the
+      // pre-#140 shape the #125 probes pin — carry a key it never had.
+      if (VIEWS.includes(view)) state.view = view;
+      return state;
     }
     // An unusable value is not written back: a link must not carry `?tab=nonsense`
     // for the next reader to copy.
     function buildUrlState(state) {
       const params = new URLSearchParams();
       if (state && TABS.includes(state.tab)) params.set('tab', state.tab);
+      // 月 is the default view, so it is left out and old links stay byte-equal.
+      if (state && VIEWS.includes(state.view) && state.view !== 'month') params.set('view', state.view);
       if (state && monthDate(state.month)) params.set('month', state.month);
-      if (state && DAY.test(String(state.date || ''))) params.set('date', state.date);
+      if (state && dayDate(state.date)) params.set('date', state.date);
       const query = params.toString();
       return query ? '?' + query : '';
     }
     function write(mode, state) {
       const query = buildUrlState(state);
       if (!who || !who.history || !who.location) return query;
+      // One user action can trip two watchers (切「周」 also re-parks the anchor,
+      // which a cross-month week moves to another month). A push that changes
+      // nothing is not a navigation step — writing it would cost the reader a
+      // second 后退 press to undo one click (#140).
+      if (mode === 'push' && who.location.search === query) return query;
       const url = query || who.location.pathname || '';
       if (mode === 'push') who.history.pushState({}, '', url);
       else who.history.replaceState({}, '', url);
@@ -508,7 +551,7 @@
     }
 
     return {
-      TABS, monthKey, monthDate, parseUrlState, buildUrlState,
+      TABS, VIEWS, monthKey, monthDate, dayDate, parseUrlState, buildUrlState,
       pushUrl: (state) => write('push', state),
       replaceUrl: (state) => write('replace', state),
     };
@@ -1247,6 +1290,17 @@
       if (urlInitial.tab) appTab.value = urlInitial.tab;
       const initialMonth = url.monthDate(urlInitial.month);
       if (initialMonth) cal.currentDate.value = initialMonth;
+      // Issue #140: 月 / 周 lives in the link now. A week is anchored by the day
+      // the link names, so that day is applied *before* the first load — the
+      // request window follows the anchor's month. A bare `?view=week` with no
+      // day falls back to the same anchor rule as the 周 button (#138).
+      if (urlInitial.view) cal.viewMode.value = urlInitial.view;
+      const initialDay = url.dayDate(urlInitial.date);
+      if (initialDay) cal.currentDate.value = initialDay;
+      else if (cal.viewMode.value === 'week') {
+        const anchor = cal.weekAnchorDate();
+        if (anchor) cal.currentDate.value = anchor;
+      }
       // The day can only be resolved once the month's cells exist (after the
       // first load), and a history step can change the month under it — so it
       // lives here as pending state that `loadEarnings()` applies, not as a
@@ -1402,6 +1456,7 @@
       function currentUrlState() {
         return {
           tab: appTab.value,
+          view: cal.viewMode.value,
           month: url.monthKey(cal.currentDate.value),
           date: cal.selectedDay.value ? localYmd(cal.selectedDay.value.date) : '',
         };
@@ -1416,6 +1471,13 @@
       // otherwise every cell tap would need its own 后退 press. A `popstate`
       // already *is* the history change, so it must not write one back.
       watch([appTab, anchorMonth], () => {
+        if (!restoringFromHistory) url.pushUrl(currentUrlState());
+      });
+      // 切「月 / 周」也是一次导航（Issue #140）：它改变的是视图本身，因此与页签、
+      // 月份一样 push。跨月周（如 11/29 → 12/5）同时移动锚点，上面那个 watcher
+      // 会一起触发；`pushUrl` 对「与地址栏相同」的 push 不再写一遍，所以一次点击
+      // 只留下一个历史步。
+      watch(() => cal.viewMode.value, () => {
         if (!restoringFromHistory) url.pushUrl(currentUrlState());
       });
       watch(() => (cal.selectedDay.value ? localYmd(cal.selectedDay.value.date) : ''),
@@ -1439,10 +1501,21 @@
       async function applyHistoryState() {
         const state = url.parseUrlState(typeof window !== 'undefined' ? window.location.search : '');
         const month = url.monthDate(state.month);
+        const day = url.dayDate(state.date);
+        const view = state.view || 'month';
         restoringFromHistory = true;
         try {
           appTab.value = state.tab || 'calendar';
+          // Issue #140: 后退/前进 also crosses 月 ↔ 周, and the week must be the
+          // one the link names — the restored anchor is the linked day, otherwise
+          // the grid and the panel split exactly as #138 fixed for the 周 button.
+          cal.viewMode.value = view;
           if (month) cal.currentDate.value = month;
+          if (day) cal.currentDate.value = day;
+          else if (view === 'week') {
+            const anchor = cal.weekAnchorDate();
+            if (anchor) cal.currentDate.value = anchor;
+          }
           pendingDateKey = state.date;
           cal.selectedEarning.value = null;
           cal.decision.value = null;
@@ -1515,7 +1588,8 @@
         // Calendar
         viewMode: cal.viewMode, setViewMode: cal.setViewMode, currentDate: cal.currentDate,
         selectedEarning: cal.selectedEarning, decision: cal.decision, selectedDay: cal.selectedDay,
-        weekdays: cal.weekdays, monthLabel: cal.monthLabel, calendarCells: cal.calendarCells,
+        weekdays: cal.weekdays, monthLabel: cal.monthLabel, calendarRangeLabel: cal.calendarRangeLabel,
+        calendarCells: cal.calendarCells,
         cellAriaLabel: cal.cellAriaLabel,
         icalDialog, adminDialog, trapTab,
         prevMonth: cal.prevMonth, nextMonth: cal.nextMonth, goToday: cal.goToday,
