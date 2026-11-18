@@ -1466,9 +1466,15 @@
               if (pendingDateKey) applyDateKey(pendingDateKey);
               else if (keepKey) applyDateKey(keepKey);
               // Issue #141: …and it may name the row. One shot only: a later
-              // month load must not re-open a panel the reader has left.
+              // month load must not re-open a panel the reader has left. A
+              // symbol that is not on that day is dropped from the address bar
+              // as well — the list is showing, so the link must not keep naming
+              // a row nobody opened (a history step is left alone: it *is* the
+              // address bar).
               if (pendingSymbolKey) {
-                applySymbolKey(pendingSymbolKey);
+                if (!applySymbolKey(pendingSymbolKey) && !restoringFromHistory) {
+                  url.replaceUrl(currentUrlState());
+                }
                 pendingSymbolKey = '';
               }
             }

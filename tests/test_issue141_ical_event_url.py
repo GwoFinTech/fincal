@@ -316,6 +316,9 @@ class TestPageWiring:
         apply_symbol = load.index("applySymbolKey(pendingSymbolKey);")
         assert apply_day < apply_symbol, "先定日，再开该日的那一只"
         assert "pendingSymbolKey = '';" in load, "一次性：翻月不得重新打开面板"
+        # A symbol the day does not have leaves the list — and the address bar
+        # stops naming a row nobody opened.
+        assert "url.replaceUrl(currentUrlState());" in load
 
     def test_the_selection_is_written_and_cleared(self):
         js = self._js()
