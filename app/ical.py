@@ -1,5 +1,7 @@
 """iCal (.ics) feed generation for user watchlist."""
+import re
 from datetime import date, datetime, time, timedelta, timezone
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 from . import config, fiscal
@@ -81,12 +83,19 @@ _LABELS = {
     "after_hours": {"en": "After-hours", "zh": "盘后"},
     "comparability": {"en": "Comparability: unavailable ({wording}; {reason})",
                       "zh": "对比：不可用（{wording}；{reason}）"},
+    "open_in_fincal": {"en": "Open in FinCal", "zh": "在 FinCal 打开"},
     "calendar_name": {"en": "FinCal Earnings", "zh": "FinCal 财报日历"},
 }
 
 #: Label/value divider per language: the English feed's ``": "`` is what every
 #: subscriber already receives, the Chinese one uses the full-width colon.
 _SEPARATOR = {"en": ": ", "zh": "："}
+
+#: What a symbol may look like when it is put into a link (Issue #141): the
+#: codes this feed actually emits — ``NVDA``, ``0700.HK``, ``BRK-B`` — and
+#: nothing else.  Everything outside this set is dropped, never escaped into
+#: the page's query string.
+_SYMBOL_RE = re.compile(r"[A-Za-z0-9.\-]{1,20}")
 
 
 def _label(key: str, title_lang: str = "en") -> str:
@@ -316,6 +325,39 @@ def _dedupe_events(earnings: list[dict]) -> tuple[list[str], dict]:
     return uid_order, chosen
 
 
+def _event_url(symbol: object, report_date: date) -> str:
+    """The FinCal page for one event, or ``""`` when no public base is known.
+
+    Issue #141: the feed said who/when/how-much but carried no way back to the
+    site, so a subscriber reading 「NVDA 英伟达 Q3 财报」 had to reopen FinCal and
+    page to that day by hand.  The link targets the view the SPA already
+    restores from its address bar (#125/#140) plus the row's symbol, so the
+    detail panel for *this* period opens on arrival.
+
+    A self-hosted instance without ``ICAL_BASE_URL`` gets no link at all rather
+    than a relative one: an ``.ics`` is read by the calendar app, which has no
+    origin to resolve against — and the feed's bytes stay exactly as they were.
+
+    ``symbol`` is the one user-controlled part of the query.  Symbols in this
+    dataset are ASCII letters, digits, ``.`` and ``-`` (``0700.HK``); anything
+    outside that set is dropped rather than carried into the site's query
+    string, and the day link is still emitted.
+    """
+    base = str(getattr(config, "ICAL_BASE_URL", "") or "").strip().rstrip("/")
+    if not base:
+        return ""
+    params = [
+        ("tab", "calendar"),
+        ("month", report_date.strftime("%Y-%m")),
+        ("date", report_date.strftime("%Y-%m-%d")),
+    ]
+    code = str(symbol or "").strip()
+    if _SYMBOL_RE.fullmatch(code):
+        params.append(("symbol", code))
+    query = "&".join(f"{key}={quote(value, safe='')}" for key, value in params)
+    return f"{base}/?{query}"
+
+
 def generate_ical(earnings: list[dict], user_email: str = "", title_lang: str = "en") -> str:
     """Generate iCal content from earnings records."""
     # The calendar's own name follows the feed's language too (Issue #97):
@@ -388,6 +430,9 @@ def generate_ical(earnings: list[dict], user_email: str = "", title_lang: str = 
         # Company names use the cached canonical name; title_lang decides which of
         # the two stored spellings is shown (Issue #55).
         comparison_reason = e.get("comparison_unavailable_reason") or fiscal.comparison_unavailable_reason(e)
+        # Issue #141: where this event lives on the site. Empty when the
+        # deployment never declared a public base URL.
+        event_url = _event_url(symbol, report_date)
         # Issue #97: every label here comes from `_LABELS`, so the body follows
         # the same `title_lang` as the summary instead of staying English.
         desc_parts = [_labelled("company", company, title_lang) if company else "",
@@ -403,7 +448,8 @@ def generate_ical(earnings: list[dict], user_email: str = "", title_lang: str = 
                                          None if unreleased else e.get("eps_actual"),
                                          fiscal.declared_attribution(e, "actual_currency"),
                                          title_lang),
-                      _comparability_note(comparison_reason, title_lang) if comparison_reason else ""]
+                      _comparability_note(comparison_reason, title_lang) if comparison_reason else "",
+                      _labelled("open_in_fincal", event_url, title_lang) if event_url else ""]
         desc = "\n".join(p for p in desc_parts if p)
 
         dt_str = report_date.strftime("%Y%m%d")
@@ -420,6 +466,11 @@ def generate_ical(earnings: list[dict], user_email: str = "", title_lang: str = 
         lines.append(f"LAST-MODIFIED:{stamp}")
         lines.append(f"SUMMARY:{_escape_ical(summary)}")
         lines.append(f"DESCRIPTION:{_escape_ical(desc)}")
+        # RFC 5545 §3.8.4.6. Both are written only when a public base URL is
+        # configured (#141); Google Calendar ignores URL on some platforms, so
+        # the same link is also the last DESCRIPTION line.
+        if event_url:
+            lines.append(f"URL:{event_url}")
         lines.append(f"CATEGORIES:Earnings{',Predicted' if is_pred else ''}")
 
         if hour_start:

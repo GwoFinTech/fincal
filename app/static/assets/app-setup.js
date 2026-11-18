@@ -476,6 +476,15 @@
     const who = host === undefined ? (typeof window !== 'undefined' ? window : null) : host;
     const MONTH = /^(\d{4})-(\d{2})$/;
     const DAY = /^\d{4}-\d{2}-\d{2}$/;
+    // Issue #141: a symbol can arrive from an iCal event's link. It is the one
+    // user-controlled value that reaches a request, so it is whitelisted here —
+    // the same set the feed emits (letters, digits, `.`, `-`) — and anything
+    // else is dropped instead of being carried into the page.
+    const SYMBOL = /^[A-Za-z0-9.\-]{1,20}$/;
+    function symbolKey(value) {
+      const text = String(value || '').trim();
+      return SYMBOL.test(text) ? text : '';
+    }
 
     function monthKey(date) {
       if (!date || typeof date.getFullYear !== 'function') return '';
@@ -522,6 +531,10 @@
       // an explicit `view: ''` would make every state object — including the
       // pre-#140 shape the #125 probes pin — carry a key it never had.
       if (VIEWS.includes(view)) state.view = view;
+      // Same rule for `symbol` (#141): absent means 「no row was named」, and a
+      // value outside the whitelist never enters the state at all.
+      const symbol = symbolKey(params.get('symbol'));
+      if (symbol) state.symbol = symbol;
       return state;
     }
     // An unusable value is not written back: a link must not carry `?tab=nonsense`
@@ -533,6 +546,8 @@
       if (state && VIEWS.includes(state.view) && state.view !== 'month') params.set('view', state.view);
       if (state && monthDate(state.month)) params.set('month', state.month);
       if (state && dayDate(state.date)) params.set('date', state.date);
+      const symbol = symbolKey(state && state.symbol);
+      if (symbol) params.set('symbol', symbol);
       const query = params.toString();
       return query ? '?' + query : '';
     }
@@ -551,7 +566,7 @@
     }
 
     return {
-      TABS, VIEWS, monthKey, monthDate, dayDate, parseUrlState, buildUrlState,
+      TABS, VIEWS, monthKey, monthDate, dayDate, symbolKey, parseUrlState, buildUrlState,
       pushUrl: (state) => write('push', state),
       replaceUrl: (state) => write('replace', state),
     };
@@ -1306,6 +1321,11 @@
       // lives here as pending state that `loadEarnings()` applies, not as a
       // one-shot call after mount.
       let pendingDateKey = urlInitial.date;
+      // Issue #141: an iCal event's link also names the row. The day is applied
+      // first (it owns the list); the symbol then opens that row's detail panel
+      // — 「该日存在这个标的时直接打开它的详情面板」 — and a symbol that is not
+      // on that day leaves the reader on the day's list.
+      let pendingSymbolKey = urlInitial.symbol || '';
       // Set while a `popstate` is being applied: the watchers below must not
       // write the address bar back while it is being read.
       let restoringFromHistory = false;
@@ -1445,6 +1465,12 @@
               // A link (or a history step) names a day; it wins over 「today」.
               if (pendingDateKey) applyDateKey(pendingDateKey);
               else if (keepKey) applyDateKey(keepKey);
+              // Issue #141: …and it may name the row. One shot only: a later
+              // month load must not re-open a panel the reader has left.
+              if (pendingSymbolKey) {
+                applySymbolKey(pendingSymbolKey);
+                pendingSymbolKey = '';
+              }
             }
           }
         } finally {
@@ -1459,6 +1485,10 @@
           view: cal.viewMode.value,
           month: url.monthKey(cal.currentDate.value),
           date: cal.selectedDay.value ? localYmd(cal.selectedDay.value.date) : '',
+          // Issue #141: the address bar names the row the panel is showing, so a
+          // copied link reopens the same detail and 后退 cannot show A under a
+          // URL that says B. `''` when the day's list is showing instead.
+          symbol: cal.selectedEarning.value ? (cal.selectedEarning.value.symbol || '') : '',
         };
       }
       // The month is what a calendar *loads* and what a link carries. Moving the
@@ -1482,6 +1512,12 @@
       });
       watch(() => (cal.selectedDay.value ? localYmd(cal.selectedDay.value.date) : ''),
         () => { if (!restoringFromHistory) url.replaceUrl(currentUrlState()); });
+      // Issue #141: opening or closing a detail panel is the same kind of
+      // selection change, so it also replaces. Selecting a row from the day's
+      // list writes its symbol; 返回 (which clears `selectedEarning`) drops the
+      // parameter again — the address bar never says A while the panel shows B.
+      watch(() => (cal.selectedEarning.value ? (cal.selectedEarning.value.symbol || '') : ''),
+        () => { if (!restoringFromHistory) url.replaceUrl(currentUrlState()); });
 
       // Point the selection at a day of the currently rendered month; a key that
       // is not in the window keeps whatever the load already chose (today).
@@ -1492,6 +1528,21 @@
         cal.selectedEarning.value = null;
         cal.decision.value = null;
         cal.selectedDay.value = cell;
+        return true;
+      }
+
+      // Open the row an iCal link named (Issue #141). The match is against the
+      // selected day's own list, so a symbol that did not report that day is not
+      // 「almost right」 — it falls back to the list instead of some other period.
+      // Case-insensitive because the codes are; the feed emits them upper-case.
+      function applySymbolKey(key) {
+        const wanted = String(key || '').trim().toUpperCase();
+        if (!wanted) return false;
+        const cell = cal.selectedDay.value;
+        if (!cell || !cell.earnings) return false;
+        const earning = cell.earnings.find(e => String(e.symbol || '').toUpperCase() === wanted);
+        if (!earning) return false;
+        cal.selectEarning(earning, cell, apiFetch);
         return true;
       }
 
@@ -1517,12 +1568,16 @@
             if (anchor) cal.currentDate.value = anchor;
           }
           pendingDateKey = state.date;
+          // Issue #141: the row is re-opened by the same load that rebuilds the
+          // day, and cleared afterwards so the next month does not re-select it.
+          pendingSymbolKey = state.symbol || '';
           cal.selectedEarning.value = null;
           cal.decision.value = null;
           // One load for the restored month, and the day applied after it: the
           // month watcher would otherwise race the restore and reset the day.
           await loadEarnings();
           pendingDateKey = '';
+          pendingSymbolKey = '';
           loadTabData(appTab.value);
           await nextTick();
         } finally {

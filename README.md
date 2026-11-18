@@ -251,6 +251,21 @@ side (Issue #59). `tests/test_calendar_window.py` and
 `tests/test_frontend_structure.py` pin the outlets to that horizon, and
 `app/routers/ical.py` no longer carries a window literal of its own.
 
+## Event links (feed → row, Issue #141)
+
+Every `VEVENT` carries an `URL` property — and the same link as its last
+`DESCRIPTION` line, because Google Calendar does not render `URL` everywhere —
+back into the site: `{ICAL_BASE_URL}/?tab=calendar&month=YYYY-MM&date=YYYY-MM-DD&symbol=<SYMBOL>`.
+The page's address bar already restores tab / month / view / day (`useUrlState`,
+Issues #125/#140); `symbol` is the last piece, so the link opens that day *with
+the row's detail panel expanded*. `symbol` is whitelisted (`[A-Za-z0-9.-]`, ≤20
+characters) on both ends — the feed drops a symbol outside that set rather than
+carrying it, and the page ignores one. A deployment without `ICAL_BASE_URL`
+writes no `URL:` line and no link in the body: a relative link in an `.ics` has
+no origin to resolve against, and the feed keeps its exact bytes.
+`tests/test_issue141_ical_event_url.py` runs the *emitted* link through the
+SPA's own parser under node, so the two ends cannot drift.
+
 ## Company names (one display name, two languages)
 
 A symbol has two names, each with one owner:
