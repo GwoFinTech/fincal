@@ -313,7 +313,7 @@ class TestPageWiring:
         load = js[js.index("async function loadEarnings()"):]
         load = load[:load.index("// ── Address bar writes")]
         apply_day = load.index("if (pendingDateKey) applyDateKey(pendingDateKey);")
-        apply_symbol = load.index("applySymbolKey(pendingSymbolKey);")
+        apply_symbol = load.index("applySymbolKey(pendingSymbolKey)")
         assert apply_day < apply_symbol, "先定日，再开该日的那一只"
         assert "pendingSymbolKey = '';" in load, "一次性：翻月不得重新打开面板"
         # A symbol the day does not have leaves the list — and the address bar
