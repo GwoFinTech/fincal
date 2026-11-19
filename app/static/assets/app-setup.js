@@ -485,6 +485,13 @@
       const text = String(value || '').trim();
       return SYMBOL.test(text) ? text : '';
     }
+    // Issue #142: 「只看自选」 changes the *request* (`watchlistOnly=true`), so it
+    // is view state like the month — but only the explicit `mine=1` counts. The
+    // unchecked state is the default, so the key is never written when off and
+    // every link from #125/#140/#141 keeps its exact bytes.
+    function mineOn(value) {
+      return String(value || '') === '1';
+    }
 
     function monthKey(date) {
       if (!date || typeof date.getFullYear !== 'function') return '';
@@ -535,6 +542,10 @@
       // value outside the whitelist never enters the state at all.
       const symbol = symbolKey(params.get('symbol'));
       if (symbol) state.symbol = symbol;
+      // Same rule for `mine` (#142): only an explicit `1` turns the filter on,
+      // and an off filter adds no key — `undefined` would compare truthy-looking
+      // in a template interpolation.
+      if (mineOn(params.get('mine'))) state.mine = true;
       return state;
     }
     // An unusable value is not written back: a link must not carry `?tab=nonsense`
@@ -548,6 +559,9 @@
       if (state && dayDate(state.date)) params.set('date', state.date);
       const symbol = symbolKey(state && state.symbol);
       if (symbol) params.set('symbol', symbol);
+      // Off is the default: `mine=0` is never written, so a link that does not
+      // filter keeps the byte-identical shape it had before #142.
+      if (state && state.mine === true) params.set('mine', '1');
       const query = params.toString();
       return query ? '?' + query : '';
     }
@@ -1326,6 +1340,12 @@
       // — 「该日存在这个标的时直接打开它的详情面板」 — and a symbol that is not
       // on that day leaves the reader on the day's list.
       let pendingSymbolKey = urlInitial.symbol || '';
+      // Issue #142: 「只看自选」 is in the link as well. It is *account* state, so
+      // it is only a request here — `onMounted` keeps it once the account is
+      // known (a guest must not be handed an empty calendar that pretends to be
+      // 「yours」). Set before the first load so the filter changes the request,
+      // not just the checkbox.
+      watchlistOnly.value = urlInitial.mine === true;
       // Set while a `popstate` is being applied: the watchers below must not
       // write the address bar back while it is being read.
       let restoringFromHistory = false;
@@ -1344,7 +1364,11 @@
         const today = localTodayYmd();
         const horizonEnd = localDaysFromTodayYmd(WEEK_AHEAD_DAYS - 1);
         const range = calendarWindowRange(cal.currentDate.value);
-        const mineOnly = wl.watchlist.value.length > 0;
+        // Issue #142: the digest speaks for whatever the grid is showing. It
+        // used to *infer* the scope from the watchlist length, so with the
+        // filter on and no symbols it fell back to 「全部标的」 while the grid was
+        // empty — one screen claiming two contradictory things.
+        const mineOnly = watchlistOnly.value || wl.watchlist.value.length > 0;
         const covered = range.start <= today && range.end >= horizonEnd;
         const gridDates = new Set(cal.calendarCells.value.map(c => localYmd(c.date)));
         const groups = covered
@@ -1495,6 +1519,9 @@
           // copied link reopens the same detail and 后退 cannot show A under a
           // URL that says B. `''` when the day's list is showing instead.
           symbol: cal.selectedEarning.value ? (cal.selectedEarning.value.symbol || '') : '',
+          // Issue #142: the filter is part of what the page shows「我的自选、这个月」,
+          // so the link carries it; `false` writes nothing (see `buildUrlState`).
+          mine: watchlistOnly.value === true,
         };
       }
       // The month is what a calendar *loads* and what a link carries. Moving the
@@ -1514,6 +1541,12 @@
       // 会一起触发；`pushUrl` 对「与地址栏相同」的 push 不再写一遍，所以一次点击
       // 只留下一个历史步。
       watch(() => cal.viewMode.value, () => {
+        if (!restoringFromHistory) url.pushUrl(currentUrlState());
+      });
+      // Issue #142: 「只看自选」 replaces the whole grid batch, which is exactly as
+      // much of a navigation step as a month change — so it pushes, and turning
+      // it off removes the key (one more step back to the full market).
+      watch(watchlistOnly, () => {
         if (!restoringFromHistory) url.pushUrl(currentUrlState());
       });
       watch(() => (cal.selectedDay.value ? localYmd(cal.selectedDay.value.date) : ''),
@@ -1577,6 +1610,10 @@
           // Issue #141: the row is re-opened by the same load that rebuilds the
           // day, and cleared afterwards so the next month does not re-select it.
           pendingSymbolKey = state.symbol || '';
+          // Issue #142: the filter is part of the history step, and it has to be
+          // in place *before* the load — the request window it changes is what
+          // the restored view is made of.
+          watchlistOnly.value = state.mine === true;
           cal.selectedEarning.value = null;
           cal.decision.value = null;
           // One load for the restored month, and the day applied after it: the
@@ -1628,6 +1665,20 @@
         const userData = await loadUser();
         if (userData) {
           ical.updateIcalUrl();
+        }
+        // Issue #142: `mine=1` names an account's own symbols. Without an
+        // account the link falls back to the public calendar, and the key is
+        // dropped from the address bar while month / day / symbol stay — a guest
+        // must not land on an empty grid that looks like filtered data.
+        if (!user.value && watchlistOnly.value) {
+          restoringFromHistory = true;
+          try { watchlistOnly.value = false; } finally { restoringFromHistory = false; }
+          // `currentUrlState()` cannot see the pending link parts yet (no cells
+          // exist), so they are carried over explicitly.
+          const publicState = currentUrlState();
+          publicState.date = pendingDateKey;
+          publicState.symbol = pendingSymbolKey;
+          url.replaceUrl(publicState);
         }
         if (user.value) {
           // Issue #132: the calendar first paint used to fetch the 420-day

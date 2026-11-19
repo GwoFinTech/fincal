@@ -182,7 +182,9 @@ class DigestSourcePins(TestCase):
 
     def test_the_scope_is_the_watchlist_when_there_is_one(self):
         body = self._computed()
-        self.assertIn("const mineOnly = wl.watchlist.value.length > 0;", body)
+        # #142: 「筛选开着」 outranks the list length — with the filter on and no
+        # symbols the digest must not fall back to 「全部标的」 above an empty grid.
+        self.assertIn("const mineOnly = watchlistOnly.value || wl.watchlist.value.length > 0;", body)
         self.assertIn("mineOnly ? wl.isMine : null", body)
 
     def test_an_uncovered_window_is_reported_as_such(self):

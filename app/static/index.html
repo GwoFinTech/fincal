@@ -465,6 +465,14 @@
         <button @click="dismissErrors" style="color:#f87171;">&times;</button>
       </div>
 
+      <!-- Issue #142: with the filter on and nothing in the watchlist the grid is
+           empty by construction. Say why, and hand the reader the one way out —
+           the checkbox's 「⚠ 空」 was the only trace before. -->
+      <div v-if="watchlistOnly && watchlistLoaded && !watchlist.length" class="mb-2 px-3 py-2 rounded-lg text-[12px] flex flex-wrap items-center justify-between gap-2" style="background:var(--surface-raised);border:1px solid var(--border);color:var(--text-secondary);">
+        <span>「只看自选」已开启，但你的自选还是空的，所以这个月没有可显示的标的。</span>
+        <button type="button" @click="appTab = 'watchlist'" class="ui-btn ui-btn-outline" style="font-size:11px;padding:3px 10px;">去「自选」添加</button>
+      </div>
+
       <!-- 「本周财报」 digest (Issue #133): the calendar already holds these rows,
            so this is a second *view* of one batch — never a second request. It
            starts collapsed because it is a summary: an expanded digest must not
