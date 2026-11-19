@@ -1671,8 +1671,13 @@
         // dropped from the address bar while month / day / symbol stay — a guest
         // must not land on an empty grid that looks like filtered data.
         if (!user.value && watchlistOnly.value) {
+          // The ref's own watcher would push the address bar on the next tick, so
+          // the guard is held across that flush — otherwise the fallback write
+          // below is immediately overwritten by a step that has no `date` yet.
           restoringFromHistory = true;
-          try { watchlistOnly.value = false; } finally { restoringFromHistory = false; }
+          watchlistOnly.value = false;
+          await nextTick();
+          restoringFromHistory = false;
           // `currentUrlState()` cannot see the pending link parts yet (no cells
           // exist), so they are carried over explicitly.
           const publicState = currentUrlState();

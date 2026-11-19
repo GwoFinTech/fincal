@@ -165,6 +165,9 @@ class MineWiringTests(TestCase):
         block = mount[fallback:mount.index("if (user.value) {", fallback)]
         self.assertIn("watchlistOnly.value = false;", block)
         self.assertIn("url.replaceUrl(publicState);", block)
+        # The ref's watcher flushes on the next tick; the guard has to cover it,
+        # or a push with an empty `date` overwrites the preserved link.
+        self.assertLess(block.index("await nextTick();"), block.index("url.replaceUrl(publicState);"))
         # The rest of the link is preserved: only the account-bound key is dropped.
         self.assertIn("publicState.date = pendingDateKey;", block)
         self.assertIn("publicState.symbol = pendingSymbolKey;", block)
