@@ -1212,12 +1212,19 @@
     // itself. Keep two decimals from 0.1 up (the normal case, and the trailing
     // zero convention the prices already follow); below that keep at least three
     // significant digits, capped at six decimals. Zero is still `0.00`.
-    function fmtNum(n) {
+    // Issue #143: the count is a named rule because `revisionPair()` has to know
+    // where this formatter stops before it may append a digit.
+    function numDecimals(n) {
+      const v = Number(n);
+      if (!Number.isFinite(v)) return 2;
+      if (v === 0 || Math.abs(v) >= 0.1) return 2;
+      return Math.min(6, 2 + Math.ceil(-Math.log10(Math.abs(v))));
+    }
+    function fmtNum(n, decimals) {
       if (n == null) return '—';
       const v = Number(n);
       if (!Number.isFinite(v)) return '—';
-      if (v === 0 || Math.abs(v) >= 0.1) return v.toFixed(2);
-      return v.toFixed(Math.min(6, 2 + Math.ceil(-Math.log10(Math.abs(v)))));
+      return v.toFixed(decimals == null ? numDecimals(v) : decimals);
     }
     // The month cell is ~50px wide on a phone, where `2068.HK 26Q3` was simply
     // sliced by the cell's overflow. The suffix is redundant inside the calendar —
@@ -1250,16 +1257,71 @@
       if (n == null) return '—';
       const v = Number(n);
       if (!isFinite(v)) return '—';
-      if (Math.abs(v) >= 1e12) return (v / 1e12).toFixed(2) + 'T';
-      if (Math.abs(v) >= 1e9) return (v / 1e9).toFixed(2) + 'B';
-      if (Math.abs(v) >= 1e6) return (v / 1e6).toFixed(1) + 'M';
-      // Issue #130: below 1e6 this used to fall through to `toLocaleString()`,
-      // so a HK small cap printed `1,234,567` beside `113.35B` and `9.21M` — no
-      // unit, widest cell in the column, and the magnitude had to be counted by
-      // eye. `K` completes the ladder (2/2/1/1 decimals, same as its neighbours);
-      // below 1000 the bare number is already readable.
-      if (Math.abs(v) >= 1e3) return (v / 1e3).toFixed(1) + 'K';
-      return v.toLocaleString();
+      const scale = bigNumberScale(v);
+      if (!scale) return v.toLocaleString();
+      return (v / scale).toFixed(bigNumberDecimals(scale)) + BIG_NUMBER_SUFFIX[scale];
+    }
+    // Issue #130: below 1e6 this used to fall through to `toLocaleString()`, so a
+    // HK small cap printed `1,234,567` beside `113.35B` and `9.21M` — no unit,
+    // widest cell in the column, and the magnitude had to be counted by eye. `K`
+    // completes the ladder (2/2/1/1 decimals, same as its neighbours); below 1000
+    // the bare number is already readable.
+    // Issue #143: the ladder lives in one place so `revisionPair()` can ask which
+    // divisor a value used and how many digits matching that unit already spends.
+    // (A scale plus a suffix table, not descriptor objects: a brace-returning
+    // helper inside this composable reads as its export literal to
+    // tests/frontend_contract.py.)
+    const BIG_NUMBER_SUFFIX = { 1000000000000: 'T', 1000000000: 'B', 1000000: 'M', 1000: 'K' };
+    function bigNumberScale(v) {
+      const abs = Math.abs(v);
+      if (abs >= 1e12) return 1e12;
+      if (abs >= 1e9) return 1e9;
+      if (abs >= 1e6) return 1e6;
+      if (abs >= 1e3) return 1e3;
+      return 0;
+    }
+    function bigNumberDecimals(scale) {
+      if (!scale) return 0;
+      return scale === 1e12 || scale === 1e9 ? 2 : 1;
+    }
+    function fmtBigNumCompact(n, decimals) {
+      if (n == null) return '—';
+      const v = Number(n);
+      if (!isFinite(v)) return '—';
+      const scale = bigNumberScale(v);
+      if (!scale) return v.toFixed(decimals);
+      return (v / scale).toFixed(decimals) + BIG_NUMBER_SUFFIX[scale];
+    }
+    // Issue #143: 「预期修正趋势」 prints both ends of one series while its label is
+    // derived from the raw difference. `fmtNum` gives two decimals from 0.1 up, so
+    // AMD's `1.4197 → 1.41762` (±0.002, direction `down`) rendered 「1.42 → 1.42
+    // （下修）」 — the numbers said nothing moved and the brackets said it did (960
+    // EPS pairs and 1,085 revenue pairs in the 2026-11 snapshot). The direction is
+    // right, so the display has to be able to express it: only when both ends
+    // render identically *and* the raw values differ, step the precision up one
+    // digit at a time from wherever the default stopped, capped at six decimals
+    // (the precision #120 already accepts). Every other row is byte-identical.
+    function revisionPair(first, latest, big) {
+      const render = (value, decimals) => {
+        if (big) return decimals == null ? fmtBigNum(value) : fmtBigNumCompact(value, decimals);
+        return decimals == null ? fmtNum(value) : fmtNum(value, decimals);
+      };
+      const plain = render(first) + ' → ' + render(latest);
+      const a = Number(first);
+      const b = Number(latest);
+      // A missing end already prints 「—」; equal raw values（持平）are *meant* to
+      // print one number twice. Neither is the collision this helper exists for.
+      if (first == null || latest == null || !Number.isFinite(a) || !Number.isFinite(b) || a === b) return plain;
+      if (render(first) !== render(latest)) return plain;
+      const base = big
+        ? Math.max(bigNumberDecimals(bigNumberScale(a)), bigNumberDecimals(bigNumberScale(b)))
+        : Math.max(numDecimals(a), numDecimals(b));
+      for (let decimals = base + 1; decimals <= 6; decimals += 1) {
+        if (render(first, decimals) !== render(latest, decimals)) {
+          return render(first, decimals) + ' → ' + render(latest, decimals);
+        }
+      }
+      return plain;
     }
     function estimateSourceLabel(e) {
       if (e.estimate_source === 'longbridge') return 'Longbridge';
@@ -1287,7 +1349,7 @@
       growthValue, growthReason, growthNote, growthCell, growthSuppressedNote,
       beatMissStreak, beatMissStreakText, beatMissStreakNote,
       metricDelta, fmtNum, fmtPct, signedPct, fmtBigNum,
-      revisionDirectionLabel, revisionIsComparable,
+      revisionPair, revisionDirectionLabel, revisionIsComparable,
       compactSymbol, currenciesDiffer, currencyOf, comparisonShortNote,
       estimateSourceLabel, hasLongbridgeConsensus, fqLabel, periodLabel,
     };
