@@ -131,19 +131,28 @@ class AggregateHealthTests(TestCase):
 
     def _health(self, *, kurumi_url="http://kurumi.internal:9000",
                 urlopen_side_effect=None, which_result=None, tool_returncode=0,
-                futu_reachable=True):
+                futu_reachable=True, futu_client="default"):
         @contextmanager
         def _db_cursor():
             yield mock.MagicMock()
 
-        socket_calls = (mock.MagicMock() if futu_reachable
-                        else mock.MagicMock(side_effect=OSError("refused")))
+        futu_probe = {"ok": True, "code": "ok", "latency_ms": 12} if futu_reachable \
+            else {"ok": False, "code": "FutuWebError", "latency_ms": 5005}
+
+        class _FutuClient:
+            def probe(self):
+                return dict(futu_probe)
+
+            def close(self):
+                pass
         urlopen = mock.MagicMock(return_value=_Resp())
         if urlopen_side_effect is not None:
             urlopen = mock.MagicMock(side_effect=urlopen_side_effect)
 
         with mock.patch.object(db, "db_cursor", _db_cursor), \
-                mock.patch("socket.create_connection", socket_calls), \
+                mock.patch("app.futu_webapi.create_client",
+                           (lambda: _FutuClient()) if futu_client == "default"
+                           else (lambda: futu_client)), \
                 mock.patch("shutil.which", mock.MagicMock(return_value=which_result)), \
                 mock.patch("subprocess.run",
                            mock.MagicMock(return_value=mock.MagicMock(returncode=tool_returncode))), \
@@ -185,9 +194,22 @@ class AggregateHealthTests(TestCase):
         self.assertEqual(response["status"], "degraded")
 
     def test_an_unreachable_futu_still_degrades(self):
+        """A configured-but-failing provider votes; a missing credential does not.
+
+        Issue #145 replaced the OpenD TCP probe with a signed read. Futu is
+        optional enrichment, so 「not configured」 is `not_applicable` (like the
+        Longbridge CLI), while a provider that is unreachable *after* being
+        configured must still pull the aggregate down.
+        """
         response = self._health(futu_reachable=False)
         self.assertEqual(response["checks"]["futu"]["status"], "degraded")
         self.assertEqual(response["status"], "degraded")
+
+    def test_an_unconfigured_futu_does_not_vote(self):
+        response = self._health(futu_client=None)
+        self.assertEqual(response["checks"]["futu"],
+                         {"status": "not_applicable", "error_code": "futu_not_configured"})
+        self.assertEqual(response["status"], "healthy")
 
     def test_the_health_endpoint_reports_the_injected_commit(self):
         with mock.patch.dict(os.environ, {version.COMMIT_ENV: "abc1234"}):

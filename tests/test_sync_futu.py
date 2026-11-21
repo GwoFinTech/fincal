@@ -142,14 +142,12 @@ class FutuDatesProvenanceTests(TestCase):
     """The earnings-dates upsert must carry Futu provenance."""
 
     def setUp(self):
-        import pandas as pd
-
         self.ctx = MagicMock()
-        df = pd.DataFrame(
-            [{"fiscal_year": 2026, "financial_type": 2,
-              "pub_trading_day_str": "2026-07-30", "pub_type": 1}]
-        )
-        self.ctx.get_financials_earnings_price_history.return_value = (0, df)
+        # Issue #145: the client returns plain rows (pandas only ever shipped as
+        # an OpenD SDK dependency), same columns as before.
+        rows = [{"fiscal_year": 2026, "financial_type": 2,
+                 "pub_trading_day_str": "2026-07-30", "pub_type": 1}]
+        self.ctx.get_financials_earnings_price_history.return_value = (0, rows)
         self._cursor = _RecordingCursor()
         self._batch = []
         self._sql = ""
@@ -279,9 +277,9 @@ class FutuEpsFieldTests(TestCase):
 
     The stage used to read a key-metrics field id whose ``display_name`` is
     流动比率 (current ratio), so every ``eps_actual`` Futu wrote measured
-    liquidity.  These tests pin the corrected field ids, the provider-label
-    check that makes a drifted id fail the symbol instead of writing another
-    metric, and the fact that one call now carries both figures.
+    liquidity.  These tests pin the corrected metric selection (now by label,
+    Issue #145), the fact that a foreign label never becomes a value, and that
+    one request carries both figures.
     """
 
     def _run(self, response, symbols=("AAPL.US",)):
@@ -321,42 +319,47 @@ class FutuEpsFieldTests(TestCase):
         )
 
     def test_diluted_eps_is_the_fallback_when_basic_is_absent(self):
-        response = _income_response(eps=2.02, eps_field_id=sync_futu.FUTU_FID_INCOME_EPS_DILUTED,
-                                    eps_label="稀释每股收益")
+        response = _income_response(eps=2.02, eps_label="稀释每股收益")
         _ctx, stats, updates = self._run(response)
 
         assert updates[0][0] == 2.02
         assert stats.failed_symbols == 0
 
-    def test_a_drifted_eps_field_fails_the_symbol_instead_of_writing(self):
-        """A drifted label must not become a value in the EPS column."""
+    def test_an_unrecognised_eps_label_writes_nothing(self):
+        """Issue #145: a metric is resolved by label, so a foreign label is 「no value」.
+
+        Under the F10 ids this payload meant 「id 8047 now says 流动比率」 — schema
+        drift that failed the symbol. With labels there is simply no EPS item, so
+        the column keeps its previous value and the revenue figure is still
+        written; whether the schema moved as a whole is answered by the #115
+        aggregate guard below, not by one symbol.
+        """
         response = _income_response(eps=1.003295, eps_label="流动比率")
-        with self.assertLogs("sync_futu", level="WARNING") as logs:
-            _ctx, stats, updates = self._run(response)
+        _ctx, stats, updates = self._run(response)
 
-        assert stats.failed_symbols == 1, (
-            "a field whose label contradicts its id must be audited as a symbol failure"
-        )
         assert [params[0] for params in updates] == [123.0], (
-            "only the verified revenue figure may be written"
+            "only the revenue figure carries a label the stage reads"
         )
-        assert "Issue #62" in "\n".join(logs.output)
+        assert stats.failed_symbols == 0
+        assert stats.missing_field_symbols == []
 
-    def test_a_drifted_revenue_field_is_refused_too(self):
+    def test_an_unrecognised_revenue_label_writes_nothing(self):
         response = _income_response(revenue=1.003295, revenue_label="流动比率")
         _ctx, stats, updates = self._run(response)
 
         assert [params[0] for params in updates] == [1.23]
-        assert stats.failed_symbols == 1
+        assert stats.failed_symbols == 0
 
-    def test_an_unlabelled_field_is_written_but_reported_as_unverified(self):
+    def test_an_unlabelled_item_is_never_selected(self):
+        """A value without a ``display_name`` cannot be identified, so it is skipped."""
         response = _income_response(eps_label="", revenue_label="")
-        with self.assertLogs("sync_futu", level="WARNING") as logs:
-            _ctx, stats, updates = self._run(response)
+        _ctx, stats, updates = self._run(response)
 
-        assert [params[0] for params in updates] == [1.23, 123.0]
-        assert stats.failed_symbols == 0, "a missing label is not drift"
-        assert "semantics unverified" in "\n".join(logs.output)
+        assert updates == [], "an unidentifiable number must not reach a column"
+        assert stats.failed_symbols == 0
+        assert stats.missing_field_symbols == ["AAPL.US"], (
+            "the period carried neither metric, which #115 counts"
+        )
 
     def test_retracted_actuals_stay_replaceable_by_the_corrected_sync(self):
         """Issue #62 criterion 3: voiding a wrong actual must not freeze the row."""
@@ -396,11 +399,14 @@ class FutuEpsFieldTests(TestCase):
 
 
 class FutuHkIncomeFieldTests(TestCase):
-    """Issue #115: HK income statements are addressed with 5xxx, not the US 8xxx ids.
+    """Issue #115: an HK income statement must be read with its own schema.
 
     The stage only knew the US numbering, so every HK symbol "found no field" —
     and a missing field was neither written nor counted, which is why 24 HK
-    symbols were reported as processed with zero failures and zero rows.
+    symbols were reported as processed with zero failures and zero rows. Since
+    #145 the schema is identified by label, which is what makes a bank's
+    statement (``BANK_HK``: operating revenue at id 15, id 1 is 净利息收入) read
+    correctly without a per-structure id table.
     """
 
     def _run(self, response, symbols=("0700.HK",)):
@@ -415,11 +421,11 @@ class FutuHkIncomeFieldTests(TestCase):
                 if sql.strip().startswith("UPDATE earnings")]
         return ctx, stats, updates, sqls
 
-    def test_hk_statement_is_read_with_5xxx_field_ids(self):
+    def test_hk_statement_is_read_with_its_own_labels(self):
         _ctx, stats, updates, sqls = self._run(_hk_income_response())
 
         assert [params[0] for params in updates] == [6.952, 192869000000.0], (
-            "0700.HK must read 5054 (基本每股收益) and 5001 (营业总收入)"
+            "0700.HK must read 基本每股收益 and 营业总收入"
         )
         for params in updates:
             # (value, value, currency, basis, value, currency, basis,
@@ -439,7 +445,7 @@ class FutuHkIncomeFieldTests(TestCase):
         assert stats.missing_field_symbols == []
 
     def test_revenue_only_hk_statement_writes_revenue_and_is_not_a_failure(self):
-        """3690.HK publishes 5001 without 5054/5055 — legitimate, not a failure."""
+        """A revenue-only HK statement is legitimate, not a failure."""
         _ctx, stats, updates, _sqls = self._run(_hk_income_response(eps=None))
 
         assert [params[0] for params in updates] == [192869000000.0]
@@ -447,10 +453,10 @@ class FutuHkIncomeFieldTests(TestCase):
         assert stats.missing_field_symbols == []
 
     def test_a_hk_statement_with_no_expected_field_is_counted_not_silent(self):
-        """US ids on an HK report mean the schema moved: no write, but visible."""
+        """A report whose labels the stage does not know: no write, but visible."""
         response = _hk_income_response(
-            item_list=[{"field_id": 8002, "display_name": "营业总收入", "data": 1.0},
-                       {"field_id": 8047, "display_name": "基本每股收益", "data": 2.0}],
+            item_list=[{"field_id": 32, "display_name": "其他经营费用", "data": 1.0},
+                       {"field_id": 58, "display_name": "净融资收入", "data": 2.0}],
         )
         with self.assertLogs("sync_futu", level="WARNING") as logs:
             _ctx, stats, updates, _sqls = self._run(response)
@@ -460,7 +466,7 @@ class FutuHkIncomeFieldTests(TestCase):
         assert stats.failed_symbols == 0, (
             "one symbol without the expected ids is not a symbol failure"
         )
-        assert "Issue #115" in "\n".join(logs.output)
+        assert "Issues #115, #145" in "\n".join(logs.output)
 
         details = sync_futu.futu_audit_details(
             sync_futu.FutuStageStats(), stats, [])
@@ -477,14 +483,14 @@ class FutuHkIncomeFieldTests(TestCase):
         stats.missing_field_symbols.append("0700.HK")
         assert sync_futu.futu_audit_outcome(stats) == ("success", None)
 
-    def test_a_drifted_hk_field_still_fails_the_symbol(self):
-        """The 5xxx labels are checked the same way as the 8xxx ones."""
+    def test_an_unrecognised_hk_eps_label_writes_only_revenue(self):
+        """HK statements are resolved by the same labels as US ones (#145)."""
         response = _hk_income_response(eps=6.952, eps_label="流动比率")
         _ctx, stats, updates, _sqls = self._run(response)
 
-        assert stats.failed_symbols == 1
+        assert stats.failed_symbols == 0
         assert [params[0] for params in updates] == [192869000000.0], (
-            "only the verified revenue figure may be written"
+            "only the revenue figure carries a label the stage reads"
         )
 
 
@@ -541,18 +547,14 @@ class FutuTimeoutIsolationTests(TestCase):
     """Issue #48: one wedged symbol must be counted as failed, not abort the batch."""
 
     def _run_dates(self, *, hang_time, timeout):
-        import pandas as pd
-
         ctx = MagicMock()
 
         def fetch(futu_code):
             if futu_code == "US.AAPL":
                 time.sleep(hang_time)
-            df = pd.DataFrame(
-                [{"fiscal_year": 2026, "financial_type": 2,
-                  "pub_trading_day_str": "2026-07-30", "pub_type": 1}]
-            )
-            return 0, df
+            rows = [{"fiscal_year": 2026, "financial_type": 2,
+                     "pub_trading_day_str": "2026-07-30", "pub_type": 1}]
+            return 0, rows
 
         ctx.get_financials_earnings_price_history.side_effect = fetch
         captured = {}
@@ -842,14 +844,12 @@ class FutuFailureClassificationTests(TestCase):
         failed symbol — throttling masqueraded as wedged symbols (observed on
         the first production run of the Issue #49 change).
         """
-        import pandas as pd
-
         limiter = sync_futu.FutuRateLimiter(max_calls=1, window_seconds=1.5,
                                             clock=time.monotonic, sleep=time.sleep)
         ctx = MagicMock()
         ctx.get_financials_earnings_price_history.return_value = (
-            0, pd.DataFrame([{"fiscal_year": 2026, "financial_type": 2,
-                              "pub_trading_day_str": "2026-07-30", "pub_type": 1}]),
+            0, [{"fiscal_year": 2026, "financial_type": 2,
+                 "pub_trading_day_str": "2026-07-30", "pub_type": 1}],
         )
 
         with _stage_env(limiter), \

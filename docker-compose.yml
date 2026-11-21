@@ -10,6 +10,11 @@ services:
     container_name: fincal
     restart: unless-stopped
     env_file: .env
+    environment:
+      # The signing key lives at a different path on the host (where the cron runs
+      # the sync) than inside the container (where it is a read-only mount), so the
+      # container's value is pinned here instead of inherited from .env.
+      - FUTU_API_SIGN_KEY=${FUTU_SIGN_KEY_CONTAINER:-/root/.key/futu/futu_ed25519}
     labels:
       - "traefik.enable=true"
       # Public routes — no auth (higher priority)
@@ -43,6 +48,12 @@ services:
       - "homepage.icon=📅"
       - "homepage.category=finance"
       - "homepage.url=https://${DOMAIN}"
+    # Issue #145: the Futu signing key is a file, not an env value. Mounted
+    # read-only at the path FUTU_API_SIGN_KEY points to (the same credential
+    # directory tsummt-web uses); `${FUTU_SIGN_KEY_HOST:-/root/.keys/futu/futu_ed25519}`
+    # keeps a fresh machine buildable even before the key exists.
+    volumes:
+      - ${FUTU_SIGN_KEY_HOST:-/root/.keys/futu/futu_ed25519}:/root/.key/futu/futu_ed25519:ro
     networks:
       - traefik_traefik-net
     extra_hosts:

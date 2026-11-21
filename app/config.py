@@ -140,11 +140,22 @@ UNIVERSE_ERROR_RETRY_SECONDS = float(os.getenv("UNIVERSE_ERROR_RETRY_SECONDS", "
 # the reload itself via connect_timeout + the connect cool-down.
 UNIVERSE_REQUEST_WAIT_SECONDS = float(os.getenv("UNIVERSE_REQUEST_WAIT_SECONDS", "1"))
 
-# Futu OpenD connection (optional - used for earnings date sync)
-FUTU_HOST = os.getenv("FUTU_HOST", "127.0.0.1")
-# The host's OpenD relay listens on 11112.  Production containers override
-# this through .env, but the default must also work for host-run sync scripts.
-FUTU_PORT = int(os.getenv("FUTU_PORT", "11112"))
+# Futu signed WebAPI (optional - used for earnings date/actual sync).
+#
+# Issue #145: this replaced the OpenD protobuf SDK entirely. The SDK needed a
+# daemon on the same host (plus an SSH tunnel for the CN endpoint) and could not
+# run anywhere else; the signed REST endpoints answer the same two F10 reads over
+# HTTPS. Credentials come from the environment or, like tsummt-web, from a
+# dotenv file so the key pair can live outside the compose file.
+FUTU_API_BASE = os.getenv("FUTU_API_BASE", "https://webapi.futunn.com/api/v1.0/quote")
+FUTU_ENV_FILE = os.getenv("FUTU_ENV_FILE", "")
+FUTU_API_KEY = os.getenv("FUTU_API_KEY", "")
+# Ed25519 private key (OpenSSH or PEM); the public key is never needed at runtime.
+FUTU_API_SIGN_KEY = os.getenv("FUTU_API_SIGN_KEY") or os.getenv("FUTU_API_SIGN_KEY_PRIVATE", "")
+# Optional HTTP forward proxy for the signed calls (trust_env is off).
+FUTU_HTTP_PROXY = os.getenv("FUTU_HTTP_PROXY", "")
+# Per-request HTTP timeout; the per-symbol watchdogs below still bound a stage.
+FUTU_API_TIMEOUT_SECONDS = float(os.getenv("FUTU_API_TIMEOUT_SECONDS", "20"))
 # Per-symbol call watchdog for scripts/sync_futu.py (Issue #48). Each OpenD call
 # is bounded by wall clock so a wedged symbol is counted as a failure instead of
 # hanging the batch; the windows stay configurable because a slow-but-healthy

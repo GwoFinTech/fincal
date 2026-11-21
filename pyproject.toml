@@ -7,7 +7,11 @@ dependencies = [
     "uvicorn[standard]>=0.30",
     "psycopg2-binary>=2.9",
     "cachetools>=5.3",
-    "futu-api>=10.6.6608",
+    # Issue #145: the Futu transport is the signed WebAPI, not the OpenD SDK.
+    # `requests` carries the signed call (trust_env off, optional forward proxy)
+    # and `cryptography` provides Ed25519.
+    "requests>=2.32",
+    "cryptography>=43",
 ]
 
 [dependency-groups]

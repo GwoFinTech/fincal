@@ -133,7 +133,7 @@ def statement_eps_map(payload: dict) -> dict[tuple[int, int], float]:
         year = report.get("fiscal_year")
         if not quarter or not year:
             continue
-        field = sync_futu.read_statement_field(report, sync_futu.FUTU_EPS_FIELD_IDS)
+        field = sync_futu.read_statement_field(report, sync_futu.FUTU_EPS_LABELS)
         if field.value is None:
             continue
         resolved[(int(year), int(quarter))] = field.value

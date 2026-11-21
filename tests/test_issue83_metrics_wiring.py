@@ -388,35 +388,16 @@ class ProviderWiringTests(CounterIsolationMixin, TestCase):
         self.assertEqual(stats["success"], 1)
 
     def _install_fake_futu(self, ret, name="Tencent Holdings"):
-        from types import SimpleNamespace as NS
-        import futu as futu_mod
+        from app import futu_webapi
 
-        class _Row:
-            def get(self, key, default=None):
-                return name if key == "name" else default
-
-        class _Data:
-            empty = False
-            iloc = [_Row()]
-
-        class _FakeCtx:
-            def __init__(self, host, port):
-                pass
-
+        class _Client:
             def get_stock_basicinfo(self, market, sec_type, code_list):
-                return (ret, _Data() if ret == 0 else "OpenD error")
+                return (ret, [{"name": name}] if ret == 0 else "WebAPI error")
 
             def close(self):
                 pass
 
-        patch = mock.patch.multiple(
-            futu_mod,
-            RET_OK=0,
-            Market=NS(HK="HK", US="US"),
-            SecurityType=NS(STOCK="STOCK"),
-            OpenQuoteContext=_FakeCtx,
-        )
-        return patch
+        return mock.patch.object(futu_webapi, "create_client", lambda: _Client())
 
     def test_futu_success_is_counted(self):
         with self._install_fake_futu(ret=0):

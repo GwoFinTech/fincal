@@ -363,14 +363,33 @@ def health_check():
         checks["kurumi"] = {"status": "degraded", "error_code": "kurumi_probe_failed",
                             "error": type(exc).__name__}
 
-    # Futu OpenD
+    # Futu — signed WebAPI, not a local daemon (Issue #145). The probe is one
+    # real signed read of the endpoint the sync uses, so a missing credential, a
+    # blocked route and an upstream outage all surface here instead of turning
+    # into per-symbol failures during the weekly sync. ``not_configured`` is
+    # reported as ``not_applicable``: Futu is optional enrichment, and its
+    # absence must not pin the aggregate to ``degraded`` (the same treatment the
+    # Longbridge CLI gets below).
     try:
-        from .. import config
-        import socket
-        with socket.create_connection((config.FUTU_HOST, config.FUTU_PORT), timeout=2):
-            checks["futu"] = {"status": "healthy"}
-    except Exception:
-        checks["futu"] = {"status": "degraded"}
+        from .. import futu_webapi
+        client = futu_webapi.create_client()
+        if client is None:
+            checks["futu"] = {"status": "not_applicable",
+                              "error_code": "futu_not_configured"}
+        else:
+            try:
+                probe = client.probe()
+            finally:
+                client.close()
+            if probe["ok"]:
+                checks["futu"] = {"status": "healthy", "transport": "webapi",
+                                  "latency_ms": probe["latency_ms"]}
+            else:
+                checks["futu"] = {"status": "degraded", "error_code": probe["code"],
+                                  "transport": "webapi"}
+    except Exception as exc:
+        checks["futu"] = {"status": "degraded", "error_code": "futu_probe_failed",
+                          "error": type(exc).__name__}
 
     # Longbridge CLI — a *host-side pipeline tool*, not a service dependency
     # (Issue #79). The image ships no such binary (Dockerfile copies app/ plus

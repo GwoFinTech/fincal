@@ -74,42 +74,23 @@ def test_resolve_result_returns_ok_on_success(monkeypatch):
 
 
 def _install_fake_futu(monkeypatch, name):
-    """Install a fake `futu` bindings so the REAL `fetch_from_futu` code-assembly
-    path runs without a live OpenD connection, capturing the code/market passed
-    to get_stock_basicinfo. Exercises the actual symbol→code conversion (Issue #41)."""
-    from types import SimpleNamespace
-    import futu as futu_mod
+    """Install a fake signed client so the REAL `fetch_from_futu` code-assembly
+    path runs without a live WebAPI, capturing the code/market passed to
+    stock-basicinfo. Exercises the actual symbol→code conversion (Issue #41)."""
+    from app import futu_webapi
 
     captured = {"code_list": None, "market": None}
 
-    class _Row:
-        def __init__(self, n): self._n = n
-        def get(self, key, default=None):
-            return self._n if key == "name" else default
-
-    class _Data:
-        def __init__(self, n):
-            self.empty = False
-            self._row = _Row(n)
-        @property
-        def iloc(self):
-            return [self._row]
-
-    class _FakeCtx:
-        def __init__(self, host, port):
-            self.host = host
-            self.port = port
+    class _Client:
         def get_stock_basicinfo(self, market, sec_type, code_list):
             captured["market"] = market
             captured["code_list"] = list(code_list)
-            return (0, _Data(name))
+            return (0, [{"name": name}])
+
         def close(self):
             pass
 
-    monkeypatch.setattr(futu_mod, "RET_OK", 0)
-    monkeypatch.setattr(futu_mod, "Market", SimpleNamespace(HK="HK", US="US"))
-    monkeypatch.setattr(futu_mod, "SecurityType", SimpleNamespace(STOCK="STOCK"))
-    monkeypatch.setattr(futu_mod, "OpenQuoteContext", _FakeCtx)
+    monkeypatch.setattr(futu_webapi, "create_client", lambda: _Client())
     return captured
 
 

@@ -266,36 +266,33 @@ def fetch_from_longbridge(symbol: str, market: str) -> str:
 
 
 def fetch_from_futu(symbol: str, market: str) -> str:
-    """Query Futu OpenD get_stock_basicinfo. Raises ProviderError on failure.
+    """Query the Futu WebAPI ``stock-basicinfo``. Raises ProviderError on failure.
 
-    The SDK is not reachable through ``provider_client``, so its attempt is
-    counted explicitly (Issue #83). A missing SDK returns "" without counting
-    anything: no call was made to anybody.
+    Issue #145: this used to open an ``OpenQuoteContext`` against a local OpenD
+    daemon; the signed REST call needs no daemon and no SDK, so the only reason
+    to return "" without counting anything is an unconfigured credential (no call
+    was made to anybody).
     """
-    try:
-        from futu import RET_OK, Market, SecurityType, OpenQuoteContext
-        from app.symbol import to_futu_code
-    except ImportError:
+    from app import futu_webapi
+    from app.symbol import to_futu_code
+
+    client = futu_webapi.create_client()
+    if client is None:
         return ""
     # Build a canonical TICKER.MARKET before converting so both markets yield a
     # complete Futu code (Issue #41): HK rows already carry ".HK" (e.g. 0700.HK),
     # US rows are bare tickers (e.g. AAPL) and must gain the ".US" suffix.
     canonical = f"{symbol}.{market}" if "." not in symbol else symbol
     code = to_futu_code(canonical)
-    ctx = None
     started = time.time()
     try:
-        ctx = OpenQuoteContext(host=config.FUTU_HOST, port=config.FUTU_PORT)
-        ret, data = ctx.get_stock_basicinfo(
-            Market.HK if market == "HK" else Market.US,
-            SecurityType.STOCK, [code],
-        )
-        if ret == RET_OK and data is not None and not data.empty:
-            name = str(data.iloc[0].get("name", "")).strip()
+        ret, rows = client.get_stock_basicinfo(market, "STOCK", [code])
+        if ret == 0 and rows:
+            name = str(rows[0].get("name", "")).strip()
             _count_call("futu", started, success=True)
             return name
-        # OpenD answered with an error or with nothing usable: a real call that
-        # produced no name, reported as such instead of silently vanishing.
+        # The provider answered with an error or with nothing usable: a real
+        # call that produced no name, reported as such instead of vanishing.
         _count_call("futu", started, success=False,
                     category=ErrorCategory.INVALID_RESPONSE.value)
         return ""
@@ -304,8 +301,7 @@ def fetch_from_futu(symbol: str, market: str) -> str:
         _count_call("futu", started, success=False, category=err.category.value)
         raise err from exc
     finally:
-        if ctx is not None:
-            ctx.close()
+        client.close()
 
 
 def resolve_company_name(symbol: str, market: str) -> tuple[str, str]:

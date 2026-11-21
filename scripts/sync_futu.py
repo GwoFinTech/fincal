@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Fetch earnings calendar dates + actual EPS/revenue from Futu OpenD.
-Uses batched DB writes. One shared OpenQuoteContext for all symbols.
+"""Fetch earnings calendar dates + actual EPS/revenue from the Futu WebAPI.
+
+Uses batched DB writes. One shared signed client for all symbols (Issue #145:
+the OpenD SDK/daemon this used to require is gone; the transport is the same
+signed REST API tsummt-web runs on).
 """
 import contextlib
 import signal
 import logging
 import sys
 import os
-import socket
 import threading
 import time
 from collections import deque
@@ -20,6 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.db import db_cursor
 from app import config
 from app import fiscal
+from app import futu_webapi
 from app.provenance import (
     REPLACEABLE_ACTUAL_SOURCES,
     normalize_basis,
@@ -35,61 +38,28 @@ logger = logging.getLogger(__name__)
 F10_TO_QUARTER = {1: 1, 2: 2, 3: 3, 4: 4}
 PUB_TYPE_MAP = {1: "before", 2: "after", 3: "during"}
 
-# ── OpenD statement fields (Issue #62) ──────────────────────────────
+# ── Income-statement metrics, resolved by label (Issues #62 and #145) ──
 #
-# A Futu statement field is addressed by a numeric id whose meaning belongs to a
-# *statement type*, never to the id alone.  The actuals stage used to read "EPS"
-# from a field id of the key-metrics statement (``statement_type=4``) whose label
-# is 流动比率 (current ratio), so every ``eps_actual`` it wrote was a liquidity
-# ratio — production had 312 rows over 76 symbols showing figures like OKLO 59.93
-# and TSLA 1.94 as "actual EPS".  EPS lives in the income statement
-# (``statement_type=1``, next to the revenue figure the stage already fetched), so
-# one call now carries both.  The ids are named constants and every value is
-# checked against the provider's own ``display_name`` before it is written: a
-# field whose label contradicts its id fails that symbol instead of silently
-# storing another metric.
+# The #62 incident: "EPS" was read from a *key-metrics* field (statement_type=4)
+# whose id means 流动比率 (current ratio), so 312 rows over 76 symbols stored a
+# liquidity ratio as ``eps_actual``. The fix moved EPS into the income statement
+# (statement_type=1, next to revenue) and checked every value against the
+# provider's own ``display_name``.
+#
+# #145 removes the daemon, and with it the ids this table used to hold (US 8002 /
+# 8047 / 8048, HK 5001 / 5054 / 5055). The signed WebAPI numbers its income
+# statement 1..N and **the numbering moves with the issuer's ``structure``**:
+# ``NORMAL_HK`` puts revenue at 1 and EPS at 54, ``BANK_HK`` puts operating
+# revenue at 15 and EPS at 61, and on a bank's statement id 1 is 净利息收入. Fixed
+# ids are therefore no longer expressible; a metric is resolved by its label in a
+# preference order, which keeps the #62 guard in the only form that still has
+# meaning — an unrecognised label yields **no value**, never a neighbouring one.
 FUTU_STATEMENT_INCOME = 1
-FUTU_FID_INCOME_REVENUE = 8002        # 营业总收入 (US statement)
-FUTU_FID_INCOME_EPS_BASIC = 8047      # 基本每股收益 (US statement)
-FUTU_FID_INCOME_EPS_DILUTED = 8048    # 稀释每股收益 (US statement)
-FUTU_FID_INCOME_REVENUE_HK = 5001     # 营业总收入 (HK statement, Issue #115)
-FUTU_FID_INCOME_EPS_BASIC_HK = 5054   # 基本每股收益 (HK statement)
-FUTU_FID_INCOME_EPS_DILUTED_HK = 5055 # 稀释每股收益 (HK statement)
 
-#: Income-statement field ids read as EPS, in preference order (US schema).
-FUTU_EPS_FIELD_IDS = (FUTU_FID_INCOME_EPS_BASIC, FUTU_FID_INCOME_EPS_DILUTED)
-
-#: Issue #115: OpenD addresses income-statement fields by a numeric id whose
-#: numbering *differs per market* — 8xxx is the US statement, 5xxx the HK one.
-#: The stage used only the US ids, so every HK symbol "found no field", and a
-#: missing field was neither written nor counted: 24 HK symbols were reported as
-#: processed with zero failures and zero rows written.  The id table is therefore
-#: selected by market; an unregistered market is reported as unsupported instead
-#: of being read with another market's numbering.
-FUTU_INCOME_FIELDS: dict[str, dict[str, Any]] = {
-    "US": {
-        "revenue": FUTU_FID_INCOME_REVENUE,
-        "eps": FUTU_EPS_FIELD_IDS,
-    },
-    "HK": {
-        "revenue": FUTU_FID_INCOME_REVENUE_HK,
-        "eps": (FUTU_FID_INCOME_EPS_BASIC_HK, FUTU_FID_INCOME_EPS_DILUTED_HK),
-    },
-}
-
-#: Labels accepted for each field id — case-folded substrings of OpenD's own
-#: ``display_name``, which is localised and may carry extra detail.  A label that
-#: matches none of them means the id no longer carries what the column expects.
-#: The HK ids are listed too (Issue #115): without them every HK field would be
-#: refused as drift even when the id and the label agree.
-FUTU_FIELD_LABELS = {
-    FUTU_FID_INCOME_REVENUE: ("营业总收入", "营业收入", "revenue"),
-    FUTU_FID_INCOME_EPS_BASIC: ("基本每股收益", "每股收益", "basic eps", "eps"),
-    FUTU_FID_INCOME_EPS_DILUTED: ("稀释每股收益", "每股收益", "diluted eps", "eps"),
-    FUTU_FID_INCOME_REVENUE_HK: ("营业总收入", "营业收入", "revenue"),
-    FUTU_FID_INCOME_EPS_BASIC_HK: ("基本每股收益", "每股收益", "basic eps", "eps"),
-    FUTU_FID_INCOME_EPS_DILUTED_HK: ("稀释每股收益", "每股收益", "diluted eps", "eps"),
-}
+#: Label preference order for the two metric columns, shared by both markets
+#: (the labels are the same in every ``structure``; only the ids move).
+FUTU_REVENUE_LABELS = futu_webapi.REVENUE_LABELS
+FUTU_EPS_LABELS = futu_webapi.EPS_LABELS
 
 #: SQL list of the sources a new Futu actual may replace (Issue #45, extended by
 #: #62 with the retracted label so a wrong actual stays repairable).  Built from
@@ -138,70 +108,14 @@ AND COALESCE(actual_source, 'unknown') IN {_REPLACEABLE_SOURCES_SQL}
 """
 
 
-@dataclass(frozen=True)
-class StatementField:
-    """One statement field read by id, plus the result of its label check.
+def read_statement_field(report: dict, labels) -> futu_webapi.StatementField:
+    """Resolve one metric from a statement report by label (Issue #145).
 
-    ``drift`` is ``True`` when OpenD labelled the id as something other than what
-    the column expects; such a value must not be written at all.
+    Thin wrapper so the existing callers (the sync's actuals stage and
+    ``scripts/fix_futu_eps_field.py --verify``) keep one entry point while the
+    resolution rule lives next to the transport that needs it.
     """
-
-    value: float | None = None
-    field_id: int | None = None
-    label: str = ""
-    drift: bool = False
-
-    @property
-    def labelled(self) -> bool:
-        """True when the provider sent a label, so the id could be checked."""
-        return bool(self.label)
-
-
-def label_matches_field(field_id: int, label: str) -> bool:
-    """True when a provider label belongs to the given statement field id.
-
-    An empty label returns ``False`` here: it can neither confirm nor refute the
-    id's semantics, and :func:`read_statement_field` reports that case separately
-    instead of calling it drift.
-    """
-    text = " ".join(str(label or "").casefold().split())
-    if not text:
-        return False
-    return any(marker in text for marker in FUTU_FIELD_LABELS.get(field_id, ()))
-
-
-def read_statement_field(report: dict, field_ids) -> StatementField:
-    """Read the first present field of ``field_ids`` from one statement report.
-
-    ``field_ids`` is a preference order (basic EPS before diluted EPS).  A value
-    is only returned when the provider's label for that id does not contradict
-    the metric the column expects — a drifted id returns ``drift=True`` with a
-    ``None`` value, so the caller fails the symbol instead of writing a number
-    that measures something else (Issue #62).
-    """
-    items = report.get("item_list") or []
-    by_id: dict[Any, dict] = {}
-    for item in items:
-        field_id = item.get("field_id")
-        if field_id in field_ids and field_id not in by_id:
-            by_id[field_id] = item
-
-    for field_id in field_ids:
-        item = by_id.get(field_id)
-        if item is None:
-            continue
-        label = str(item.get("display_name") or "").strip()
-        if label and not label_matches_field(field_id, label):
-            return StatementField(field_id=field_id, label=label, drift=True)
-        if item.get("data") is None:
-            continue
-        try:
-            return StatementField(
-                value=float(item["data"]), field_id=field_id, label=label
-            )
-        except (TypeError, ValueError):
-            continue
-    return StatementField()
+    return futu_webapi.select_statement_field(report, labels)
 
 
 # ── Futu call watchdog (Issue #48) ──────────────────────────────────
@@ -293,8 +207,12 @@ def futu_call_timeout(seconds: int):
 
 # Provider wording that identifies each failure mode. Messages are matched as
 # substrings because OpenD localises them (and may append extra detail).
-RATE_LIMIT_MARKERS = ("频率太高", "频率限制", "每30秒最多", "too frequent")
-UNSUPPORTED_MARKERS = ("仅支持正股",)
+# Provider messages, both transports: the OpenD SDK phrased these in Chinese, the
+# signed WebAPI answers with HTTP 429/439 and ret codes -11 (rate limit), -7
+# (invalid symbol) and -10 (no data). The sync keeps one vocabulary either way.
+RATE_LIMIT_MARKERS = ("频率太高", "频率限制", "每30秒最多", "too frequent",
+                      "rate limit", "HTTP 429", "HTTP 439")
+UNSUPPORTED_MARKERS = ("仅支持正股", "invalid symbol", "no data", "code -7", "code -10")
 
 OUTCOME_OK = "ok"
 OUTCOME_RATE_LIMITED = "rate_limited"
@@ -527,32 +445,27 @@ def futu_call(futu_code: str, description: str, call, limiter, stats,
 
 
 def create_futu_context():
-    """Return a connected OpenD context, or ``None`` when it is unavailable.
+    """Return a signed WebAPI client, or ``None`` when Futu is unavailable.
 
-    ``OpenQuoteContext`` retries a refused connection indefinitely.  A cheap
-    TCP preflight prevents a weekly sync from consuming the scheduler's full
-    one-hour allowance when OpenD is down or pointed at the wrong port.
+    Issue #145: the OpenD daemon (and its TCP preflight) is gone. The equivalent
+    preflight is one signed read: it exercises the credential, the route and the
+    upstream in the same request the stages will make, so a missing key or a
+    blocked network degrades to 「stage skipped」 instead of five minutes of
+    per-symbol failures.
     """
-    try:
-        with socket.create_connection((config.FUTU_HOST, config.FUTU_PORT), timeout=3):
-            pass
-    except OSError as exc:
+    client = futu_webapi.create_client()
+    if client is None:
+        return None
+    probe = client.probe()
+    if not probe["ok"]:
         logger.warning(
-            "Futu OpenD unavailable at %s:%s; skipping optional Futu sync: %s",
-            config.FUTU_HOST,
-            config.FUTU_PORT,
-            exc,
+            "Futu WebAPI preflight failed (%s, %sms); skipping optional Futu sync",
+            probe["code"], probe["latency_ms"],
         )
+        client.close()
         return None
-
-    from futu import OpenQuoteContext
-    try:
-        ctx = OpenQuoteContext(host=config.FUTU_HOST, port=config.FUTU_PORT)
-        logger.info("Connected to Futu OpenD at %s:%s (shared context)", config.FUTU_HOST, config.FUTU_PORT)
-        return ctx
-    except Exception as exc:
-        logger.warning("Failed to create Futu OpenD context: %s", exc)
-        return None
+    logger.info("Futu WebAPI ready (%sms, %s)", probe["latency_ms"], config.FUTU_API_BASE)
+    return client
 
 
 def canonical_earnings_symbol(symbol: str) -> tuple[str, str]:
@@ -809,10 +722,10 @@ def _upsert_date_rows_individually(cur, rows: list[tuple], stats: FutuStageStats
 
 def sync_earnings_dates(ctx, run_id: int, symbols: list[str],
                         stats: FutuStageStats | None = None) -> FutuStageStats:
-    """Fetch earnings calendar dates from Futu, single shared context.
+    """Fetch earnings calendar dates from the Futu WebAPI, one shared client.
 
     ``symbols`` are the Futu-routable watchlist codes resolved once by the
-    caller; OpenD pacing and failure classification live in :func:`futu_call`.
+    caller; request pacing and failure classification live in :func:`futu_call`.
 
     ``stats`` may be supplied by the caller so a stage that ends in an exception
     still reports what it had counted (Issue #81: the failed 2026-10-12 run
@@ -852,10 +765,20 @@ def sync_earnings_dates(ctx, run_id: int, symbols: list[str],
                     break
                 continue
 
-            df = data.drop_duplicates(subset=["fiscal_year", "financial_type"], keep="first")
-            for _, row in df.iterrows():
-                fy = int(row["fiscal_year"])
-                ft = int(row["financial_type"])
+            # One row per fiscal period: the provider lists a period again when a
+            # date is rescheduled, and the first occurrence is the one the stage
+            # has always kept. Plain dicts — the client returns rows, not a frame
+            # (pandas only ever shipped as an OpenD SDK dependency).
+            seen: set[tuple[int, int]] = set()
+            for row in data:
+                try:
+                    fy = int(row["fiscal_year"])
+                    ft = int(row["financial_type"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if (fy, ft) in seen:
+                    continue
+                seen.add((fy, ft))
                 fq = F10_TO_QUARTER.get(ft)
                 if fq is None:
                     continue
@@ -892,14 +815,14 @@ def sync_actuals(ctx, run_id: int, symbols: list[str],
                  stats: FutuStageStats | None = None) -> FutuStageStats:
     """Fetch actual EPS and revenue from the market's income statement.
 
-    Both figures live in ``statement_type=1``, so one OpenD call per symbol now
-    carries them: the stage used to spend two calls per symbol, one of which read
-    a liquidity ratio and stored it as the actual EPS (Issue #62).  The ids are
-    selected by market (Issue #115: US 8002/8047/8048, HK 5001/5054/5055) — the
-    numbering belongs to the statement schema, not to the metric.  The symbol is
-    counted once, using the most severe outcome, so ``failed_symbols`` keeps its
-    historical per-symbol meaning (Issue #49) — including a statement field whose
-    label no longer matches the column it would be written to.
+    Both figures live in ``statement_type=1``, so one request per symbol carries
+    them: the stage used to spend two calls per symbol, one of which read a
+    liquidity ratio and stored it as the actual EPS (Issue #62).  The metrics are
+    resolved by label (#145) because the WebAPI's income-statement numbering
+    differs per issuer structure, and a period whose statement carries neither
+    label is reported as a missing field instead of a clean write (#115).  The
+    symbol is counted once, using the most severe outcome, so ``failed_symbols``
+    keeps its historical per-symbol meaning (Issue #49).
     ``stats`` may be supplied by the caller (see :func:`sync_earnings_dates`).
     """
     stats = stats if stats is not None else FutuStageStats()
@@ -915,19 +838,6 @@ def sync_actuals(ctx, run_id: int, symbols: list[str],
         stats.symbols_attempted += 1
         symbol, market = canonical_earnings_symbol(source_symbol)
         futu_code = to_futu_code(source_symbol)
-        fields = FUTU_INCOME_FIELDS.get(market)
-        if fields is None:
-            # Issue #115: field ids belong to a market's statement schema.  Reading
-            # another market's numbering would either find nothing (silent zero
-            # writes) or, worse, another metric; an unregistered market is reported
-            # as unsupported instead of being guessed.
-            logger.warning(
-                "%s: no income-statement field map for market %s — actuals skipped",
-                futu_code, market,
-            )
-            stats.total += 1
-            stats.count_symbol(OUTCOME_UNSUPPORTED)
-            continue
         outcome = OUTCOME_OK
         try:
             outcome, income_data = futu_call(
@@ -948,27 +858,22 @@ def sync_actuals(ctx, run_id: int, symbols: list[str],
                     fq = F10_TO_QUARTER.get(ft)
                     if not fy or not fq:
                         continue
-                    eps = read_statement_field(report, fields["eps"])
-                    revenue = read_statement_field(report, (fields["revenue"],))
+                    # Issue #145: resolved by label — the WebAPI's income-statement
+                    # numbering differs per issuer structure, so an id table cannot
+                    # express this any more (see FUTU_REVENUE_LABELS above).
+                    eps = read_statement_field(report, FUTU_EPS_LABELS)
+                    revenue = read_statement_field(report, FUTU_REVENUE_LABELS)
                     if eps.field_id is not None or revenue.field_id is not None:
                         saw_expected_field = True
                     for name, read in (("EPS", eps), ("Revenue", revenue)):
-                        if read.drift:
-                            # The id came back under a label that measures
-                            # something else: write nothing for this period and
-                            # let the symbol be audited as a failure, instead of
-                            # storing a number the column does not describe.
-                            outcome = merge_outcome(outcome, OUTCOME_FAILED)
-                            logger.warning(
-                                "%s: %s field id %s is labelled %r for FY%s Q%s — "
-                                "value not written (Issue #62)",
-                                futu_code, name, read.field_id, read.label, fy, fq,
-                            )
-                        elif read.value is not None and not read.labelled:
-                            logger.warning(
-                                "%s: %s field id %s came back without a label for "
-                                "FY%s Q%s; semantics unverified",
-                                futu_code, name, read.field_id, fy, fq,
+                        if read.value is None:
+                            # No item carried a label this metric owns. Nothing is
+                            # written for the period; a period that carries neither
+                            # metric is counted as a missing field below (#115).
+                            logger.info(
+                                "%s: no %s label in FY%s Q%s income statement "
+                                "(structure %s) — nothing written",
+                                futu_code, name, fy, fq, report.get("structure_name", "?"),
                             )
                     # Issue #61: a written actual must say which currency and
                     # which accounting base it is in — OpenD reports the
@@ -1003,11 +908,11 @@ def sync_actuals(ctx, run_id: int, symbols: list[str],
                     # fails the run — see futu_audit_outcome).
                     stats.missing_field_symbols.append(source_symbol)
                     logger.warning(
-                        "%s: %d income-statement report(s) but none of the %s "
-                        "expected field ids (revenue=%s, eps=%s) — no actual "
-                        "written (Issue #115)",
-                        futu_code, len(income_data["report_list"]), market,
-                        fields["revenue"], fields["eps"],
+                        "%s: %d income-statement report(s) but none carried the "
+                        "revenue (%s) or EPS (%s) label — no actual written "
+                        "(Issues #115, #145)",
+                        futu_code, len(income_data["report_list"]),
+                        "/".join(FUTU_REVENUE_LABELS[:2]), "/".join(FUTU_EPS_LABELS[:2]),
                     )
         except Exception as e:
             outcome = merge_outcome(outcome, OUTCOME_FAILED)
