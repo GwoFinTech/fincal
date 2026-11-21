@@ -113,6 +113,8 @@ COMPUTED_READ_PATH_FIELDS = {
     # rather than discovered from the schema.
     "eps_pair_estimate", "eps_pair_actual", "eps_pair_currency",
     "eps_pair_analysts", "eps_pair_source",
+    "revenue_pair_estimate", "revenue_pair_actual", "revenue_pair_currency",
+    "revenue_pair_analysts", "revenue_pair_source",
 }
 
 _EARNINGS_ALTER_LOOP = re.compile(
@@ -178,6 +180,9 @@ def _full_row() -> dict:
         "eps_pair_estimate": 9.1573, "eps_pair_actual": 25.94,
         "eps_pair_currency": "CNY", "eps_pair_analysts": 7,
         "eps_pair_source": "futu",
+        "revenue_pair_estimate": 269849229900.0, "revenue_pair_actual": 271519000000.0,
+        "revenue_pair_currency": "CNY", "revenue_pair_analysts": 22,
+        "revenue_pair_source": "futu",
         "consensus_eps_gaap": 1.90, "consensus_eps_adjusted": 1.92,
         "consensus_revenue": 91000.0, "consensus_ebit": 30000.0,
         "consensus_net_income": 25000.0, "consensus_normalized_net_income": 24500.0,

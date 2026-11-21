@@ -388,8 +388,11 @@ class FutuWebClient:
         return 0, {"report_list": payload.get("report_list") or [],
                    "next_key": (data.get("pagination") or {}).get("next_key")}
 
+    ESTIMATE_TYPES = ("EPS_GAAP", "REVENUE", "EBIT", "NET_INCOME_GAAP")
+
     def get_financials_estimate(self, code: str,
-                               period_type: str = "QUARTERLY") -> tuple[int, Any]:
+                               period_type: str = "QUARTERLY",
+                               estimate_type: str = "EPS_GAAP") -> tuple[int, Any]:
         """EPS consensus **and** the provider's own actual per period (Issue #147).
 
         ``{"currency": "CNY", "history": [...], "future": [...]}`` where each period
@@ -401,15 +404,27 @@ class FutuWebClient:
         currency (CNY for 0700/BABA/PDD while the quote currency is HKD/USD), and
         both numbers are stated **per listing unit** (per ADS for a US ADR, per
         share for the HK line) — the same convention as the statements' EPS, so the
-        pair the provider computes is internally consistent.  There is no revenue
-        consensus here: this endpoint is EPS only.
+        pair the provider computes is internally consistent.
+
+        ``estimate_type`` selects the metric and takes exactly one of
+        :attr:`ESTIMATE_TYPES` — the endpoint answers 200 with an "invalid" list when
+        given anything else, including comma-joined batches (Issue #148, found after
+        #147 shipped claiming the provider had no revenue consensus: the parameter
+        was simply never sent).  ``currency`` is per **metric**, not per symbol:
+        TSM reports revenue in TWD while its EPS consensus is quoted in USD.
         """
+        metric = (estimate_type or "EPS_GAAP").upper()
+        if metric not in self.ESTIMATE_TYPES:
+            return -1, (f"unsupported estimate_type {estimate_type!r}; "
+                        f"expected one of {list(self.ESTIMATE_TYPES)}")
         ret, data = self._call(f"{code}/financials/estimate",
-                              params={"period_type": period_type})
+                              params={"period_type": period_type,
+                                      "estimate_type": metric})
         if ret != 0:
             return ret, data
         payload = data.get("data") or {}
         return 0, {
+            "metric": metric,
             "currency": normalize_currency(payload.get("currency")),
             "period_type": payload.get("period_type") or period_type,
             "history": [_estimate_period(row) for row in payload.get("historical_estimates") or []],

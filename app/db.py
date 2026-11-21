@@ -433,28 +433,54 @@ def init_db():
         # comparability rule correctly refuses to subtract them, so every Chinese
         # issuer listed in HK/US showed 「—」 for beat/miss.
         #
-        # The provider publishes its own EPS consensus *and* its own actual for the
-        # same period in one currency and one unit (per listing unit: per ADS for a
-        # US ADR), so that pair is comparable by construction. Stored per period, not
-        # per event, and only consulted when the row's own pair is blocked.
+        # The provider publishes its own consensus *and* its own actual for the same
+        # period in one currency and one unit (per listing unit: per ADS for a US
+        # ADR), so that pair is comparable by construction. Stored per period, not per
+        # event, and only consulted when the row's own pair is blocked.
+        #
+        # The EPS-only predecessor (``earnings_provider_pairs``) is folded in and
+        # dropped once, right below: it is a cache a sync rebuilds, and leaving a dead
+        # table the read path no longer touches is how a schema grows two fathers.
+        # Issue #148: the endpoint takes an ``estimate_type`` (EPS_GAAP / REVENUE /
+        # EBIT / NET_INCOME_GAAP) that #147 never sent — so "the provider publishes no
+        # revenue consensus" was wrong, and a Chinese issuer's revenue surplus can be
+        # computed from the provider's own pair exactly like EPS. ``metric`` is part
+        # of the key (one row per period per metric) because ``currency`` is a
+        # property of the metric: TSM's revenue is TWD while its EPS consensus is
+        # quoted in USD, so one currency column per period cannot describe both.
         cur.execute("""
-    CREATE TABLE IF NOT EXISTS earnings_provider_pairs (
+    CREATE TABLE IF NOT EXISTS earnings_provider_metrics (
         symbol          TEXT NOT NULL,
         market          TEXT NOT NULL,
         fiscal_year     INTEGER NOT NULL,
         fiscal_quarter  INTEGER NOT NULL,
         source          TEXT NOT NULL DEFAULT 'futu',
+        metric          TEXT NOT NULL DEFAULT 'EPS_GAAP',
         currency        TEXT,
-        eps_consensus   NUMERIC(20, 6),
-        eps_actual      NUMERIC(20, 6),
+        consensus       NUMERIC(24, 6),
+        actual          NUMERIC(24, 6),
         num_analysts    INTEGER,
         period_type     TEXT,
         as_of           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        PRIMARY KEY (symbol, market, fiscal_year, fiscal_quarter, source)
+        PRIMARY KEY (symbol, market, fiscal_year, fiscal_quarter, source, metric)
     );
-    CREATE INDEX IF NOT EXISTS idx_earnings_provider_pairs_period
-    ON earnings_provider_pairs (fiscal_year, fiscal_quarter);
+    CREATE INDEX IF NOT EXISTS idx_earnings_provider_metrics_period
+    ON earnings_provider_metrics (fiscal_year, fiscal_quarter);
+
+    DO $$
+    BEGIN
+        IF to_regclass('public.earnings_provider_pairs') IS NOT NULL THEN
+            INSERT INTO earnings_provider_metrics
+                (symbol, market, fiscal_year, fiscal_quarter, source, metric, currency,
+                 consensus, actual, num_analysts, period_type, as_of)
+            SELECT symbol, market, fiscal_year, fiscal_quarter, source, 'EPS_GAAP',
+                   currency, eps_consensus, eps_actual, num_analysts, period_type, as_of
+            FROM earnings_provider_pairs
+            ON CONFLICT DO NOTHING;
+            DROP TABLE earnings_provider_pairs;
+        END IF;
+    END $$;
 
     CREATE TABLE IF NOT EXISTS earnings_growth (
                 id SERIAL PRIMARY KEY,

@@ -127,6 +127,15 @@ class EarningItem(BaseModel):
     eps_pair_currency: str | None = None
     eps_pair_analysts: int | None = None
     eps_pair_source: str | None = None
+    # Issue #148: the same for revenue. The endpoint's ``estimate_type`` parameter
+    # (EPS_GAAP / REVENUE / …) had never been sent, so #147's "the provider publishes
+    # no revenue consensus" was wrong; revenue carries its **own** currency (TSM:
+    # revenue TWD, EPS USD), hence its own five fields rather than reusing the above.
+    revenue_pair_estimate: float | None = None
+    revenue_pair_actual: float | None = None
+    revenue_pair_currency: str | None = None
+    revenue_pair_analysts: int | None = None
+    revenue_pair_source: str | None = None
     consensus_eps_gaap: float | None = None
     consensus_eps_adjusted: float | None = None
     consensus_revenue: float | None = None

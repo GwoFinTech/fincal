@@ -855,6 +855,16 @@ export interface components {
             eps_pair_analysts?: number | null;
             /** Eps Pair Source */
             eps_pair_source?: string | null;
+            /** Revenue Pair Estimate */
+            revenue_pair_estimate?: number | null;
+            /** Revenue Pair Actual */
+            revenue_pair_actual?: number | null;
+            /** Revenue Pair Currency */
+            revenue_pair_currency?: string | null;
+            /** Revenue Pair Analysts */
+            revenue_pair_analysts?: number | null;
+            /** Revenue Pair Source */
+            revenue_pair_source?: string | null;
             /** Consensus Eps Gaap */
             consensus_eps_gaap?: number | null;
             /** Consensus Eps Adjusted */

@@ -57,11 +57,16 @@ def _income_response():
     }]}
 
 
-def _estimate_response():
-    return (0, {"currency": "CNY", "period_type": "QUARTERLY",
+def _estimate_response(metric="EPS_GAAP"):
+    """One metric's payload; the stage asks for EPS_GAAP and REVENUE (#148)."""
+    if metric == "REVENUE":
+        consensus, actual = 210239931880.0, 207336000000.0
+    else:
+        consensus, actual = 6.2873, 6.947
+    return (0, {"metric": metric, "currency": "CNY", "period_type": "QUARTERLY",
                 "history": [{"fiscal_year": 2026, "fiscal_quarter": 3,
-                             "consensus": 6.2873, "actual": 6.947, "num_analysts": 7,
-                             "period_str": "2026/Q3"}],
+                             "consensus": consensus, "actual": actual,
+                             "num_analysts": 7, "period_str": "2026/Q3"}],
                 "future": []})
 
 
@@ -73,7 +78,9 @@ def test_sync_actuals_writes_the_provider_pairs():
     """The whole stage, not just the helper: the hook has to reach the writer."""
     ctx = MagicMock()
     ctx.get_financials_statements.return_value = (0, _income_response())
-    ctx.get_financials_estimate.return_value = _estimate_response()
+    ctx.get_financials_estimate.side_effect = (
+        lambda code, period_type="QUARTERLY", estimate_type="EPS_GAAP":
+        _estimate_response(estimate_type))
     cursor = _RecordingCursor()
     stats = _stats()
 
@@ -84,13 +91,18 @@ def test_sync_actuals_writes_the_provider_pairs():
         sync_futu.sync_actuals(ctx, 1, ["0700.HK"], stats=stats)
 
     pairs = [params for sql, params in cursor.executed
-             if "earnings_provider_pairs" in sql]
+             if "earnings_provider_metrics" in sql and params[4] == "EPS_GAAP"]
     assert len(pairs) == 1, (
         "sync_actuals did not write the provider pair — the hook most likely names a "
         f"client the loop never binds (executed {len(cursor.executed)} statement(s))")
-    assert pairs[0][:4] == ("0700.HK", "HK", 2026, 3)
-    assert pairs[0][4] == "CNY" and pairs[0][6] == pytest.approx(6.947)
-    assert stats.pair_rows == 1 and stats.pair_symbols == 1
+    assert pairs[0][:5] == ("0700.HK", "HK", 2026, 3, "EPS_GAAP")
+    assert pairs[0][5] == "CNY" and pairs[0][7] == pytest.approx(6.947)
+    # Both metrics land: EPS and the revenue pair added in #148.
+    revenue = [params for sql, params in cursor.executed
+               if "earnings_provider_metrics" in sql and params[4] == "REVENUE"]
+    assert len(revenue) == 1 and revenue[0][7] == pytest.approx(207336000000.0)
+    assert stats.pair_rows == 2 and stats.pair_symbols == 1
+    assert stats.revenue_pair_rows == 1
     # The counter that makes a silent outage visible.
     assert stats.pair_errors == 0
 
@@ -103,7 +115,9 @@ def test_a_us_symbol_is_written_in_its_canonical_form():
     """
     ctx = MagicMock()
     ctx.get_financials_statements.return_value = (0, _income_response())
-    ctx.get_financials_estimate.return_value = _estimate_response()
+    ctx.get_financials_estimate.side_effect = (
+        lambda code, period_type="QUARTERLY", estimate_type="EPS_GAAP":
+        _estimate_response(estimate_type))
     cursor = _RecordingCursor()
     stats = _stats()
 
@@ -113,7 +127,8 @@ def test_a_us_symbol_is_written_in_its_canonical_form():
          patch.object(sync_futu, "HeartbeatThrottle", _NoHeartbeat):
         sync_futu.sync_actuals(ctx, 1, ["BABA.US"], stats=stats)
 
-    pairs = [params for sql, params in cursor.executed if "earnings_provider_pairs" in sql]
+    pairs = [params for sql, params in cursor.executed
+             if "earnings_provider_metrics" in sql and params[4] == "EPS_GAAP"]
     assert pairs, "no pair written for a US symbol"
     assert pairs[0][0] == "BABA", pairs[0][:2]
     assert pairs[0][1] == "US"

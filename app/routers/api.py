@@ -713,6 +713,8 @@ def api_export(start: date, end: date, format: Literal["csv", "json"] = "csv", u
             # estimate/actual columns.
             "eps_pair_estimate", "eps_pair_actual", "eps_pair_currency",
             "eps_pair_analysts", "eps_pair_source",
+            "revenue_pair_estimate", "revenue_pair_actual", "revenue_pair_currency",
+            "revenue_pair_analysts", "revenue_pair_source",
         ]
     writer.writerow(fields)
     for r in data:

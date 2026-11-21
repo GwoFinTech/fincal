@@ -529,8 +529,17 @@ def comparison_unavailable_reason(row) -> str | None:
 # this fix: 0700.HK 2026Q3 「—」, and the same for 9988/9868/0981/BABA/PDD.
 
 #: Row field names the read path fills when it adopts the provider's own pair.
+#: Provider metrics we adopt (Issue #148). The endpoint's ``estimate_type`` answers
+#: EPS_GAAP / REVENUE / EBIT / NET_INCOME_GAAP; the panel compares EPS and revenue, so
+#: those two are fetched, and each carries its **own** currency.
+METRIC_EPS = "EPS_GAAP"
+METRIC_REVENUE = "REVENUE"
+
 EPS_PAIR_FIELDS = ("eps_pair_estimate", "eps_pair_actual", "eps_pair_currency",
                    "eps_pair_analysts", "eps_pair_source")
+REVENUE_PAIR_FIELDS = ("revenue_pair_estimate", "revenue_pair_actual",
+                       "revenue_pair_currency", "revenue_pair_analysts",
+                       "revenue_pair_source")
 
 _CURRENCY_BLOCKERS = (COMPARISON_CURRENCY_MISMATCH, COMPARISON_CURRENCY_UNKNOWN)
 
@@ -550,39 +559,75 @@ def needs_provider_pair(row) -> bool:
 def attach_eps_pair(row, pair) -> dict:
     """Adopt a provider-native EPS pair on a row whose own pair is currency-blocked.
 
-    ``pair`` is ``{currency, eps_consensus, eps_actual, num_analysts, source}`` or
-    ``None``.  The pair is only adopted when both numbers are present: showing an
-    estimate whose actual is missing would replace "blocked" with "half a row".
-    Revenue is deliberately untouched — the provider publishes no revenue
-    consensus, so a revenue surplus stays unavailable rather than being computed
-    from two currencies.
+    ``pair`` is ``{currency, consensus, actual, num_analysts, source}`` or ``None``.
+    The pair is only adopted when both numbers are present: showing an estimate whose
+    actual is missing would replace "blocked" with "half a row".
     """
     if not pair:
         return row
-    estimate, actual = pair.get("eps_consensus"), pair.get("eps_actual")
+    return _attach_pair(row, pair, EPS_PAIR_FIELDS)
+
+
+def attach_revenue_pair(row, pair) -> dict:
+    """Adopt a provider-native revenue pair (Issue #148) — same rule as EPS."""
+    if not pair:
+        return row
+    return _attach_pair(row, pair, REVENUE_PAIR_FIELDS)
+
+
+def _attach_pair(row, pair, prefix_fields) -> dict:
+    estimate, actual = pair.get("consensus"), pair.get("actual")
     currency = pair.get("currency")
     if estimate is None or actual is None or not currency:
         return row
-    row["eps_pair_estimate"] = estimate
-    row["eps_pair_actual"] = actual
-    row["eps_pair_currency"] = currency
-    row["eps_pair_analysts"] = pair.get("num_analysts")
-    row["eps_pair_source"] = pair.get("source") or "futu"
+    estimate_field, actual_field, currency_field, analysts_field, source_field = prefix_fields
+    row[estimate_field] = estimate
+    row[actual_field] = actual
+    row[currency_field] = currency
+    row[analysts_field] = pair.get("num_analysts")
+    row[source_field] = pair.get("source") or "futu"
     return row
 
 
-def revenue_blocked(row) -> bool:
-    """True when the row's revenue pair must not be subtracted (Issue #147).
+def needs_revenue_pair(row) -> bool:
+    """True when the row's *revenue* comparison is blocked by the currency alone.
 
-    The provider publishes no revenue consensus, so adopting an EPS pair never
-    unblocks revenue: a row whose two sides are in different currencies keeps its
-    revenue surplus withheld while its EPS surplus is shown. Naming the predicate
-    keeps that asymmetry explicit instead of leaving it to be re-derived per caller.
+    Symmetric with :func:`needs_provider_pair`: a basis mismatch is not fixed by the
+    provider pair, and a row with no revenue at all has nothing to rescue.
     """
     if row.get("revenue_estimate") is None and row.get("revenue_actual") is None:
         return False
     reason = row.get("comparison_unavailable_reason") or comparison_unavailable_reason(row)
+    return reason in _CURRENCY_BLOCKERS
+
+
+def revenue_blocked(row) -> bool:
+    """True when the row's revenue surplus must stay withheld.
+
+    Issue #148: once the provider's own revenue pair is adopted the surplus is
+    computable (one provider, one currency, one unit), so this predicate now answers
+    "is revenue still incomparable **after** adoption" — the reason field alone can
+    still say ``currency_mismatch`` because it describes the row's own two sources,
+    not the adopted pair.
+    """
+    if row.get("revenue_estimate") is None and row.get("revenue_actual") is None:
+        return False
+    if row_revenue_pair(row) is not None:
+        return False
+    reason = row.get("comparison_unavailable_reason") or comparison_unavailable_reason(row)
     return reason is not None
+
+
+def row_revenue_pair(row) -> dict | None:
+    """The adopted revenue pair as a dict, or ``None`` — same shape as the EPS one."""
+    estimate = row.get("revenue_pair_estimate")
+    actual = row.get("revenue_pair_actual")
+    if estimate is None or actual is None:
+        return None
+    return {"estimate": estimate, "actual": actual,
+            "currency": row.get("revenue_pair_currency"),
+            "num_analysts": row.get("revenue_pair_analysts"),
+            "source": row.get("revenue_pair_source")}
 
 
 def row_eps_pair(row) -> dict | None:

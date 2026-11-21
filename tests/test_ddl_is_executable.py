@@ -44,12 +44,24 @@ def test_no_ddl_block_carries_a_python_style_indent_comment():
         assert not re.search(r"(?m)^\s*#", block), block[:120]
 
 
-def test_the_provider_pair_table_is_created():
-    """Issue #147: the read path relies on this table existing after init_db()."""
+def test_the_provider_metric_table_is_created():
+    """Issues #147/#148: the read path relies on this table existing after init_db()."""
     blocks = "\n".join(_ddl_blocks())
-    assert "CREATE TABLE IF NOT EXISTS earnings_provider_pairs" in blocks
-    assert "PRIMARY KEY (symbol, market, fiscal_year, fiscal_quarter, source)" in blocks
+    assert "CREATE TABLE IF NOT EXISTS earnings_provider_metrics" in blocks
+    # ``metric`` is part of the key: one row per period *per metric*, because the
+    # currency is a property of the metric (TSM: revenue TWD, EPS consensus USD).
+    assert ("PRIMARY KEY (symbol, market, fiscal_year, fiscal_quarter, source, metric)"
+            in blocks)
     # The pair must be able to hold the provider's own actual next to its consensus —
     # that adjacency is the whole point (one provider, one currency, one unit).
-    for column in ("currency", "eps_consensus", "eps_actual", "num_analysts", "as_of"):
+    for column in ("metric", "currency", "consensus", "actual", "num_analysts", "as_of"):
         assert column in blocks
+
+
+def test_the_eps_only_predecessor_is_folded_in_and_dropped():
+    """#148 replaced ``earnings_provider_pairs``; a metric-aware table must not leave
+    the old one behind as a second source of truth."""
+    blocks = "\n".join(_ddl_blocks())
+    assert "to_regclass('public.earnings_provider_pairs')" in blocks
+    assert "DROP TABLE earnings_provider_pairs" in blocks
+    assert "SELECT symbol, market, fiscal_year, fiscal_quarter, source, 'EPS_GAAP'" in blocks

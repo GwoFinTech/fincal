@@ -388,6 +388,9 @@ class FutuStageStats:
     pair_symbols: int = 0
     pair_unsupported: int = 0
     pair_errors: int = 0
+    #: Rows written for the revenue metric specifically (Issue #148). Kept separate
+    #: from ``pair_rows`` so a run tells you whether the *revenue* half landed.
+    revenue_pair_rows: int = 0
 
     #: Periods where the provider's own ``yoy`` disagreed with the ratio of the
     #: two statements by more than ``GROWTH_CROSSCHECK_TOLERANCE_PP``. Never
@@ -589,6 +592,7 @@ def futu_audit_details(date_stats: FutuStageStats, actual_stats: FutuStageStats,
         # the first version passed a name the loop never bound and the broad
         # `except` made a total outage look like a clean run.
         "provider_pair_errors": actual_stats.pair_errors,
+        "provider_revenue_pairs": actual_stats.revenue_pair_rows,
     }
 
 
@@ -841,14 +845,14 @@ def flush_growth_rows(rows: list[tuple], stats: FutuStageStats) -> int:
 
 
 _PAIR_UPSERT_SQL = """
-    INSERT INTO earnings_provider_pairs
-        (symbol, market, fiscal_year, fiscal_quarter, source, currency,
-         eps_consensus, eps_actual, num_analysts, period_type, as_of, updated_at)
-    VALUES (%s,%s,%s,%s,'futu',%s,%s,%s,%s,%s,NOW(),NOW())
-    ON CONFLICT (symbol, market, fiscal_year, fiscal_quarter, source) DO UPDATE SET
+    INSERT INTO earnings_provider_metrics
+        (symbol, market, fiscal_year, fiscal_quarter, source, metric, currency,
+         consensus, actual, num_analysts, period_type, as_of, updated_at)
+    VALUES (%s,%s,%s,%s,'futu',%s,%s,%s,%s,%s,%s,NOW(),NOW())
+    ON CONFLICT (symbol, market, fiscal_year, fiscal_quarter, source, metric) DO UPDATE SET
         currency = EXCLUDED.currency,
-        eps_consensus = EXCLUDED.eps_consensus,
-        eps_actual = EXCLUDED.eps_actual,
+        consensus = EXCLUDED.consensus,
+        actual = EXCLUDED.actual,
         num_analysts = EXCLUDED.num_analysts,
         period_type = EXCLUDED.period_type,
         as_of = NOW(),
@@ -856,30 +860,43 @@ _PAIR_UPSERT_SQL = """
 """
 
 
-def fetch_provider_pairs(client, code: str, limiter, stats,
-                         timeout_seconds: int) -> tuple[list[tuple], str]:
-    """Provider-native consensus/actual pairs for one symbol (Issue #147).
+#: The metrics the run fetches per symbol. Each is one extra call; EPS and revenue are
+#: the two the panel compares (EBIT / NET_INCOME_GAAP exist in the API but the panel
+#: shows them as Longbridge consensus only, so paying a call for them buys nothing).
+PROVIDER_PAIR_METRICS = ("EPS_GAAP", "REVENUE")
 
-    Returns ``(rows, outcome)`` with ``outcome`` ``None`` on success or
-    ``"unsupported"`` when the provider has no estimates for the symbol (ETFs,
+
+def fetch_provider_pairs(client, code: str, limiter, stats,
+                         timeout_seconds: int,
+                         metric: str = "EPS_GAAP") -> tuple[list[tuple], str]:
+    """Provider-native consensus/actual pairs for one symbol and one metric.
+
+    Returns ``(rows, outcome)`` with ``outcome`` ``OUTCOME_OK`` on success or
+    ``OUTCOME_UNSUPPORTED`` when the provider has no estimates for the symbol (ETFs,
     indices, uncovered small caps).  A pair is only emitted when both numbers and
     the period are present: half a pair cannot compare anything, and writing it
     would make the read path believe a comparison exists.
+
+    ``metric`` is passed straight to the endpoint's ``estimate_type`` (Issue #148):
+    EPS_GAAP and REVENUE come back in the same shape, each with its **own**
+    ``currency``, so one call per metric is the honest cost.
     """
     outcome, payload = futu_call(
-        code, "Estimate", lambda: client.get_financials_estimate(code),
+        code, f"Estimate:{metric}",
+        lambda: client.get_financials_estimate(code, estimate_type=metric),
         limiter, stats, timeout_seconds=timeout_seconds)
     if outcome != OUTCOME_OK:
         return [], outcome
     currency = payload.get("currency")
+    period_type = payload.get("period_type")
     rows = []
     for period in payload.get("history") or []:
         fy, fq = period.get("fiscal_year"), period.get("fiscal_quarter")
         consensus, actual = period.get("consensus"), period.get("actual")
         if not fy or not fq or consensus is None or actual is None or not currency:
             continue
-        rows.append((int(fy), int(fq), currency, consensus, actual,
-                     period.get("num_analysts"), payload.get("period_type")))
+        rows.append((metric, currency, consensus, actual,
+                     period.get("num_analysts"), period_type, int(fy), int(fq)))
     return rows, OUTCOME_OK
 
 
@@ -888,13 +905,18 @@ def flush_provider_pairs(symbol: str, market: str, rows: list[tuple],
     """Upsert one symbol's pairs; returns how many were written."""
     written = 0
     for row in rows:
+        metric, currency, consensus, actual, analysts, period_type, fy, fq = row
         try:
             with db_cursor() as cur:
-                cur.execute(_PAIR_UPSERT_SQL, (symbol, market) + row)
+                cur.execute(_PAIR_UPSERT_SQL,
+                            (symbol, market, fy, fq, metric, currency, consensus,
+                             actual, analysts, period_type))
             written += 1
+            if metric == "REVENUE":
+                stats.revenue_pair_rows += 1
         except Exception as exc:  # noqa: BLE001 - one bad period must not stop the stage
-            logger.warning("provider pair skipped for %s FY%s Q%s: %s",
-                           symbol, row[0], row[1], exc)
+            logger.warning("provider %s skipped for %s FY%s Q%s: %s",
+                           metric, symbol, fy, fq, exc)
     stats.pair_rows += written
     if written:
         stats.pair_symbols += 1
@@ -1147,12 +1169,20 @@ def sync_actuals(ctx, run_id: int, symbols: list[str],
         # the symbol — or the run — red. Deliberately outside the block above: the
         # pair is per-symbol independent of whether the statements landed.
         try:
-            pair_rows, pair_outcome = fetch_provider_pairs(
-                ctx, futu_code, limiter, stats,
-                timeout_seconds=config.FUTU_ACTUALS_TIMEOUT_SECONDS)
-            if pair_outcome == OUTCOME_UNSUPPORTED:
-                stats.pair_unsupported += 1
-            elif pair_outcome == OUTCOME_OK and pair_rows:
+            pair_rows, pair_outcome = [], None
+            for metric in PROVIDER_PAIR_METRICS:
+                metric_rows, metric_outcome = fetch_provider_pairs(
+                    ctx, futu_code, limiter, stats,
+                    timeout_seconds=config.FUTU_ACTUALS_TIMEOUT_SECONDS,
+                    metric=metric)
+                if metric_outcome == OUTCOME_UNSUPPORTED:
+                    # Per metric: a symbol can publish EPS consensus and no revenue
+                    # consensus (or the reverse), and only the missing half is skipped.
+                    stats.pair_unsupported += 1
+                    continue
+                if metric_outcome == OUTCOME_OK:
+                    pair_rows.extend(metric_rows)
+            if pair_rows:
                 # The canonical symbol, not the provider's ``BABA.US`` form: the read
                 # path joins this table on ``earnings.symbol``, which is bare. Writing
                 # the provider form matched only HK names (whose suffix is kept) and

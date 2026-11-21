@@ -46,8 +46,9 @@ class _FakeClient:
         self.payload = payload
         self.calls = []
 
-    def get_financials_estimate(self, code, period_type="QUARTERLY"):
-        self.calls.append((code, period_type))
+    def get_financials_estimate(self, code, period_type="QUARTERLY",
+                                estimate_type="EPS_GAAP"):
+        self.calls.append((code, period_type, estimate_type))
         return 0, self.payload
 
 
@@ -104,9 +105,11 @@ class TestFetchPairs:
     def test_a_complete_pair_is_emitted_per_period(self):
         rows, outcome = self._call(_FakeClient(ESTIMATE_PAYLOAD))
         assert outcome == SYNC_FUTU.OUTCOME_OK
-        assert [row[:2] for row in rows] == [(2026, 3), (2026, 2)]
-        assert rows[0][2] == "CNY" and rows[0][3] == pytest.approx(6.2873)
-        assert rows[0][4] == pytest.approx(6.947) and rows[0][5] == 7
+        # (metric, currency, consensus, actual, analysts, period_type, fy, fq)
+        assert [(row[0], row[6], row[7]) for row in rows] == [
+            ("EPS_GAAP", 2026, 3), ("EPS_GAAP", 2026, 2)]
+        assert rows[0][1] == "CNY" and rows[0][2] == pytest.approx(6.2873)
+        assert rows[0][3] == pytest.approx(6.947) and rows[0][4] == 7
 
     def test_a_future_period_without_an_actual_is_not_a_pair(self):
         """`future_estimates` carry no actual — writing them would fake a comparison."""
@@ -121,7 +124,8 @@ class TestFetchPairs:
 
     def test_an_unsupported_symbol_is_counted_not_failed(self):
         class _Unsupported:
-            def get_financials_estimate(self, code, period_type="QUARTERLY"):
+            def get_financials_estimate(self, code, period_type="QUARTERLY",
+                                        estimate_type="EPS_GAAP"):
                 return -1, "Futu WebAPI HTTP 200, code -10: no data"
 
         stats = SYNC_FUTU.FutuStageStats()
@@ -151,8 +155,9 @@ class TestFetchPairs:
         finally:
             SYNC_FUTU.db_cursor = original
         assert written == 2 and stats.pair_rows == 2 and stats.pair_symbols == 1
-        assert all("earnings_provider_pairs" in sql for sql, _ in executed)
-        assert executed[0][1][:4] == ("0700.HK", "HK", 2026, 3)
+        assert all("earnings_provider_metrics" in sql for sql, _ in executed)
+        # (symbol, market, fy, fq, metric, currency, consensus, actual, analysts, type)
+        assert executed[0][1][:5] == ("0700.HK", "HK", 2026, 3, "EPS_GAAP")
 
 
 # ── 采纳规则 ─────────────────────────────────────────────────────────────
@@ -168,7 +173,7 @@ def _row(**over):
     return row
 
 
-PAIR = {"currency": "CNY", "eps_consensus": 6.2873, "eps_actual": 6.947,
+PAIR = {"currency": "CNY", "consensus": 6.2873, "actual": 6.947,
         "num_analysts": 7, "source": "futu"}
 
 
@@ -200,7 +205,7 @@ class TestAdoptionRule:
 
     def test_half_a_pair_is_refused(self):
         row = _row()
-        fiscal.attach_eps_pair(row, dict(PAIR, eps_actual=None))
+        fiscal.attach_eps_pair(row, dict(PAIR, actual=None))
         assert fiscal.row_eps_pair(row) is None
 
     def test_no_pair_leaves_the_row_untouched(self):

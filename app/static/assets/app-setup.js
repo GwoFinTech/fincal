@@ -1348,6 +1348,35 @@
       pair.source = e.eps_pair_source || null;
       return pair;
     }
+    // Issue #148: the same provider pair for revenue. Kept a separate accessor
+    // because the two metrics carry their *own* currency (TSM: revenue TWD, EPS USD),
+    // so one adopted pair can never stand in for the other.
+    function revenuePair(e) {
+      if (!e || e.revenue_pair_estimate == null || e.revenue_pair_actual == null) return null;
+      const pair = {};
+      pair.estimate = Number(e.revenue_pair_estimate);
+      pair.actual = Number(e.revenue_pair_actual);
+      pair.currency = e.revenue_pair_currency || null;
+      pair.analysts = e.revenue_pair_analysts == null ? null : e.revenue_pair_analysts;
+      pair.source = e.revenue_pair_source || null;
+      return pair;
+    }
+    function revenueEstimate(e) {
+      const pair = revenuePair(e);
+      return pair ? pair.estimate : (e ? e.revenue_estimate : null);
+    }
+    function revenueActual(e) {
+      const pair = revenuePair(e);
+      return pair ? pair.actual : (e ? e.revenue_actual : null);
+    }
+    function revenuePairNote(e) {
+      const pair = revenuePair(e);
+      if (!pair) return '';
+      const parts = ['营收预期/实际取自同一提供方的一致预期与实际（同一币种'
+        + (pair.currency ? ' ' + pair.currency : '') + '）'];
+      if (pair.analysts != null) parts.push(pair.analysts + ' 位分析师');
+      return parts.join('｜');
+    }
     function epsEstimate(e) {
       const pair = epsPair(e);
       return pair ? pair.estimate : (e ? e.eps_estimate : null);
@@ -1363,7 +1392,7 @@
       const parts = ['EPS 预期/实际取自同一提供方的一致预期与实际（同一币种'
         + (pair.currency ? ' ' + pair.currency : '') + '）'];
       if (pair.analysts != null) parts.push(pair.analysts + ' 位分析师');
-      parts.push('营收无一致预期，仍不可比');
+      if (!revenuePair(e)) parts.push('营收无一致预期，仍不可比');
       return parts.join('｜');
     }
     function epsSurplus(e) {
@@ -1384,11 +1413,14 @@
       return s > 0.001 ? 'beat' : s < -0.001 ? 'miss' : '';
     }
     function revSurplus(e) {
-      if (comparisonUnavailable(e)) return null;
-      if (e.revenue_estimate == null || e.revenue_actual == null) return null;
-      const diff = e.revenue_actual - e.revenue_estimate;
-      if (Math.abs(e.revenue_estimate) < 0.0001) return diff > 0 ? 1 : diff < 0 ? -1 : 0;
-      return diff / Math.abs(e.revenue_estimate);
+      const pair = revenuePair(e);
+      const estimate = pair ? pair.estimate : (e ? e.revenue_estimate : null);
+      const actual = pair ? pair.actual : (e ? e.revenue_actual : null);
+      if (!pair && comparisonUnavailable(e)) return null;
+      if (estimate == null || actual == null) return null;
+      const diff = actual - estimate;
+      if (Math.abs(estimate) < 0.0001) return diff > 0 ? 1 : diff < 0 ? -1 : 0;
+      return diff / Math.abs(estimate);
     }
     function revSurplusClass(e) {
       const s = revSurplus(e);
@@ -1399,6 +1431,7 @@
     function hasComparison(e, metric) {
       if (!e) return false;
       if (metric === 'eps' && epsPair(e)) return true;
+      if (metric === 'revenue' && revenuePair(e)) return true;
       if (comparisonUnavailable(e)) return false;
       return metric === 'eps'
         ? e.eps_estimate != null && e.eps_actual != null
@@ -1561,6 +1594,7 @@
     return {
       epsSurplus, epsSurplusClass, revSurplus, revSurplusClass,
       epsPair, epsPairNote, epsEstimate, epsActual,
+      revenuePair, revenuePairNote, revenueEstimate, revenueActual,
       hasComparison, comparisonNote, comparisonUnavailable, attributionNote,
       growthValue, growthReason, growthNote, growthCell, growthSuppressedNote,
       growthSourceLabel, growthTrendPoints, growthBarWidth, growthBarDirection,

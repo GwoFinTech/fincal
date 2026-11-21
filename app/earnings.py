@@ -135,16 +135,16 @@ def fetch_earnings_from_db(
     return rows
 
 
-PROVIDER_PAIR_COLUMNS = "symbol, market, fiscal_year, fiscal_quarter, source, " \
-                         "currency, eps_consensus, eps_actual, num_analysts"
+PROVIDER_PAIR_COLUMNS = ("symbol, market, fiscal_year, fiscal_quarter, source, "
+                         "metric, currency, consensus, actual, num_analysts")
 
 
-def load_provider_pairs(keys) -> dict[tuple, dict]:
-    """Provider-native EPS pairs for ``(symbol, market, fiscal_year, quarter)`` keys.
+def load_provider_pairs(keys) -> dict[tuple, dict[str, dict]]:
+    """Provider-native metric pairs for ``(symbol, market, fiscal_year, quarter)`` keys.
 
-    One query for the whole result set: the calendar spans ~100 symbols, and a
-    lookup per row would put a hundred round-trips in front of every page load for
-    an enrichment that most rows never use.
+    Returns ``{key: {metric: row}}`` (Issue #148): one query for the whole result set,
+    because the calendar spans ~100 symbols and a lookup per row would put a hundred
+    round-trips in front of every page load for an enrichment most rows never use.
     """
     from . import db
 
@@ -153,22 +153,31 @@ def load_provider_pairs(keys) -> dict[tuple, dict]:
         return {}
     with db.db_cursor() as cur:
         cur.execute(
-            f"SELECT {PROVIDER_PAIR_COLUMNS}, period_type FROM earnings_provider_pairs "
+            f"SELECT {PROVIDER_PAIR_COLUMNS}, period_type FROM earnings_provider_metrics "
             "WHERE symbol = ANY(%s)", (sorted(symbols),))
         rows = [dict(row) for row in cur.fetchall()]
-    pairs = {}
+    pairs: dict[tuple, dict[str, dict]] = {}
     for row in rows:
         key = (row["symbol"], row["market"], row["fiscal_year"], row["fiscal_quarter"])
-        # The newest source wins if two providers ever write the same period.
-        pairs.setdefault(key, row)
+        # ``metric`` is part of the key since #148; a row from a caller/legacy query
+        # that predates it is the EPS row (the only metric that existed then) rather
+        # than a KeyError at read time.
+        metric = row.get("metric") or "EPS_GAAP"
+        # The newest source wins if two providers ever write the same period+metric.
+        pairs.setdefault(key, {}).setdefault(metric, row)
     return pairs
 
 
 def attach_provider_pairs(rows) -> list[dict]:
-    """Attach the provider's own EPS pair where the row's pair is currency-blocked."""
+    """Attach the provider's own pairs where the row's own pair is currency-blocked.
+
+    EPS and revenue are judged separately: a row can have a HKD estimate against a CNY
+    actual for *both*, and each is rescued by its own metric row (or not at all).
+    """
     from . import fiscal
 
-    candidates = [row for row in rows if fiscal.needs_provider_pair(row)]
+    candidates = [row for row in rows
+                  if fiscal.needs_provider_pair(row) or fiscal.needs_revenue_pair(row)]
     if not candidates:
         return rows
     pairs = load_provider_pairs([
@@ -176,14 +185,18 @@ def attach_provider_pairs(rows) -> list[dict]:
          row.get("fiscal_quarter")) for row in candidates])
     adopted = 0
     for row in candidates:
-        pair = pairs.get((row.get("symbol"), row.get("market"), row.get("fiscal_year"),
-                          row.get("fiscal_quarter")))
-        before = row.get("eps_pair_estimate")
-        fiscal.attach_eps_pair(row, pair)
-        if row.get("eps_pair_estimate") is not None and before is None:
+        by_metric = pairs.get((row.get("symbol"), row.get("market"),
+                               row.get("fiscal_year"), row.get("fiscal_quarter"))) or {}
+        before = (row.get("eps_pair_estimate"), row.get("revenue_pair_estimate"))
+        if fiscal.needs_provider_pair(row):
+            fiscal.attach_eps_pair(row, by_metric.get(fiscal.METRIC_EPS))
+        if fiscal.needs_revenue_pair(row):
+            fiscal.attach_revenue_pair(row, by_metric.get(fiscal.METRIC_REVENUE))
+        after = (row.get("eps_pair_estimate"), row.get("revenue_pair_estimate"))
+        if after != before:
             adopted += 1
     if adopted:
-        logger.debug("adopted a provider EPS pair on %d row(s)", adopted)
+        logger.debug("adopted a provider pair on %d row(s)", adopted)
     return rows
 
 
