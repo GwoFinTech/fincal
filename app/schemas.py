@@ -136,6 +136,19 @@ class EarningItem(BaseModel):
     revenue_pair_currency: str | None = None
     revenue_pair_analysts: int | None = None
     revenue_pair_source: str | None = None
+    # Issue #149: EBIT and net income. The panel compares four metrics, and the extra
+    # two are the same provider-native pair (``estimate_type`` = EBIT /
+    # NET_INCOME_GAAP), each with its own currency.
+    ebit_pair_estimate: float | None = None
+    ebit_pair_actual: float | None = None
+    ebit_pair_currency: str | None = None
+    ebit_pair_analysts: int | None = None
+    ebit_pair_source: str | None = None
+    net_income_pair_estimate: float | None = None
+    net_income_pair_actual: float | None = None
+    net_income_pair_currency: str | None = None
+    net_income_pair_analysts: int | None = None
+    net_income_pair_source: str | None = None
     consensus_eps_gaap: float | None = None
     consensus_eps_adjusted: float | None = None
     consensus_revenue: float | None = None

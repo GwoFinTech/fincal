@@ -1348,9 +1348,77 @@
       pair.source = e.eps_pair_source || null;
       return pair;
     }
-    // Issue #148: the same provider pair for revenue. Kept a separate accessor
-    // because the two metrics carry their *own* currency (TSM: revenue TWD, EPS USD),
-    // so one adopted pair can never stand in for the other.
+    // Issue #149: the four metrics the panel compares share one shape, so the pair
+    // lookups are table-driven; each metric still reads its *own* fields, because the
+    // currency is per metric (TSM: revenue TWD, EPS consensus USD).
+    const PAIR_PREFIX = { eps: 'eps_pair', revenue: 'revenue_pair',
+                          ebit: 'ebit_pair', net_income: 'net_income_pair' };
+    const METRIC_LABEL = { eps: 'EPS', revenue: '营收', ebit: 'EBIT', net_income: '净利润' };
+    function metricPair(e, metric) {
+      const prefix = PAIR_PREFIX[metric];
+      if (!e || !prefix) return null;
+      const est = e[prefix + '_estimate'];
+      const act = e[prefix + '_actual'];
+      if (est == null || act == null) return null;
+      const pair = {};
+      pair.estimate = Number(est);
+      pair.actual = Number(act);
+      pair.currency = e[prefix + '_currency'] || null;
+      pair.analysts = e[prefix + '_analysts'] == null ? null : e[prefix + '_analysts'];
+      pair.source = e[prefix + '_source'] || null;
+      return pair;
+    }
+    function metricPairNote(e, metric) {
+      const pair = metricPair(e, metric);
+      if (!pair) return '';
+      const parts = [(METRIC_LABEL[metric] || metric)
+        + '预期/实际取自同一提供方的一致预期与实际（同一币种'
+        + (pair.currency ? ' ' + pair.currency : '') + '）'];
+      if (pair.analysts != null) parts.push(pair.analysts + ' 位分析师');
+      return parts.join('｜');
+    }
+    function metricEstimate(e, metric) {
+      const pair = metricPair(e, metric);
+      if (pair) return pair.estimate;
+      if (!e) return null;
+      if (metric === 'eps') return e.eps_estimate;
+      if (metric === 'revenue') return e.revenue_estimate;
+      if (metric === 'ebit') return e.consensus_ebit;
+      return e.consensus_net_income;
+    }
+    function metricActual(e, metric) {
+      const pair = metricPair(e, metric);
+      if (pair) return pair.actual;
+      if (!e) return null;
+      if (metric === 'eps') return e.eps_actual;
+      if (metric === 'revenue') return e.revenue_actual;
+      return null;
+    }
+    function metricSurplus(e, metric) {
+      const estimate = metricEstimate(e, metric);
+      const actual = metricActual(e, metric);
+      if (estimate == null || actual == null) return null;
+      if (!metricPair(e, metric) && comparisonUnavailable(e)) return null;
+      const diff = actual - estimate;
+      if (Math.abs(estimate) < 0.0001) return diff > 0 ? 1 : diff < 0 ? -1 : 0;
+      return diff / Math.abs(estimate);
+    }
+    function ebitPair(e) { return metricPair(e, 'ebit'); }
+    function ebitPairNote(e) { return metricPairNote(e, 'ebit'); }
+    function ebitEstimate(e) { return metricEstimate(e, 'ebit'); }
+    function ebitActual(e) { return metricActual(e, 'ebit'); }
+    function ebitSurplus(e) { return metricSurplus(e, 'ebit'); }
+    function netIncomePair(e) { return metricPair(e, 'net_income'); }
+    function netIncomePairNote(e) { return metricPairNote(e, 'net_income'); }
+    function netIncomeEstimate(e) { return metricEstimate(e, 'net_income'); }
+    function netIncomeActual(e) { return metricActual(e, 'net_income'); }
+    function netIncomeSurplus(e) { return metricSurplus(e, 'net_income'); }
+    // The colour follows the sign of *that* metric: a quarter can be a revenue miss and
+    // an EPS beat at once, and painting both green would hide it.
+    function surplusClass(e, metric) {
+      const surplus = metricSurplus(e, metric);
+      return surplus > 0.001 ? 'beat' : surplus < -0.001 ? 'miss' : '';
+    }
     function revenuePair(e) {
       if (!e || e.revenue_pair_estimate == null || e.revenue_pair_actual == null) return null;
       const pair = {};
@@ -1413,14 +1481,7 @@
       return s > 0.001 ? 'beat' : s < -0.001 ? 'miss' : '';
     }
     function revSurplus(e) {
-      const pair = revenuePair(e);
-      const estimate = pair ? pair.estimate : (e ? e.revenue_estimate : null);
-      const actual = pair ? pair.actual : (e ? e.revenue_actual : null);
-      if (!pair && comparisonUnavailable(e)) return null;
-      if (estimate == null || actual == null) return null;
-      const diff = actual - estimate;
-      if (Math.abs(estimate) < 0.0001) return diff > 0 ? 1 : diff < 0 ? -1 : 0;
-      return diff / Math.abs(estimate);
+      return metricSurplus(e, 'revenue');
     }
     function revSurplusClass(e) {
       const s = revSurplus(e);
@@ -1430,8 +1491,7 @@
     // not flag the pair as non-comparable; otherwise the cell shows "—".
     function hasComparison(e, metric) {
       if (!e) return false;
-      if (metric === 'eps' && epsPair(e)) return true;
-      if (metric === 'revenue' && revenuePair(e)) return true;
+      if (metricPair(e, metric)) return true;
       if (comparisonUnavailable(e)) return false;
       return metric === 'eps'
         ? e.eps_estimate != null && e.eps_actual != null
@@ -1595,6 +1655,10 @@
       epsSurplus, epsSurplusClass, revSurplus, revSurplusClass,
       epsPair, epsPairNote, epsEstimate, epsActual,
       revenuePair, revenuePairNote, revenueEstimate, revenueActual,
+      ebitPair, ebitPairNote, ebitEstimate, ebitActual, ebitSurplus,
+      netIncomePair, netIncomePairNote, netIncomeEstimate, netIncomeActual,
+      netIncomeSurplus, metricPair, metricEstimate, metricActual, metricSurplus,
+      surplusClass,
       hasComparison, comparisonNote, comparisonUnavailable, attributionNote,
       growthValue, growthReason, growthNote, growthCell, growthSuppressedNote,
       growthSourceLabel, growthTrendPoints, growthBarWidth, growthBarDirection,

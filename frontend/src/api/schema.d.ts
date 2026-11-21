@@ -865,6 +865,26 @@ export interface components {
             revenue_pair_analysts?: number | null;
             /** Revenue Pair Source */
             revenue_pair_source?: string | null;
+            /** Ebit Pair Estimate */
+            ebit_pair_estimate?: number | null;
+            /** Ebit Pair Actual */
+            ebit_pair_actual?: number | null;
+            /** Ebit Pair Currency */
+            ebit_pair_currency?: string | null;
+            /** Ebit Pair Analysts */
+            ebit_pair_analysts?: number | null;
+            /** Ebit Pair Source */
+            ebit_pair_source?: string | null;
+            /** Net Income Pair Estimate */
+            net_income_pair_estimate?: number | null;
+            /** Net Income Pair Actual */
+            net_income_pair_actual?: number | null;
+            /** Net Income Pair Currency */
+            net_income_pair_currency?: string | null;
+            /** Net Income Pair Analysts */
+            net_income_pair_analysts?: number | null;
+            /** Net Income Pair Source */
+            net_income_pair_source?: string | null;
             /** Consensus Eps Gaap */
             consensus_eps_gaap?: number | null;
             /** Consensus Eps Adjusted */

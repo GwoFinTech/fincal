@@ -115,6 +115,10 @@ COMPUTED_READ_PATH_FIELDS = {
     "eps_pair_analysts", "eps_pair_source",
     "revenue_pair_estimate", "revenue_pair_actual", "revenue_pair_currency",
     "revenue_pair_analysts", "revenue_pair_source",
+    "ebit_pair_estimate", "ebit_pair_actual", "ebit_pair_currency",
+    "ebit_pair_analysts", "ebit_pair_source",
+    "net_income_pair_estimate", "net_income_pair_actual", "net_income_pair_currency",
+    "net_income_pair_analysts", "net_income_pair_source",
 }
 
 _EARNINGS_ALTER_LOOP = re.compile(
@@ -183,6 +187,12 @@ def _full_row() -> dict:
         "revenue_pair_estimate": 269849229900.0, "revenue_pair_actual": 271519000000.0,
         "revenue_pair_currency": "CNY", "revenue_pair_analysts": 22,
         "revenue_pair_source": "futu",
+        "ebit_pair_estimate": 24328943120.0, "ebit_pair_actual": 29116000000.0,
+        "ebit_pair_currency": "CNY", "ebit_pair_analysts": 14,
+        "ebit_pair_source": "futu",
+        "net_income_pair_estimate": 22951390530.0, "net_income_pair_actual": 64535000000.0,
+        "net_income_pair_currency": "CNY", "net_income_pair_analysts": 7,
+        "net_income_pair_source": "futu",
         "consensus_eps_gaap": 1.90, "consensus_eps_adjusted": 1.92,
         "consensus_revenue": 91000.0, "consensus_ebit": 30000.0,
         "consensus_net_income": 25000.0, "consensus_normalized_net_income": 24500.0,

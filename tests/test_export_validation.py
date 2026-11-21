@@ -186,6 +186,12 @@ def test_export_csv_headers_include_provenance_and_consensus():
         "revenue_pair_estimate": None, "revenue_pair_actual": None,
         "revenue_pair_currency": None, "revenue_pair_analysts": None,
         "revenue_pair_source": None,
+        "ebit_pair_estimate": None, "ebit_pair_actual": None,
+        "ebit_pair_currency": None, "ebit_pair_analysts": None,
+        "ebit_pair_source": None,
+        "net_income_pair_estimate": None, "net_income_pair_actual": None,
+        "net_income_pair_currency": None, "net_income_pair_analysts": None,
+        "net_income_pair_source": None,
     }]
     with patch.object(db, "db_cursor", lambda: _FakeConn()), \
          patch("app.earnings.fetch_earnings_from_db", return_value=sample):

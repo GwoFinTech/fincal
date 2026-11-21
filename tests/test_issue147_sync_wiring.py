@@ -79,7 +79,7 @@ def test_sync_actuals_writes_the_provider_pairs():
     ctx = MagicMock()
     ctx.get_financials_statements.return_value = (0, _income_response())
     ctx.get_financials_estimate.side_effect = (
-        lambda code, period_type="QUARTERLY", estimate_type="EPS_GAAP":
+        lambda code, period_type="QUARTERLY", estimate_type="EPS_GAAP", hist_count=None:
         _estimate_response(estimate_type))
     cursor = _RecordingCursor()
     stats = _stats()
@@ -97,12 +97,16 @@ def test_sync_actuals_writes_the_provider_pairs():
         f"client the loop never binds (executed {len(cursor.executed)} statement(s))")
     assert pairs[0][:5] == ("0700.HK", "HK", 2026, 3, "EPS_GAAP")
     assert pairs[0][5] == "CNY" and pairs[0][7] == pytest.approx(6.947)
-    # Both metrics land: EPS and the revenue pair added in #148.
+    # Every configured metric lands, one row each (Issues #148/#149) — derived from the
+    # constant so adding a metric does not silently pass here.
+    written = [params[4] for sql, params in cursor.executed
+               if "earnings_provider_metrics" in sql]
+    assert set(written) == set(sync_futu.PROVIDER_PAIR_METRICS), written
     revenue = [params for sql, params in cursor.executed
                if "earnings_provider_metrics" in sql and params[4] == "REVENUE"]
     assert len(revenue) == 1 and revenue[0][7] == pytest.approx(207336000000.0)
-    assert stats.pair_rows == 2 and stats.pair_symbols == 1
-    assert stats.revenue_pair_rows == 1
+    assert stats.pair_rows == len(sync_futu.PROVIDER_PAIR_METRICS)
+    assert stats.pair_symbols == 1 and stats.revenue_pair_rows == 1
     # The counter that makes a silent outage visible.
     assert stats.pair_errors == 0
 
@@ -116,7 +120,7 @@ def test_a_us_symbol_is_written_in_its_canonical_form():
     ctx = MagicMock()
     ctx.get_financials_statements.return_value = (0, _income_response())
     ctx.get_financials_estimate.side_effect = (
-        lambda code, period_type="QUARTERLY", estimate_type="EPS_GAAP":
+        lambda code, period_type="QUARTERLY", estimate_type="EPS_GAAP", hist_count=None:
         _estimate_response(estimate_type))
     cursor = _RecordingCursor()
     stats = _stats()

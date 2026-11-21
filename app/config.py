@@ -372,7 +372,10 @@ SYNC_RUN_REAPER_INTERVAL_SECONDS = float(os.getenv("SYNC_RUN_REAPER_INTERVAL_SEC
 # changing either side alone fails the suite.
 STAGE_TIMEOUT_SECONDS = {
     "longbridge": 900,
-    "futu": 1500,
+    # Issue #149: four provider metrics (EPS / revenue / EBIT / net income) plus the
+    # statements read is five calls per symbol — ~32 minutes for a 116-symbol
+    # universe, measured. 1500s would have cut the run off mid-envelope.
+    "futu": 2100,
     "stock_names": 900,
     "consensus": 2400,
     "prediction": 600,

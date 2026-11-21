@@ -392,7 +392,8 @@ class FutuWebClient:
 
     def get_financials_estimate(self, code: str,
                                period_type: str = "QUARTERLY",
-                               estimate_type: str = "EPS_GAAP") -> tuple[int, Any]:
+                               estimate_type: str = "EPS_GAAP",
+                               hist_count: int | None = None) -> tuple[int, Any]:
         """EPS consensus **and** the provider's own actual per period (Issue #147).
 
         ``{"currency": "CNY", "history": [...], "future": [...]}`` where each period
@@ -417,9 +418,13 @@ class FutuWebClient:
         if metric not in self.ESTIMATE_TYPES:
             return -1, (f"unsupported estimate_type {estimate_type!r}; "
                         f"expected one of {list(self.ESTIMATE_TYPES)}")
-        ret, data = self._call(f"{code}/financials/estimate",
-                              params={"period_type": period_type,
-                                      "estimate_type": metric})
+        params: dict[str, Any] = {"period_type": period_type, "estimate_type": metric}
+        if hist_count is not None:
+            # Documented ceiling is 20 (21 answers -3); asking for more periods costs
+            # no extra call, and 8 left calendar rows older than two years without a
+            # pair (Issue #149).
+            params["hist_count"] = int(hist_count)
+        ret, data = self._call(f"{code}/financials/estimate", params=params)
         if ret != 0:
             return ret, data
         payload = data.get("data") or {}

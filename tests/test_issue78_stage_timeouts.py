@@ -3,7 +3,7 @@
 `sync_runs.timeout_seconds` is what decides when the reaper may reclaim a
 `running` row (Issue #33), but only the *reader* half had been wired: `start_run()`
 wrote its 3600s default for every run while the real per-stage budget lived in
-`scripts/sync_all.sh` (900 / 1500 / 900 / 2400 / 600) and nothing read it.  Two
+`scripts/sync_all.sh` (900 / 2100 / 900 / 2400 / 600) and nothing read it.  Two
 consequences:
 
 * a stage killed by the cron wrapper's `timeout` kept a ghost `running` row until

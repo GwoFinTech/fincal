@@ -177,7 +177,8 @@ def attach_provider_pairs(rows) -> list[dict]:
     from . import fiscal
 
     candidates = [row for row in rows
-                  if fiscal.needs_provider_pair(row) or fiscal.needs_revenue_pair(row)]
+                  if any(fiscal.needs_metric_pair(row, metric)
+                         for metric in fiscal.PROVIDER_METRIC_PREFIX)]
     if not candidates:
         return rows
     pairs = load_provider_pairs([
@@ -187,12 +188,11 @@ def attach_provider_pairs(rows) -> list[dict]:
     for row in candidates:
         by_metric = pairs.get((row.get("symbol"), row.get("market"),
                                row.get("fiscal_year"), row.get("fiscal_quarter"))) or {}
-        before = (row.get("eps_pair_estimate"), row.get("revenue_pair_estimate"))
-        if fiscal.needs_provider_pair(row):
-            fiscal.attach_eps_pair(row, by_metric.get(fiscal.METRIC_EPS))
-        if fiscal.needs_revenue_pair(row):
-            fiscal.attach_revenue_pair(row, by_metric.get(fiscal.METRIC_REVENUE))
-        after = (row.get("eps_pair_estimate"), row.get("revenue_pair_estimate"))
+        before = tuple(row.get(field) for field in fiscal.ALL_PAIR_FIELDS)
+        for metric in fiscal.PROVIDER_METRIC_PREFIX:
+            if fiscal.needs_metric_pair(row, metric):
+                fiscal.attach_metric_pair(row, metric, by_metric.get(metric))
+        after = tuple(row.get(field) for field in fiscal.ALL_PAIR_FIELDS)
         if after != before:
             adopted += 1
     if adopted:

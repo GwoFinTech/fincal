@@ -137,8 +137,9 @@ class _MetricClient:
         self.asked = []
 
     def get_financials_estimate(self, code, period_type="QUARTERLY",
-                                estimate_type="EPS_GAAP"):
+                                estimate_type="EPS_GAAP", hist_count=None):
         self.asked.append(estimate_type)
+        self.last_hist_count = hist_count
         if estimate_type == "REVENUE" and not self.revenue:
             return -1, "Futu WebAPI HTTP 200, code -10: no data"
         if estimate_type == "REVENUE":
@@ -157,11 +158,16 @@ class TestSync:
     def test_each_metric_is_its_own_call(self):
         stats = SYNC_FUTU.FutuStageStats()
         client = _MetricClient()
-        assert SYNC_FUTU.PROVIDER_PAIR_METRICS == ("EPS_GAAP", "REVENUE")
+        # Four documented metrics (Issue #149), and a longer history window than the
+        # default 8 — both cost nothing extra beyond the per-metric call.
+        assert SYNC_FUTU.PROVIDER_PAIR_METRICS == ("EPS_GAAP", "REVENUE", "EBIT",
+                                                   "NET_INCOME_GAAP")
+        assert SYNC_FUTU.PROVIDER_PAIR_HISTORY == 20
         for metric in SYNC_FUTU.PROVIDER_PAIR_METRICS:
             SYNC_FUTU.fetch_provider_pairs(client, "HK.00700", _StubLimiter(), stats, 20,
                                            metric=metric)
-        assert client.asked == ["EPS_GAAP", "REVENUE"]
+        assert client.asked == ["EPS_GAAP", "REVENUE", "EBIT", "NET_INCOME_GAAP"]
+        assert client.last_hist_count == 20
 
     def test_the_revenue_row_carries_its_own_currency_and_numbers(self):
         rows, outcome = SYNC_FUTU.fetch_provider_pairs(
@@ -184,7 +190,9 @@ class TestSync:
                 stats.pair_unsupported += 1
                 continue
             written.extend(rows)
-        assert [row[0] for row in written] == ["EPS_GAAP"]
+        # Coverage is per metric: the missing revenue half must not cost the others.
+        assert "EPS_GAAP" in [row[0] for row in written]
+        assert "REVENUE" not in [row[0] for row in written]
         assert stats.pair_unsupported == 1
 
     def test_flush_counts_the_revenue_metric_separately(self):

@@ -534,26 +534,67 @@ def comparison_unavailable_reason(row) -> str | None:
 #: those two are fetched, and each carries its **own** currency.
 METRIC_EPS = "EPS_GAAP"
 METRIC_REVENUE = "REVENUE"
+METRIC_EBIT = "EBIT"
+METRIC_NET_INCOME = "NET_INCOME_GAAP"
 
-EPS_PAIR_FIELDS = ("eps_pair_estimate", "eps_pair_actual", "eps_pair_currency",
-                   "eps_pair_analysts", "eps_pair_source")
-REVENUE_PAIR_FIELDS = ("revenue_pair_estimate", "revenue_pair_actual",
-                       "revenue_pair_currency", "revenue_pair_analysts",
-                       "revenue_pair_source")
+#: Metric → the prefix its five row fields share. Table-driven because the panel now
+#: compares four metrics and hand-writing twenty near-identical field names is how a
+#: copy-paste typo becomes a column nobody populates.
+PROVIDER_METRIC_PREFIX = {
+    METRIC_EPS: "eps_pair",
+    METRIC_REVENUE: "revenue_pair",
+    METRIC_EBIT: "ebit_pair",
+    METRIC_NET_INCOME: "net_income_pair",
+}
+_PAIR_SUFFIXES = ("estimate", "actual", "currency", "analysts", "source")
+
+
+def pair_field_names(metric: str) -> tuple[str, ...]:
+    """The five row fields carrying one metric's provider pair."""
+    prefix = PROVIDER_METRIC_PREFIX[metric]
+    return tuple(f"{prefix}_{suffix}" for suffix in _PAIR_SUFFIXES)
+
+
+EPS_PAIR_FIELDS = pair_field_names(METRIC_EPS)
+REVENUE_PAIR_FIELDS = pair_field_names(METRIC_REVENUE)
+EBIT_PAIR_FIELDS = pair_field_names(METRIC_EBIT)
+NET_INCOME_PAIR_FIELDS = pair_field_names(METRIC_NET_INCOME)
+
+#: Every pair field the read path may attach, in panel order.
+ALL_PAIR_FIELDS = tuple(field for metric in PROVIDER_METRIC_PREFIX
+                        for field in pair_field_names(metric))
 
 _CURRENCY_BLOCKERS = (COMPARISON_CURRENCY_MISMATCH, COMPARISON_CURRENCY_UNKNOWN)
 
 
-def needs_provider_pair(row) -> bool:
-    """True when the row's *EPS* comparison is blocked by the currency alone.
+def needs_metric_pair(row, metric: str) -> bool:
+    """True when ``metric``'s comparison on this row is blocked by the currency alone.
 
-    A basis mismatch is not fixed by the provider pair (the numbers are already in
-    one currency by then), and a row with no pair at all has nothing to rescue.
+    A basis mismatch is not fixed by the provider pair (the numbers are already in one
+    currency by then), and a row with no figures at all has nothing to rescue.
+
+    Revenue / EBIT / net income read their *own* columns; only EPS lives in the
+    ``eps_*`` pair the calendar has always carried.
     """
-    if row.get("eps_estimate") is None and row.get("eps_actual") is None:
-        return False
+    if metric == METRIC_EPS:
+        if row.get("eps_estimate") is None and row.get("eps_actual") is None:
+            return False
+    elif metric == METRIC_REVENUE:
+        if row.get("revenue_estimate") is None and row.get("revenue_actual") is None:
+            return False
+    else:
+        # EBIT and net income have no Longbridge-vs-Futu column pair on the row (the
+        # calendar carries consensus for them in ``consensus_ebit`` / ``consensus_net_income``
+        # without a currency of their own), so they are rescued whenever a pair exists —
+        # that is exactly the case these rows are blocked in.
+        return bool(row.get("symbol"))
     reason = row.get("comparison_unavailable_reason") or comparison_unavailable_reason(row)
     return reason in _CURRENCY_BLOCKERS
+
+
+def needs_provider_pair(row) -> bool:
+    """True when the row's *EPS* comparison is blocked by the currency alone."""
+    return needs_metric_pair(row, METRIC_EPS)
 
 
 def attach_eps_pair(row, pair) -> dict:
@@ -573,6 +614,13 @@ def attach_revenue_pair(row, pair) -> dict:
     if not pair:
         return row
     return _attach_pair(row, pair, REVENUE_PAIR_FIELDS)
+
+
+def attach_metric_pair(row, metric: str, pair) -> dict:
+    """Adopt ``metric``'s provider pair on this row (Issue #149)."""
+    if not pair:
+        return row
+    return _attach_pair(row, pair, pair_field_names(metric))
 
 
 #: Sentinels the currency normaliser emits when the provider left the field empty
@@ -598,15 +646,8 @@ def _attach_pair(row, pair, prefix_fields) -> dict:
 
 
 def needs_revenue_pair(row) -> bool:
-    """True when the row's *revenue* comparison is blocked by the currency alone.
-
-    Symmetric with :func:`needs_provider_pair`: a basis mismatch is not fixed by the
-    provider pair, and a row with no revenue at all has nothing to rescue.
-    """
-    if row.get("revenue_estimate") is None and row.get("revenue_actual") is None:
-        return False
-    reason = row.get("comparison_unavailable_reason") or comparison_unavailable_reason(row)
-    return reason in _CURRENCY_BLOCKERS
+    """True when the row's *revenue* comparison is blocked by the currency alone."""
+    return needs_metric_pair(row, METRIC_REVENUE)
 
 
 def revenue_blocked(row) -> bool:
@@ -626,28 +667,38 @@ def revenue_blocked(row) -> bool:
     return reason is not None
 
 
-def row_revenue_pair(row) -> dict | None:
-    """The adopted revenue pair as a dict, or ``None`` — same shape as the EPS one."""
-    estimate = row.get("revenue_pair_estimate")
-    actual = row.get("revenue_pair_actual")
+def row_metric_pair(row, metric: str) -> dict | None:
+    """The adopted pair for ``metric`` as a dict, or ``None`` — one shape, all metrics."""
+    estimate_field, actual_field, currency_field, analysts_field, source_field = \
+        pair_field_names(metric)
+    estimate = row.get(estimate_field)
+    actual = row.get(actual_field)
     if estimate is None or actual is None:
         return None
     return {"estimate": estimate, "actual": actual,
-            "currency": row.get("revenue_pair_currency"),
-            "num_analysts": row.get("revenue_pair_analysts"),
-            "source": row.get("revenue_pair_source")}
+            "currency": row.get(currency_field),
+            "num_analysts": row.get(analysts_field),
+            "source": row.get(source_field)}
 
 
 def row_eps_pair(row) -> dict | None:
-    """The adopted pair as a dict, or ``None`` — the one shape every reader uses."""
-    estimate = row.get("eps_pair_estimate")
-    actual = row.get("eps_pair_actual")
-    if estimate is None or actual is None:
-        return None
-    return {"estimate": estimate, "actual": actual,
-            "currency": row.get("eps_pair_currency"),
-            "num_analysts": row.get("eps_pair_analysts"),
-            "source": row.get("eps_pair_source")}
+    """The adopted EPS pair — the shape ``/decision`` and the streak consume."""
+    return row_metric_pair(row, METRIC_EPS)
+
+
+def row_revenue_pair(row) -> dict | None:
+    """The adopted revenue pair (Issue #148)."""
+    return row_metric_pair(row, METRIC_REVENUE)
+
+
+def row_ebit_pair(row) -> dict | None:
+    """The adopted EBIT pair (Issue #149)."""
+    return row_metric_pair(row, METRIC_EBIT)
+
+
+def row_net_income_pair(row) -> dict | None:
+    """The adopted net-income pair (Issue #149)."""
+    return row_metric_pair(row, METRIC_NET_INCOME)
 
 
 # ── Unreleased actuals (Issue #111) ────────────────────────────────────────

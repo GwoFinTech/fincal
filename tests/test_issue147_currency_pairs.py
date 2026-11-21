@@ -47,7 +47,7 @@ class _FakeClient:
         self.calls = []
 
     def get_financials_estimate(self, code, period_type="QUARTERLY",
-                                estimate_type="EPS_GAAP"):
+                                estimate_type="EPS_GAAP", hist_count=None):
         self.calls.append((code, period_type, estimate_type))
         return 0, self.payload
 
@@ -125,7 +125,7 @@ class TestFetchPairs:
     def test_an_unsupported_symbol_is_counted_not_failed(self):
         class _Unsupported:
             def get_financials_estimate(self, code, period_type="QUARTERLY",
-                                        estimate_type="EPS_GAAP"):
+                                        estimate_type="EPS_GAAP", hist_count=None):
                 return -1, "Futu WebAPI HTTP 200, code -10: no data"
 
         stats = SYNC_FUTU.FutuStageStats()

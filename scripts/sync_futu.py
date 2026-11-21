@@ -388,8 +388,10 @@ class FutuStageStats:
     pair_symbols: int = 0
     pair_unsupported: int = 0
     pair_errors: int = 0
-    #: Rows written for the revenue metric specifically (Issue #148). Kept separate
-    #: from ``pair_rows`` so a run tells you whether the *revenue* half landed.
+    #: Rows written per metric (Issues #148/#149). Counted separately from
+    #: ``pair_rows`` so a run answers "did the revenue / EBIT / net-income half land?"
+    #: instead of hiding it inside one total.
+    metric_pair_rows: dict = field(default_factory=dict)
     revenue_pair_rows: int = 0
 
     #: Periods where the provider's own ``yoy`` disagreed with the ratio of the
@@ -593,6 +595,7 @@ def futu_audit_details(date_stats: FutuStageStats, actual_stats: FutuStageStats,
         # `except` made a total outage look like a clean run.
         "provider_pair_errors": actual_stats.pair_errors,
         "provider_revenue_pairs": actual_stats.revenue_pair_rows,
+        "provider_metric_pairs": dict(actual_stats.metric_pair_rows),
     }
 
 
@@ -860,10 +863,15 @@ _PAIR_UPSERT_SQL = """
 """
 
 
-#: The metrics the run fetches per symbol. Each is one extra call; EPS and revenue are
-#: the two the panel compares (EBIT / NET_INCOME_GAAP exist in the API but the panel
-#: shows them as Longbridge consensus only, so paying a call for them buys nothing).
-PROVIDER_PAIR_METRICS = ("EPS_GAAP", "REVENUE")
+#: The metrics the run fetches per symbol — the four the provider documents and the
+#: panel compares (Issue #149). Each is one call: statements + four estimates = five per
+#: symbol, which is why the `futu` stage budget moved 1500s → 2100s.
+PROVIDER_PAIR_METRICS = ("EPS_GAAP", "REVENUE", "EBIT", "NET_INCOME_GAAP")
+
+#: Periods of history to ask for. The documented ceiling is 20 (21 answers -3) and the
+#: longer window costs no extra call; 8 left calendar rows older than two years without
+#: a pair.
+PROVIDER_PAIR_HISTORY = 20
 
 
 def fetch_provider_pairs(client, code: str, limiter, stats,
@@ -883,7 +891,8 @@ def fetch_provider_pairs(client, code: str, limiter, stats,
     """
     outcome, payload = futu_call(
         code, f"Estimate:{metric}",
-        lambda: client.get_financials_estimate(code, estimate_type=metric),
+        lambda: client.get_financials_estimate(
+            code, estimate_type=metric, hist_count=PROVIDER_PAIR_HISTORY),
         limiter, stats, timeout_seconds=timeout_seconds)
     if outcome != OUTCOME_OK:
         return [], outcome
@@ -912,6 +921,7 @@ def flush_provider_pairs(symbol: str, market: str, rows: list[tuple],
                             (symbol, market, fy, fq, metric, currency, consensus,
                              actual, analysts, period_type))
             written += 1
+            stats.metric_pair_rows[metric] = stats.metric_pair_rows.get(metric, 0) + 1
             if metric == "REVENUE":
                 stats.revenue_pair_rows += 1
         except Exception as exc:  # noqa: BLE001 - one bad period must not stop the stage
