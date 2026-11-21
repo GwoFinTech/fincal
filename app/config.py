@@ -265,6 +265,15 @@ SYNC_CALENDAR_RETRY_BASE_SECONDS = float(os.getenv("SYNC_CALENDAR_RETRY_BASE_SEC
 # available through `/api/export`, which is a separate path.
 EARNINGS_CACHE_MAX_ENTRIES = int(os.getenv("EARNINGS_CACHE_MAX_ENTRIES", "128"))
 EARNINGS_MAX_WINDOW_DAYS = int(os.getenv("EARNINGS_MAX_WINDOW_DAYS", str(CALENDAR_FORWARD_DAYS + 90)))
+# A single-symbol history read (Issue #134) is a different payload from a month
+# of the whole universe: one symbol's quarters are a dozen rows, not the ~2 MiB
+# the window bound above protects against. Reading「这家公司过去几个季度」needs
+# years of history, so `/api/earnings?symbol=` gets its own, wider bound. It is
+# still bounded — an unbounded window would recreate the cache-key explosion
+# #86 closed.
+EARNINGS_HISTORY_MAX_WINDOW_DAYS = int(
+    os.getenv("EARNINGS_HISTORY_MAX_WINDOW_DAYS", str(CALENDAR_FORWARD_DAYS * 4 + 185))
+)
 
 # Kurumi (tsummt) API — preferred company-name source for FinCal symbols.
 # Issue #70: the default is FinCal's *own* listen address inside the production

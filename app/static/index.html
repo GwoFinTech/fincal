@@ -272,6 +272,9 @@
         <!-- Read-only: what the system itself tracks (every user's calendar is
              built from this range). The editable list stays admin-only. -->
         <button @click="appTab='universe'" :class="appTab === 'universe' ? 'app-tab-active' : ''" class="app-tab">系统自选</button>
+        <!-- Issue #134: the product is organised by date; this is the one
+             entry that answers 「这家公司过去几期怎么样」. -->
+        <button @click="appTab='history'" :class="appTab === 'history' ? 'app-tab-active' : ''" class="app-tab">标的</button>
       </div>
     </nav>
 
@@ -348,6 +351,76 @@
         <p class="text-[11px] mt-2" style="color:var(--text-muted);">「下次财报」= 今天之后最近的财报日（含算法预测，标「预」）；无未来财报时为「—」。与日历显示月份无关。</p>
       </template>
       <section v-else class="surface max-w-lg mx-auto mt-8 p-6 text-center"><div class="w-10 h-10 mx-auto mb-3 rounded-full flex items-center justify-center text-lg" style="background:var(--surface-raised);">☆</div><h2 class="text-[17px] font-semibold">登录后管理自选</h2><p class="text-[12px] leading-5 mt-2" style="color:var(--text-muted);">自选会安全地保存到你的账户，并用于日历中的“只看自选”筛选。</p><button v-if="appConfig.auth_login_url" @click="login" class="ui-btn ui-btn-primary mt-4">登录</button></section>
+    </main>
+
+    <main v-if="appTab === 'history'" class="max-w-[1600px] mx-auto px-4 py-5 pb-8">
+      <template v-if="user">
+        <div class="flex flex-wrap items-end justify-between gap-3 mb-4">
+          <div>
+            <h2 class="text-[20px] font-semibold">标的财报历史</h2>
+            <p class="text-[12px] mt-1" style="color:var(--text-muted);">按公司查看最近 12 期的预期与实际——「较预期」与可比性口径与个股详情面板同一规则，未来日期按「预测」处理。</p>
+          </div>
+          <span v-if="historySymbol" class="text-[12px]" style="color:var(--text-muted);">
+            {{ historyTitle || historySymbol }}
+            <span class="badge" :class="'badge-' + historyMarket" style="font-size:9px;">{{ historyMarket }}</span>
+          </span>
+        </div>
+
+        <section class="surface p-3 mb-5" aria-label="选择标的">
+          <label class="block text-[12px] font-medium mb-2">选择标的</label>
+          <input v-model="historyQuery" @input="doHistorySearch" placeholder="搜索股票代码或公司名称…" class="ui-input" aria-label="搜索标的以查看财报历史" />
+          <div v-if="historySearchLoading" class="flex items-center gap-2 text-[12px] text-zinc-500 py-3"><div class="spinner" style="width:14px;height:14px;"></div> 搜索中…</div>
+          <div v-else-if="historyResults.length" class="mt-2 space-y-1 max-h-56 overflow-y-auto">
+            <button v-for="r in historyResults" :key="r.symbol+r.market" @click="openSymbol(r)" class="ui-btn ui-btn-outline w-full text-left justify-between" style="color:var(--text-secondary);" :title="'查看 ' + r.symbol + ' 的财报历史'">
+              <span class="min-w-0"><span class="text-zinc-100 font-medium">{{ r.symbol }}</span><span v-if="r.company_name" class="text-zinc-500 ml-2">{{ r.company_name }}</span></span>
+              <span class="badge" :class="'badge-' + r.market">{{ r.market }}</span>
+            </button>
+          </div>
+        </section>
+
+        <section class="surface overflow-hidden" aria-label="财报历史">
+          <div class="flex items-center justify-between px-4 py-3 border-b" style="border-color:var(--border);">
+            <div class="section-title mb-0 border-0 p-0">最近 12 期</div>
+            <span class="text-[11px] text-zinc-500">预期 · 实际 · 较预期（EPS 与营收）</span>
+          </div>
+          <div v-if="historyLoading" class="flex items-center gap-2 text-[12px] text-zinc-500 px-4 py-4"><div class="spinner" style="width:14px;height:14px;"></div> 正在读取…</div>
+          <div v-else-if="!historySymbol" class="px-4 py-6 text-[12px] text-zinc-500">先在上方选择一个标的。</div>
+          <div v-else-if="!historyPeriods.length" class="px-4 py-6 text-[12px] text-zinc-500">该标的暂无财报历史。</div>
+          <div v-else class="overflow-x-auto">
+            <table class="w-full watchlist-table text-[12px]">
+              <thead class="text-[10px] text-zinc-500" style="background:var(--surface-raised);">
+                <tr>
+                  <th class="text-left px-4 py-2 font-medium">财季</th>
+                  <th class="text-left px-3 py-2 font-medium">公布日</th>
+                  <th class="text-right px-3 py-2 font-medium">EPS 预期</th>
+                  <th class="text-right px-3 py-2 font-medium">EPS 实际</th>
+                  <th class="text-right px-3 py-2 font-medium">较预期</th>
+                  <th class="hidden sm:table-cell text-right px-3 py-2 font-medium">营收预期</th>
+                  <th class="hidden sm:table-cell text-right px-3 py-2 font-medium">营收实际</th>
+                  <th class="text-left px-3 py-2 font-medium">不可比原因</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in historyPeriods" :key="row.id" class="border-t" style="border-color:var(--border);">
+                  <td class="px-4 py-2.5">
+                    <div class="font-semibold text-[13px]">{{ fqLabel(row.fiscal_year, row.fiscal_quarter) || '待确认' }}</div>
+                    <div class="text-[10px] text-zinc-500">{{ row.report_type === 'Q' ? '季报' : '年报 / 中报' }}<span v-if="row.is_predicted" class="predicted-tag ml-1" title="算法预测日期">预</span></div>
+                  </td>
+                  <td class="px-3 py-2.5 tabular-nums">{{ row.report_date }}</td>
+                  <td class="px-3 py-2.5 text-right tabular-nums">{{ fmtNum(row.eps_estimate) }}</td>
+                  <td class="px-3 py-2.5 text-right tabular-nums">{{ fmtNum(row.eps_actual) }}</td>
+                  <td class="px-3 py-2.5 text-right tabular-nums" :class="epsSurplusClass(row)">{{ signedPct(epsSurplus(row)) }}</td>
+                  <td class="hidden sm:table-cell px-3 py-2.5 text-right tabular-nums">{{ fmtBigNum(row.revenue_estimate) }}</td>
+                  <td class="hidden sm:table-cell px-3 py-2.5 text-right tabular-nums">{{ fmtBigNum(row.revenue_actual) }}</td>
+                  <td class="px-3 py-2.5 text-[11px]" style="color:var(--text-muted);">{{ comparisonShortNote(row) || '—' }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <p class="mt-3 text-[11px] leading-4" style="color:var(--text-muted);">「较预期」只在预期与实际都标明币种且相同时计算；币种缺失、两币种不同或双方声明了不同会计口径时显示「—」并在「不可比原因」列出原因（「—」不是数据缺失）。预期来源为 Longbridge 分析师一致预期，不同供应商口径与更新时间可能有偏差；不构成投资建议。</p>
+      </template>
     </main>
 
     <!-- System universe: the symbol range the system itself tracks, readable by

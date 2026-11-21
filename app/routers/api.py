@@ -12,6 +12,7 @@ from .. import db, config
 from ..company_name import display_name
 from ..symbol import (
     canonical_code,
+    market_of,
     normalize,
     normalize_user_symbol,
     sort_key,
@@ -82,7 +83,7 @@ def _watchlist_key(symbol: str, market: str) -> tuple[str, str]:
         raise AppError(code, details, 400) from None
 
 
-def _validate_window(start: date, end: date) -> None:
+def _validate_window(start: date, end: date, limit_days: int | None = None) -> None:
     """Reject a calendar window that is inverted or wider than the bound.
 
     The endpoint's ``start``/``end`` are raw ``date`` query parameters, so the
@@ -102,12 +103,31 @@ def _validate_window(start: date, end: date) -> None:
             422,
         )
     span_days = (end - start).days
-    if span_days > config.EARNINGS_MAX_WINDOW_DAYS:
+    limit = config.EARNINGS_MAX_WINDOW_DAYS if limit_days is None else limit_days
+    if span_days > limit:
         raise AppError(
             "invalid_window",
-            f"window spans {span_days} days, limit is {config.EARNINGS_MAX_WINDOW_DAYS}",
+            f"window spans {span_days} days, limit is {limit}",
             422,
         )
+
+
+def _symbol_scope(symbol: str) -> tuple[str, str]:
+    """Canonical ``(symbol, market)`` for a symbol-scoped earnings read (Issue #134).
+
+    The database stores HK codes padded and US codes bare, and callers type the
+    code they see on the site (``0700.HK`` / ``AAPL`` / ``700``), so the same
+    ``canonical_code`` + ``market_of`` pair the rest of the read paths use turns
+    the parameter into the two columns the query filters on. A code this product
+    cannot serve is refused with a language-neutral code instead of silently
+    matching nothing (an empty calendar looks like "this company never
+    reports").
+    """
+    code = canonical_code(symbol)
+    market = market_of(code) if code else None
+    if not code or not market:
+        raise AppError("invalid_symbol", f"unsupported symbol {symbol!r}", 422)
+    return code, market
 
 
 @router.get("/config", response_model=AppConfig)
@@ -205,6 +225,7 @@ def api_earnings(
     start: date | None = None,
     end: date | None = None,
     watchlistOnly: bool = False,
+    symbol: str | None = None,
     user=Depends(get_current_user),
 ):
     """Get earnings calendar data with layer cache (Issue #7)."""
@@ -227,6 +248,24 @@ def api_earnings(
     # number of ~2 MiB cache entries (a ten-year window was accepted and cached
     # as-is). Rejections carry the language-neutral code ``invalid_window``;
     # bulk history remains available through ``/api/export``.
+    # Issue #134: one symbol's past quarters is a different question from a
+    # month of the calendar, and the read that answers it stays the same read —
+    # `fetch_earnings_from_db` already filters by symbol. The scope gets its own
+    # bound (`EARNINGS_HISTORY_MAX_WINDOW_DAYS`), because a dozen rows do not
+    # justify the universe-wide payload limit.
+    if symbol:
+        code, market = _symbol_scope(symbol)
+        _validate_window(start, end, config.EARNINGS_HISTORY_MAX_WINDOW_DAYS)
+        history_key = f"earnings:history:{code}:{market}:{start}:{end}"
+
+        def _fetch_one():
+            return fetch_earnings_from_db(
+                symbols=[code], markets=[market], start=start, end=end
+            )
+
+        data, _entry = _earnings_cache.get_or_refresh(history_key, _fetch_one, ttl=120.0)
+        return data
+
     _validate_window(start, end)
 
     cache_key = f"earnings:{start}:{end}:{watchlistOnly}:{fincal_user['id']}"

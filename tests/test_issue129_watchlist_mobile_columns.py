@@ -48,12 +48,17 @@ class WatchlistPhoneColumnsTests(TestCase):
         assert "min-w-[620px]" not in self.html.replace("`min-w-[620px]`", ""), (
             "a 620px floor inside overflow-x-auto puts the 操作 column off-screen on a phone"
         )
-        self.assertEqual(len(_tables(self.html)), 2, "both markets must be changed, not just one")
+        # Two market tables plus the symbol-history table (Issue #134), which
+        # reuses the same class and therefore the same phone rules.
+        self.assertEqual(len(_tables(self.html)), 3, "every table using this class must be changed")
 
     def test_the_revenue_column_is_desktop_only(self):
         # Product trade recorded in the issue: revenue is the least actionable of
         # the four columns, so it is the one that goes on a narrow screen.
-        self.assertEqual(self.html.count('<th class="hidden sm:table-cell text-right px-3 py-2 font-medium">营收预期</th>'), 2)
+        # The history table hides both revenue columns on a phone for the same
+        # reason (its EPS pair + 较预期 are the actionable ones), so the shared
+        # header string appears three times: two watchlists + that table.
+        self.assertEqual(self.html.count('<th class="hidden sm:table-cell text-right px-3 py-2 font-medium">营收预期</th>'), 3)
         self.assertEqual(
             self.html.count('<td class="hidden sm:table-cell px-3 py-2.5 text-right">{{ fmtBigNum(watchlistInsight(w).revenue_estimate) }}</td>'),
             2,
@@ -77,14 +82,19 @@ class WatchlistPhoneColumnsTests(TestCase):
         assert ".watchlist-table .watchlist-remove { padding: 4px 6px; }" in media
 
     def test_the_desktop_column_set_is_unchanged(self):
-        header = '<th class="text-left px-4 py-2 font-medium">代码 / 公司</th>'
-        self.assertEqual(self.html.count(header), 2)
-        for label, klass in (
-            ("下次财报", '<th class="text-left px-3 py-2 font-medium">下次财报</th>'),
-            ("EPS 预期", '<th class="text-right px-3 py-2 font-medium">EPS 预期</th>'),
-            ("操作", '<th class="text-right px-4 py-2 font-medium">操作</th>'),
-        ):
-            self.assertEqual(self.html.count(klass), 2, label)
+        # Scoped to the two watchlist tables by their own binding: counting a
+        # header string across the whole page couples this guard to every other
+        # table that legitimately reuses 「EPS 预期」 (Issue #134's history view).
+        watchlist_tables = [t for t in _tables(self.html) if "watchlistInsight(" in t[:4000]]
+        self.assertEqual(len(watchlist_tables), 2)
+        for table in watchlist_tables:
+            for label, klass in (
+                ("代码 / 公司", '<th class="text-left px-4 py-2 font-medium">代码 / 公司</th>'),
+                ("下次财报", '<th class="text-left px-3 py-2 font-medium">下次财报</th>'),
+                ("EPS 预期", '<th class="text-right px-3 py-2 font-medium">EPS 预期</th>'),
+                ("操作", '<th class="text-right px-4 py-2 font-medium">操作</th>'),
+            ):
+                self.assertIn(klass, table, label)
 
 
 # ── The class has to exist in the *shipped* stylesheet ───────────────────

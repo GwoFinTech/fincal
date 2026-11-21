@@ -324,7 +324,11 @@ class TestPageWiring:
         js = self._js()
         pos = js.index("function currentUrlState()")
         state = js[pos:js.index("};", js.index("symbol: cal.selectedEarning", pos))]
-        assert "symbol: cal.selectedEarning.value ? (cal.selectedEarning.value.symbol || '') : ''" in state
+        # The panel's row still owns the key; the history tab (Issue #134) names
+        # its own subject when no row is open, and nothing else may claim it.
+        assert "symbol: cal.selectedEarning.value" in state
+        assert "(cal.selectedEarning.value.symbol || '')" in state
+        assert "(appTab.value === 'history' ? hist.historySymbol.value : '')" in state
         watcher = js[js.index("watch(() => (cal.selectedEarning.value ?"):]
         watcher = watcher[:watcher.index("});")]
         assert "if (!restoringFromHistory) url.replaceUrl(currentUrlState());" in watcher

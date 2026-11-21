@@ -90,7 +90,9 @@ def _run_url_probe() -> dict:
 class UrlStateTests(TestCase):
     def test_a_shared_link_carries_tab_month_and_day(self):
         out = _run_url_probe()
-        self.assertEqual(out["tabs"], ["calendar", "watchlist", "universe"])
+        # `history` joined in Issue #134 — a tab the address bar cannot name is a
+        # tab a link cannot open, so the list is part of this contract.
+        self.assertEqual(out["tabs"], ["calendar", "watchlist", "universe", "history"])
         self.assertEqual(out["parsed"]["full"],
                          {"tab": "watchlist", "month": "2026-11", "date": "2026-11-05"})
         self.assertEqual(out["parsed"]["tab_only"],

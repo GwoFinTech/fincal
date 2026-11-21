@@ -468,7 +468,7 @@
   // `pushState` for a tab/month change (a real navigation step) and
   // `replaceState` for the selection (a click-through must not fill the history).
   function useUrlState(host) {
-    const TABS = ['calendar', 'watchlist', 'universe'];
+    const TABS = ['calendar', 'watchlist', 'universe', 'history'];
     // Issue #140: 月 / 周 is view state like the month, so it belongs in the link.
     // Only `week` is ever written: 月 is the default, so `view=month` never
     // appears and every link written before this change keeps its exact bytes.
@@ -1049,6 +1049,102 @@
     };
   }
 
+  // ── useSymbolHistory: one company's quarters (Issue #134) ────────
+  // Every other surface answers 「这一天谁发财报」; the calendar cannot answer
+  // 「这家公司过去几期怎么样」 — a reader had to walk month by month. This view
+  // asks the calendar's own read for a single symbol (`/api/earnings?symbol=`),
+  // so 较预期、可比性口径与详情面板走的是同一份数据与同一套 formatter，不是第二套
+  // 实现；没有历史的标的显示空态，而不是一张看起来像「这家公司从不发财报」的空表。
+  function useSymbolHistory(apiFetch) {
+    const HISTORY_PERIODS = 12;
+    // Three years back covers ~12 quarters. Forward reach is one quarter, not
+    // the calendar's whole 420-day prediction horizon: the predictor places four
+    // quarters ahead, and on a 12-row table those empty 「预」 rows would push the
+    // real history out. One upcoming period is the useful 「下一期」 header; the
+    // span stays inside `EARNINGS_HISTORY_MAX_WINDOW_DAYS`.
+    const HISTORY_LOOKBACK_YEARS = 3;
+    const HISTORY_FORWARD_DAYS = 120;
+    const historySymbol = ref('');
+    const historyRows = ref([]);
+    const historyLoading = ref(false);
+    const historyQuery = ref('');
+    const historyResults = ref([]);
+    const historySearchLoading = ref(false);
+    let searchTimer = null;
+    let searchController = null;
+    let searchSeq = 0;
+
+    const historyTitle = computed(() => {
+      const first = historyRows.value[0];
+      if (!first) return '';
+      return first.company_name || first.company_name_en || '';
+    });
+    const historyMarket = computed(() => (historyRows.value[0] || {}).market || '');
+    // Newest first and capped: the page is 「最近 N 期」, not the whole archive.
+    const historyPeriods = computed(() => [...historyRows.value]
+      .sort((a, b) => String(b.report_date).localeCompare(String(a.report_date)))
+      .slice(0, HISTORY_PERIODS));
+
+    function ymd(date) {
+      return date.getFullYear() + '-' + String(date.getMonth() + 1).padStart(2, '0') +
+        '-' + String(date.getDate()).padStart(2, '0');
+    }
+
+    async function loadSymbolHistory(symbol) {
+      const code = String(symbol || historySymbol.value || '').trim();
+      historySymbol.value = code;
+      if (!code) { historyRows.value = []; return; }
+      historyLoading.value = true;
+      try {
+        const today = new Date();
+        const start = new Date(today.getFullYear() - HISTORY_LOOKBACK_YEARS,
+          today.getMonth(), today.getDate());
+        const end = new Date(today.getFullYear(), today.getMonth(),
+          today.getDate() + HISTORY_FORWARD_DAYS);
+        const params = new URLSearchParams({ symbol: code, start: ymd(start), end: ymd(end) });
+        const data = await apiFetch('/api/earnings?' + params.toString());
+        // A slower answer for a symbol the reader has already left must not
+        // replace the table they are looking at.
+        if (historySymbol.value === code) historyRows.value = Array.isArray(data) ? data : [];
+      } finally {
+        historyLoading.value = false;
+      }
+    }
+
+    // Same debounce/abort discipline as the watchlist box (Issue #137): an answer
+    // to a stale keystroke must never overwrite the current one.
+    async function doHistorySearch() {
+      clearTimeout(searchTimer);
+      if (searchController) searchController.abort();
+      const seq = ++searchSeq;
+      const query = historyQuery.value.trim();
+      if (!query) { historyResults.value = []; historySearchLoading.value = false; return; }
+      historySearchLoading.value = true;
+      searchTimer = setTimeout(async () => {
+        const controller = new AbortController();
+        searchController = controller;
+        const data = await apiFetch('/api/search?q=' + encodeURIComponent(query),
+          { signal: controller.signal });
+        if (seq !== searchSeq) return; // a newer keystroke owns the results now
+        if (searchController === controller) searchController = null;
+        historyResults.value = data || [];
+        historySearchLoading.value = false;
+      }, 300);
+    }
+
+    function openSymbol(item) {
+      historyQuery.value = '';
+      historyResults.value = [];
+      return loadSymbolHistory(item && item.symbol ? item.symbol : '');
+    }
+
+    return {
+      historySymbol, historyTitle, historyMarket, historyPeriods, historyLoading,
+      historyQuery, historyResults, historySearchLoading,
+      loadSymbolHistory, doHistorySearch, openSymbol,
+    };
+  }
+
   // ── useFormatters: number/percentage/date helpers ───────────────
   function useFormatters() {
     // Issue #61: the API marks a row whose estimate and actual are not the same
@@ -1470,6 +1566,14 @@
       // 6b. System universe (read-only for every user)
       const su = useSystemUniverse(apiFetch);
 
+      // 6c. One company's quarters (Issue #134)
+      const hist = useSymbolHistory(apiFetch);
+      // A link may name the symbol; `appTab` is already set here, so the
+      // tab watcher will not fire for it — remember it before any load.
+      if (urlInitial.tab === 'history' && urlInitial.symbol) {
+        hist.historySymbol.value = urlInitial.symbol;
+      }
+
       // 7. Formatters
       const fmt = useFormatters();
 
@@ -1580,7 +1684,10 @@
           // Issue #141: the address bar names the row the panel is showing, so a
           // copied link reopens the same detail and 后退 cannot show A under a
           // URL that says B. `''` when the day's list is showing instead.
-          symbol: cal.selectedEarning.value ? (cal.selectedEarning.value.symbol || '') : '',
+          symbol: cal.selectedEarning.value
+            ? (cal.selectedEarning.value.symbol || '')
+            // Issue #134: the history tab's subject is the symbol it names.
+            : (appTab.value === 'history' ? hist.historySymbol.value : ''),
           // Issue #142: the filter is part of what the page shows「我的自选、这个月」,
           // so the link carries it; `false` writes nothing (see `buildUrlState`).
           mine: watchlistOnly.value === true,
@@ -1716,8 +1823,18 @@
         // admin edits the source, so it is read on entry instead of being kept
         // in step with the calendar month.
         if (tab === 'universe' && user.value) su.loadUniverse();
+        // The history read has its own window, so it is loaded on entry (and
+        // only when a symbol is named — otherwise the page shows its picker).
+        if (tab === 'history' && user.value && hist.historySymbol.value) {
+          hist.loadSymbolHistory(hist.historySymbol.value);
+        }
       }
       watch(appTab, loadTabData);
+      // Choosing a company replaces (not pushes) the address bar, exactly like
+      // selecting a day: it is a step inside this view, not a new one.
+      watch(hist.historySymbol, () => {
+        if (!restoringFromHistory) url.replaceUrl(currentUrlState());
+      });
 
       onMounted(async () => {
         try {
@@ -1810,6 +1927,12 @@
         diagnostics: admin.diagnostics, diagnosticsLoading: admin.diagnosticsLoading,
         diagnosticsError: admin.diagnosticsError, diagnosticsSections: admin.diagnosticsSections,
         loadDiagnostics: admin.loadDiagnostics,
+        // Symbol history (Issue #134)
+        historySymbol: hist.historySymbol, historyTitle: hist.historyTitle,
+        historyMarket: hist.historyMarket, historyPeriods: hist.historyPeriods,
+        historyLoading: hist.historyLoading, historyQuery: hist.historyQuery,
+        historyResults: hist.historyResults, historySearchLoading: hist.historySearchLoading,
+        openSymbol: hist.openSymbol, doHistorySearch: hist.doHistorySearch,
         // System universe (read-only)
         systemUniverse: su.systemUniverse, universeLoading: su.universeLoading,
         usUniverse: su.usUniverse, hkUniverse: su.hkUniverse,
