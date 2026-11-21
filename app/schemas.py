@@ -365,6 +365,12 @@ class DependencyProbe(BaseModel):
     status: str
     error_code: str | None = None
     error: str | None = None
+    # Which transport answered and how fast. Added with the Futu WebAPI switch:
+    # a 「healthy」 that says nothing about *how* the dependency was reached hides
+    # the difference between a live signed call and a TCP socket that merely
+    # accepted a connection (the OpenD probe could not tell them apart).
+    transport: str | None = None
+    latency_ms: int | None = None
 
 class SyncFreshnessCheck(BaseModel):
     """Aggregate-only sync freshness (Issue #53).

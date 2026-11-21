@@ -223,6 +223,12 @@ export interface paths {
         /**
          * Api Export
          * @description Export earnings data as CSV or JSON.
+         *
+         *     Issue #127: `format` used to be a bare `str` with a single `== "json"` branch,
+         *     so `format=jsoon`, `format=JSON` or `format=xlsx` all returned a **CSV** with
+         *     HTTP 200 — a typo produced a file with the wrong format and no signal at all.
+         *     Declaring the enum makes FastAPI answer 422 and name the allowed values; the
+         *     Content-Type below now follows the branch that actually ran.
          */
         get: operations["api_export_api_export_get"];
         put?: never;
@@ -354,6 +360,35 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/ical-tokens/{user_id}/rotate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Rotate Ical Token
+         * @description Rotate a user's subscription token inside the serving process (#112).
+         *
+         *     Revoking a leaked iCal URL used to require editing ``users`` and restarting
+         *     the container, because the feed body was cached by token in the server's
+         *     memory. Rotation now runs here, against the process that holds those caches,
+         *     so the old address answers 404 on the very next request — no restart, and no
+         *     waiting for ``ICAL_TOKEN_CACHE_TTL_SECONDS``.
+         *
+         *     The new URL is returned to the admin (as ``GET /api/me`` returns it to the
+         *     owner); the audit entry keeps fingerprints only.
+         */
+        post: operations["rotate_ical_token_api_admin_ical_tokens__user_id__rotate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/admin/diagnostics": {
         parameters: {
             query?: never;
@@ -410,6 +445,10 @@ export interface paths {
          * @description Readiness probe (Issue #14). Returns 200 only when core deps are OK.
          *
          *     Core: PostgreSQL must be healthy. External providers are optional.
+         *
+         *     The probe is bounded (Issue #101): a database that hangs must answer 503
+         *     ``not_ready`` within the probe budget instead of holding the readiness gate
+         *     (and therefore every deployment) open.
          */
         get: operations["readiness_check_api_admin_ready_get"];
         put?: never;
@@ -657,6 +696,10 @@ export interface components {
             error_code?: string | null;
             /** Error */
             error?: string | null;
+            /** Transport */
+            transport?: string | null;
+            /** Latency Ms */
+            latency_ms?: number | null;
         };
         /** DiagnosticsResponse */
         DiagnosticsResponse: {
@@ -715,6 +758,11 @@ export interface components {
             })[];
             freshness?: components["schemas"]["FreshnessResponse"] | null;
             universe?: components["schemas"]["UniverseStatus"] | null;
+            /**
+             * Future Reported
+             * @default 0
+             */
+            future_reported: number;
         };
         /**
          * EarningItem
@@ -824,6 +872,12 @@ export interface components {
             status: string;
             /** Error Code */
             error_code?: string | null;
+            /** Last Run At */
+            last_run_at?: string | null;
+            /** Last Run Status */
+            last_run_status?: string | null;
+            /** Last Run Error Code */
+            last_run_error_code?: string | null;
         };
         /** FreshnessResponse */
         FreshnessResponse: {
@@ -845,6 +899,11 @@ export interface components {
              * @default []
              */
             never_run_stages: string[];
+            /**
+             * Failed Stages
+             * @default []
+             */
+            failed_stages: string[];
             /**
              * Stale Data
              * @default []
@@ -893,6 +952,27 @@ export interface components {
                     [key: string]: unknown;
                 };
             };
+        };
+        /**
+         * IcalTokenRotation
+         * @description Outcome of an in-app subscription-token rotation (Issue #112).
+         *
+         *     ``ical_url`` is the replacement address, published here for the same reason
+         *     ``GET /api/me`` publishes it to its owner: the subscriber needs the new URL
+         *     after the old one was revoked. Audit entries and logs carry ``fingerprint``
+         *     only — never the credential itself.
+         */
+        IcalTokenRotation: {
+            /** User Id */
+            user_id: number;
+            /** Email */
+            email: string;
+            /** Ical Url */
+            ical_url: string;
+            /** Fingerprint */
+            fingerprint: string;
+            /** Cache Entries Dropped */
+            cache_entries_dropped: number;
         };
         /** InstitutionRating */
         InstitutionRating: {
@@ -1139,6 +1219,11 @@ export interface components {
          *
          *     Returned on the unauthenticated ``/api/admin/health``: stage names and
          *     statuses only — never SQL, timestamps per stage or credentials.
+         *
+         *     ``failed_stages`` (Issue #104) names the stages whose **most recent run**
+         *     failed: the stage ran, and refreshed nothing.  It is separate from
+         *     ``stale_stages`` because the last success may still be inside the
+         *     threshold — that was exactly the case while the calendar was frozen.
          */
         SyncFreshnessCheck: {
             /** Status */
@@ -1157,6 +1242,11 @@ export interface components {
              * @default []
              */
             never_run_stages: string[];
+            /**
+             * Failed Stages
+             * @default []
+             */
+            failed_stages: string[];
             /**
              * Stale Data
              * @default []
@@ -1603,6 +1693,7 @@ export interface operations {
                 start?: string | null;
                 end?: string | null;
                 watchlistOnly?: boolean;
+                symbol?: string | null;
             };
             header?: never;
             path?: never;
@@ -1737,7 +1828,7 @@ export interface operations {
             query: {
                 start: string;
                 end: string;
-                format?: string;
+                format?: "csv" | "json";
             };
             header?: never;
             path?: never;
@@ -2004,6 +2095,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AuditLogEntry"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    rotate_ical_token_api_admin_ical_tokens__user_id__rotate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                user_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IcalTokenRotation"];
                 };
             };
             /** @description Validation Error */
