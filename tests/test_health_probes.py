@@ -264,7 +264,15 @@ class HealthEndpointTests(TestCase):
             payload = HealthResponse(**self._call_health()).model_dump()
 
         check = payload["checks"]["kurumi"]
-        self.assertLessEqual(set(check), {"status", "error_code", "error"})
+        # The verdict may say *which transport answered and how fast* — that is
+        # still a probe, not a freshness reading. A freshness check is recognisable
+        # by its own fields (threshold_hours / stale_stages / checked_at …), and
+        # none of them may appear here.
+        self.assertLessEqual(
+            set(check), {"status", "error_code", "error", "transport", "latency_ms"})
+        self.assertFalse(
+            {"threshold_hours", "stale_stages", "never_run_stages", "stale_data",
+             "checked_at"} & set(check))
         self.assertEqual(check["status"], "degraded")
         self.assertEqual(check["error_code"],
                          company_name.ERROR_DEPENDENCY_NOT_CONFIGURED)
