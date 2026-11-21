@@ -200,9 +200,13 @@
        left (red), matching the panel's 涨绿跌红 convention. */
     .growth-trend { display: flex; gap: 2px; align-items: flex-end; }
     .growth-trend-col { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; align-items: center; }
-    .growth-trend-track { position: relative; width: 100%; height: 26px; background:
-        linear-gradient(to bottom, transparent calc(50% - 0.5px), var(--border) calc(50% - 0.5px),
-                        var(--border) calc(50% + 0.5px), transparent calc(50% + 0.5px)); }
+    /* Horizontal bars grow left/right from the centre, so the axis is a vertical
+       spine at 50%. (A horizontal hairline here reads as the baseline of a vertical
+       bar chart — the first version drew one and the bars looked like they grew
+       up/down.) */
+    .growth-trend-track { position: relative; width: 100%; height: 26px; }
+    .growth-trend-track::before { content: ''; position: absolute; left: 50%; top: 2px;
+        bottom: 2px; width: 1px; background: var(--border-light); }
     .growth-bar { position: absolute; top: 50%; transform: translateY(-50%); height: 12px; border-radius: 2px; }
     /* The panel's 涨绿跌红 pair is --success / --destructive (the .beat/.miss cells
        use the same two), so the bars cannot drift from the numbers they mirror. */

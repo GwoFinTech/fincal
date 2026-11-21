@@ -367,6 +367,17 @@ class TestPageMarkup:
                        ".growth-bar-down { background: var(--destructive); }"):
             assert needle in html, needle
 
+    def test_the_axis_is_a_vertical_spine_not_a_baseline(self):
+        """Bars grow left/right, so the axis has to be vertical.
+
+        The first version drew a horizontal hairline (`linear-gradient(to bottom…)`),
+        which reads as the baseline of an up/down bar chart — the bars then look
+        like they grow vertically. Pinned so it cannot come back.
+        """
+        html = INDEX_HTML.read_text(encoding="utf-8")
+        assert ".growth-trend-track::before { content: ''; position: absolute; left: 50%;" in html
+        assert "linear-gradient(to bottom, transparent calc(50% - 0.5px)" not in html
+
     def test_the_mobile_rule_keeps_eight_columns_readable(self):
         html = INDEX_HTML.read_text(encoding="utf-8")
         assert ".growth-trend-value { display: none; }" in html
