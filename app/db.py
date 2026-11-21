@@ -425,19 +425,19 @@ def init_db():
         # looking like a trend. ``currency``/``basis`` are the statement's own
         # declarations; a pair whose currency or basis changed between the two
         # periods is not comparable, and ``reason`` says why it was withheld.
+        # Issue #147: the provider-native EPS consensus/actual pair. Why it exists:
+        # the calendar's estimate comes from Longbridge, which quotes HK names in the
+        # *listing* currency (HKD) and US names in USD, possibly restated; the actual
+        # comes from Futu statements in the *reporting* currency (CNY for a Chinese
+        # issuer). Two providers, two currencies, two conventions — the row-level
+        # comparability rule correctly refuses to subtract them, so every Chinese
+        # issuer listed in HK/US showed 「—」 for beat/miss.
+        #
+        # The provider publishes its own EPS consensus *and* its own actual for the
+        # same period in one currency and one unit (per listing unit: per ADS for a
+        # US ADR), so that pair is comparable by construction. Stored per period, not
+        # per event, and only consulted when the row's own pair is blocked.
         cur.execute("""
-            # ── EPS consensus, provider-native pair (Issue #147) ──────────────────
-    # Why this table exists: the calendar's estimate comes from Longbridge, which
-    # quotes HK names in the *listing* currency (HKD) and US names in USD, possibly
-    # restated; the actual comes from Futu statements in the *reporting* currency
-    # (CNY for a Chinese issuer). Two providers, two currencies, two conventions —
-    # `fiscal.comparison_unavailable_reason` correctly refuses to subtract them, so
-    # every Chinese issuer listed in HK/US showed 「—」 for beat/miss.
-    #
-    # The provider publishes its own EPS consensus *and* its own actual for the same
-    # period in one currency and one unit (per listing unit: per ADS for a US ADR),
-    # so that pair is comparable by construction. Stored per period, not per event,
-    # and only consulted when the row's own pair is blocked.
     CREATE TABLE IF NOT EXISTS earnings_provider_pairs (
         symbol          TEXT NOT NULL,
         market          TEXT NOT NULL,
