@@ -316,3 +316,24 @@ console.log(JSON.stringify({ revenue: fmt.surplusClass(row, 'revenue'),
                          "netIncomeActual(selectedEarning)",
                          ">EBIT<", ">净利润<"):
             assert fragment in html, fragment
+
+    def test_every_metric_value_is_a_double_braced_mustache(self):
+        """A single-braced `{ fmtBigNum(…) }` renders as literal text, not a value.
+
+        Shipped once: the EBIT/net-income cells printed
+        `{ fmtBigNum(ebitEstimate(selectedEarning)) }CNY` in production, and the
+        substring guard above happily passed because the *name* was present. Vue only
+        interpolates `{{ … }}`, so the braces are part of the contract.
+        """
+        import re
+
+        html = (ROOT / "app" / "static" / "index.html").read_text(encoding="utf-8")
+        single = re.findall(
+            r"(?<!\{)\{\s*(?:fmtBigNum|fmtNum|signedPct|metricDelta)\([^}]*selectedEarning"
+            r"[^}]*\)\s*\}(?!\})", html)
+        assert single == [], f"single-braced mustache(s) would render as text: {single}"
+        for name in ("ebitEstimate", "ebitActual", "netIncomeEstimate", "netIncomeActual",
+                     "ebitSurplus", "netIncomeSurplus"):
+            assert "{{ " in html and f"}}({name}" not in html  # sanity: no stray brace
+        for helper in ("ebitEstimate", "ebitActual", "netIncomeEstimate", "netIncomeActual"):
+            assert f"{{{{ fmtBigNum({helper}(selectedEarning)) }}}}" in html, helper
