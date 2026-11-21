@@ -353,11 +353,14 @@ class FutuWebClient:
         """Cheap signed read used by the health endpoint.
 
         No TCP preflight exists any more: the credential, the route and the
-        upstream are all exercised by the same request the sync itself makes.
+        upstream are exercised by one real signed request. ``stock-basicinfo`` for
+        a single code is chosen because it is the smallest read that still needs
+        the signature — the earnings-history endpoint used first answers with
+        ~600 records and cost the health check ~2 s of upstream quota per call.
         """
         started = time.monotonic()
         try:
-            self.request(f"{code}/financials/earnings-price-history", timeout=5)
+            self.request("stock-basicinfo", body={"code_list": [code]}, timeout=5)
             return {"ok": True, "code": "ok",
                     "latency_ms": round((time.monotonic() - started) * 1000)}
         except FutuWebError as exc:
