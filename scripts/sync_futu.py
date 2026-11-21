@@ -380,6 +380,12 @@ class FutuStageStats:
     #: were not comparable (currency or accounting basis changed).
     growth_rows: int = 0
     growth_incomparable: int = 0
+    #: Provider-native consensus/actual pairs written this run (Issue #147) and
+    #: symbols whose estimate read came back empty/unsupported.
+    pair_rows: int = 0
+    pair_symbols: int = 0
+    pair_unsupported: int = 0
+
     #: Periods where the provider's own ``yoy`` disagreed with the ratio of the
     #: two statements by more than ``GROWTH_CROSSCHECK_TOLERANCE_PP``. Never
     #: stored as a discrepancy — the provider value wins — but every one is
@@ -570,6 +576,12 @@ def futu_audit_details(date_stats: FutuStageStats, actual_stats: FutuStageStats,
         "growth_rows": actual_stats.growth_rows,
         "growth_incomparable": actual_stats.growth_incomparable,
         "growth_discrepancies": actual_stats.growth_discrepancies,
+        # Issue #147: periods where the provider's consensus and its own actual
+        # share one currency and one unit — the only pair a beat/miss may use for an
+        # issuer whose calendar estimate is quoted in another currency.
+        "provider_pairs": actual_stats.pair_rows,
+        "provider_pair_symbols": actual_stats.pair_symbols,
+        "provider_pair_unsupported": actual_stats.pair_unsupported,
     }
 
 
@@ -821,6 +833,67 @@ def flush_growth_rows(rows: list[tuple], stats: FutuStageStats) -> int:
     return written
 
 
+_PAIR_UPSERT_SQL = """
+    INSERT INTO earnings_provider_pairs
+        (symbol, market, fiscal_year, fiscal_quarter, source, currency,
+         eps_consensus, eps_actual, num_analysts, period_type, as_of, updated_at)
+    VALUES (%s,%s,%s,%s,'futu',%s,%s,%s,%s,%s,NOW(),NOW())
+    ON CONFLICT (symbol, market, fiscal_year, fiscal_quarter, source) DO UPDATE SET
+        currency = EXCLUDED.currency,
+        eps_consensus = EXCLUDED.eps_consensus,
+        eps_actual = EXCLUDED.eps_actual,
+        num_analysts = EXCLUDED.num_analysts,
+        period_type = EXCLUDED.period_type,
+        as_of = NOW(),
+        updated_at = NOW()
+"""
+
+
+def fetch_provider_pairs(client, code: str, limiter, stats,
+                         timeout_seconds: int) -> tuple[list[tuple], str]:
+    """Provider-native consensus/actual pairs for one symbol (Issue #147).
+
+    Returns ``(rows, outcome)`` with ``outcome`` ``None`` on success or
+    ``"unsupported"`` when the provider has no estimates for the symbol (ETFs,
+    indices, uncovered small caps).  A pair is only emitted when both numbers and
+    the period are present: half a pair cannot compare anything, and writing it
+    would make the read path believe a comparison exists.
+    """
+    outcome, payload = futu_call(
+        code, "Estimate", lambda: client.get_financials_estimate(code),
+        limiter, stats, timeout_seconds=timeout_seconds)
+    if outcome != OUTCOME_OK:
+        return [], outcome
+    currency = payload.get("currency")
+    rows = []
+    for period in payload.get("history") or []:
+        fy, fq = period.get("fiscal_year"), period.get("fiscal_quarter")
+        consensus, actual = period.get("consensus"), period.get("actual")
+        if not fy or not fq or consensus is None or actual is None or not currency:
+            continue
+        rows.append((int(fy), int(fq), currency, consensus, actual,
+                     period.get("num_analysts"), payload.get("period_type")))
+    return rows, OUTCOME_OK
+
+
+def flush_provider_pairs(symbol: str, market: str, rows: list[tuple],
+                         stats: FutuStageStats) -> int:
+    """Upsert one symbol's pairs; returns how many were written."""
+    written = 0
+    for row in rows:
+        try:
+            with db_cursor() as cur:
+                cur.execute(_PAIR_UPSERT_SQL, (symbol, market) + row)
+            written += 1
+        except Exception as exc:  # noqa: BLE001 - one bad period must not stop the stage
+            logger.warning("provider pair skipped for %s FY%s Q%s: %s",
+                           symbol, row[0], row[1], exc)
+    stats.pair_rows += written
+    if written:
+        stats.pair_symbols += 1
+    return written
+
+
 def sync_earnings_dates(ctx, run_id: int, symbols: list[str],
                         stats: FutuStageStats | None = None) -> FutuStageStats:
     """Fetch earnings calendar dates from the Futu WebAPI, one shared client.
@@ -1060,6 +1133,22 @@ def sync_actuals(ctx, run_id: int, symbols: list[str],
         finally:
             stats.total += 1
             stats.count_symbol(outcome)
+
+        # Issue #147: the provider's own consensus/actual pair for the same periods.
+        # One extra read per symbol; it is enrichment (beat/miss for an issuer quoted
+        # in another currency), so a failure is counted and logged but never turns
+        # the symbol — or the run — red. Deliberately outside the block above: the
+        # pair is per-symbol independent of whether the statements landed.
+        try:
+            pair_rows, pair_outcome = fetch_provider_pairs(
+                client, futu_code, limiter, stats,
+                timeout_seconds=config.FUTU_ACTUALS_TIMEOUT_SECONDS)
+            if pair_outcome == OUTCOME_UNSUPPORTED:
+                stats.pair_unsupported += 1
+            elif pair_outcome == OUTCOME_OK and pair_rows:
+                flush_provider_pairs(source_symbol, market, pair_rows, stats)
+        except Exception as e:  # noqa: BLE001 - enrichment must not fail the stage
+            logger.warning("Provider pairs unavailable for %s: %s", futu_code, e)
 
         if stats.rate_limited:
             logger.warning(

@@ -125,6 +125,65 @@ def fetch_earnings_from_db(
             row.get("comparison_unavailable_reason")
             or fiscal.comparison_unavailable_reason(row)
         )
+    # Issue #147: rows whose *quote* currency differs from the *reporting* currency
+    # (every Chinese issuer listed in HK or as a US ADR) cannot subtract the
+    # calendar estimate from the statement actual. Where the provider published its
+    # own consensus and actual for the same period in one currency, that pair is
+    # attached here — one entry point, so the calendar, both exports and the iCal
+    # feed keep agreeing.
+    attach_provider_pairs(rows)
+    return rows
+
+
+PROVIDER_PAIR_COLUMNS = "symbol, market, fiscal_year, fiscal_quarter, source, " \
+                         "currency, eps_consensus, eps_actual, num_analysts"
+
+
+def load_provider_pairs(keys) -> dict[tuple, dict]:
+    """Provider-native EPS pairs for ``(symbol, market, fiscal_year, quarter)`` keys.
+
+    One query for the whole result set: the calendar spans ~100 symbols, and a
+    lookup per row would put a hundred round-trips in front of every page load for
+    an enrichment that most rows never use.
+    """
+    from . import db
+
+    symbols = {symbol for symbol, _market, _fy, _fq in keys if symbol}
+    if not symbols:
+        return {}
+    with db.db_cursor() as cur:
+        cur.execute(
+            f"SELECT {PROVIDER_PAIR_COLUMNS}, period_type FROM earnings_provider_pairs "
+            "WHERE symbol = ANY(%s)", (sorted(symbols),))
+        rows = [dict(row) for row in cur.fetchall()]
+    pairs = {}
+    for row in rows:
+        key = (row["symbol"], row["market"], row["fiscal_year"], row["fiscal_quarter"])
+        # The newest source wins if two providers ever write the same period.
+        pairs.setdefault(key, row)
+    return pairs
+
+
+def attach_provider_pairs(rows) -> list[dict]:
+    """Attach the provider's own EPS pair where the row's pair is currency-blocked."""
+    from . import fiscal
+
+    candidates = [row for row in rows if fiscal.needs_provider_pair(row)]
+    if not candidates:
+        return rows
+    pairs = load_provider_pairs([
+        (row.get("symbol"), row.get("market"), row.get("fiscal_year"),
+         row.get("fiscal_quarter")) for row in candidates])
+    adopted = 0
+    for row in candidates:
+        pair = pairs.get((row.get("symbol"), row.get("market"), row.get("fiscal_year"),
+                          row.get("fiscal_quarter")))
+        before = row.get("eps_pair_estimate")
+        fiscal.attach_eps_pair(row, pair)
+        if row.get("eps_pair_estimate") is not None and before is None:
+            adopted += 1
+    if adopted:
+        logger.debug("adopted a provider EPS pair on %d row(s)", adopted)
     return rows
 
 
@@ -166,6 +225,17 @@ def fetch_earning_with_history(earning_id: int) -> tuple[dict | None, list[dict]
     masked = fiscal.hide_unreleased_actuals([earning] + history, read_today)
     if masked:
         logger.debug("masked %d future-dated actual(s) on the decision read path", masked)
+    # Issue #147: the panel shows the same beat/miss the calendar does, so it goes
+    # through the same pair rule — for the row it is open on *and* for the history,
+    # because the beat/miss streak counts each period under the same rule. Without
+    # the history, a quarter whose surplus is printed from the provider pair would
+    # sit next to 「连续 —（币种不同）」.
+    for row in [earning] + history:
+        row["comparison_unavailable_reason"] = (
+            row.get("comparison_unavailable_reason")
+            or fiscal.comparison_unavailable_reason(row)
+        )
+    attach_provider_pairs([earning] + history)
     return earning, history
 
 

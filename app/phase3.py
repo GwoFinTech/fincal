@@ -264,13 +264,21 @@ def _beat_miss_streak(rows, fiscal_year: int, fiscal_quarter: int) -> dict:
         if current != expected:
             break_period, break_reason = period, STREAK_BREAK_NOT_ADJACENT
             break
-        reason = fiscal.comparison_unavailable_reason(row)
-        if reason:
-            if count == 0:
-                return _no_streak(reason, period)
-            break_period, break_reason = period, reason
-            break
-        actual, estimate = as_decimal(row.get("eps_actual")), as_decimal(row.get("eps_estimate"))
+        # Issue #147: when the read path adopted the provider's own EPS pair for
+        # this period, that pair is comparable by construction — the row-level
+        # currency gate describes the *other* pair and must not block the count
+        # while the panel prints a surplus from this one.
+        pair = fiscal.row_eps_pair(row)
+        if pair:
+            actual, estimate = as_decimal(pair["actual"]), as_decimal(pair["estimate"])
+        else:
+            reason = fiscal.comparison_unavailable_reason(row)
+            if reason:
+                if count == 0:
+                    return _no_streak(reason, period)
+                break_period, break_reason = period, reason
+                break
+            actual, estimate = as_decimal(row.get("eps_actual")), as_decimal(row.get("eps_estimate"))
         if actual is None or estimate is None or actual == estimate:
             if count == 0:
                 return _no_streak(None, period, STREAK_BREAK_MISSING_VALUES)

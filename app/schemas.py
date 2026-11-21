@@ -118,6 +118,15 @@ class EarningItem(BaseModel):
     actual_currency: str | None = None
     actual_basis: str | None = None
     comparison_unavailable_reason: str | None = None
+    # Issue #147: the provider's own EPS consensus/actual for this period, attached
+    # only when the row's own pair is blocked by currency (a Chinese issuer quoted in
+    # HKD/USD but reporting in CNY). Declared here because `response_model` silently
+    # drops undeclared fields — the panel would otherwise never see the pair.
+    eps_pair_estimate: float | None = None
+    eps_pair_actual: float | None = None
+    eps_pair_currency: str | None = None
+    eps_pair_analysts: int | None = None
+    eps_pair_source: str | None = None
     consensus_eps_gaap: float | None = None
     consensus_eps_adjusted: float | None = None
     consensus_revenue: float | None = None

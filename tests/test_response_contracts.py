@@ -106,7 +106,14 @@ def test_api_earning_decision_returns_404_for_missing_id():
 
 # Fields the read path derives instead of selecting — every other field of
 # ``EarningItem`` must come from a column or a ``consensus_*`` alias.
-COMPUTED_READ_PATH_FIELDS = {"comparison_unavailable_reason"}
+COMPUTED_READ_PATH_FIELDS = {
+    "comparison_unavailable_reason",
+    # Issue #147: the read path attaches the provider-native EPS pair to rows whose
+    # own pair is blocked by currency. Computed, not selected — hence listed here
+    # rather than discovered from the schema.
+    "eps_pair_estimate", "eps_pair_actual", "eps_pair_currency",
+    "eps_pair_analysts", "eps_pair_source",
+}
 
 _EARNINGS_ALTER_LOOP = re.compile(
     r"for column, definition in \((.*?)\n\s*\):\s*\n\s*cur\.execute\(f\"ALTER TABLE earnings ADD COLUMN IF NOT EXISTS",
@@ -165,6 +172,12 @@ def _full_row() -> dict:
         "estimate_currency": "USD", "estimate_basis": "consensus",
         "actual_currency": "USD", "actual_basis": "gaap",
         "comparison_unavailable_reason": None,
+        # Issue #147: the provider-native EPS pair, supplied only on rows whose own
+        # pair is currency-blocked. It is part of the row contract even when a given
+        # row leaves it null, so the sample row carries it explicitly.
+        "eps_pair_estimate": 9.1573, "eps_pair_actual": 25.94,
+        "eps_pair_currency": "CNY", "eps_pair_analysts": 7,
+        "eps_pair_source": "futu",
         "consensus_eps_gaap": 1.90, "consensus_eps_adjusted": 1.92,
         "consensus_revenue": 91000.0, "consensus_ebit": 30000.0,
         "consensus_net_income": 25000.0, "consensus_normalized_net_income": 24500.0,

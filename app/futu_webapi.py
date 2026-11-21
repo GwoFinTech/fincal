@@ -44,6 +44,9 @@ from typing import Any
 from urllib.parse import urlencode, urlsplit
 
 from . import config
+# Currency labels come from the same normaliser the write path uses, so a provider
+# that answers ``cny`` and one that answers ``CNY`` cannot look like two currencies.
+from .provenance import normalize_currency
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +148,27 @@ def _as_float(value: Any) -> float | None:
 
 def _normalize_label(label: Any) -> str:
     return " ".join(str(label or "").casefold().split())
+
+
+def _estimate_period(row: dict) -> dict:
+    """One estimate row, numbers coerced (the provider sends strings)."""
+    def number(value):
+        if value is None or value == "":
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    analysts = row.get("num_analysts")
+    return {
+        "fiscal_year": row.get("fiscal_year"),
+        "fiscal_quarter": row.get("fiscal_quarter"),
+        "period_str": row.get("period_str"),
+        "consensus": number(row.get("consensus_mean")),
+        "actual": number(row.get("actual_value")),
+        "num_analysts": analysts if isinstance(analysts, int) else None,
+    }
 
 
 def select_statement_field(report: dict, labels: tuple[str, ...]) -> StatementField:
@@ -363,6 +387,34 @@ class FutuWebClient:
         payload = data.get("data") or {}
         return 0, {"report_list": payload.get("report_list") or [],
                    "next_key": (data.get("pagination") or {}).get("next_key")}
+
+    def get_financials_estimate(self, code: str,
+                               period_type: str = "QUARTERLY") -> tuple[int, Any]:
+        """EPS consensus **and** the provider's own actual per period (Issue #147).
+
+        ``{"currency": "CNY", "history": [...], "future": [...]}`` where each period
+        carries ``fiscal_year``/``fiscal_quarter``/``consensus_mean``, and history
+        additionally ``actual_value`` plus ``num_analysts``.
+
+        Two properties make this the only honest way to compare a Chinese issuer's
+        consensus against its reported EPS: ``currency`` is the **reporting**
+        currency (CNY for 0700/BABA/PDD while the quote currency is HKD/USD), and
+        both numbers are stated **per listing unit** (per ADS for a US ADR, per
+        share for the HK line) — the same convention as the statements' EPS, so the
+        pair the provider computes is internally consistent.  There is no revenue
+        consensus here: this endpoint is EPS only.
+        """
+        ret, data = self._call(f"{code}/financials/estimate",
+                              params={"period_type": period_type})
+        if ret != 0:
+            return ret, data
+        payload = data.get("data") or {}
+        return 0, {
+            "currency": normalize_currency(payload.get("currency")),
+            "period_type": payload.get("period_type") or period_type,
+            "history": [_estimate_period(row) for row in payload.get("historical_estimates") or []],
+            "future": [_estimate_period(row) for row in payload.get("future_estimates") or []],
+        }
 
     def get_stock_basicinfo(self, market: str, security_type: str = "STOCK",
                             codes: list[str] | None = None) -> tuple[int, Any]:

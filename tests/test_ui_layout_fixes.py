@@ -220,7 +220,11 @@ def test_the_percentage_sits_under_the_value_in_the_same_cell():
     row = html[html.index('class="day-row-main day-row-num'):html.index('class="day-row-action')]
 
     # Both lines belong to the numeric button; a third flex sibling would drift again.
-    assert "fmtNum(e.eps_actual)" in row
+    # Issue #147: the cell reads through the pair-aware accessors, so a row whose
+    # own estimate/actual sit in different currencies can still show the
+    # provider's own pair. The layout contract is unchanged — value above
+    # percentage, in the same cell.
+    assert "fmtNum(epsActual(e))" in row
     assert "fmtPct(epsSurplus(e))" in row
     assert row.count('class="block') >= 2
 
@@ -239,4 +243,4 @@ def test_the_estimate_is_labelled_when_no_actual_exists():
     html = page()
     row = html[html.index('class="day-row-main day-row-num'):html.index('class="day-row-action')]
 
-    assert "预期 {{ fmtNum(e.eps_estimate) }}" in row
+    assert "预期 {{ fmtNum(epsEstimate(e)) }}" in row

@@ -845,6 +845,16 @@ export interface components {
             actual_basis?: string | null;
             /** Comparison Unavailable Reason */
             comparison_unavailable_reason?: string | null;
+            /** Eps Pair Estimate */
+            eps_pair_estimate?: number | null;
+            /** Eps Pair Actual */
+            eps_pair_actual?: number | null;
+            /** Eps Pair Currency */
+            eps_pair_currency?: string | null;
+            /** Eps Pair Analysts */
+            eps_pair_analysts?: number | null;
+            /** Eps Pair Source */
+            eps_pair_source?: string | null;
             /** Consensus Eps Gaap */
             consensus_eps_gaap?: number | null;
             /** Consensus Eps Adjusted */

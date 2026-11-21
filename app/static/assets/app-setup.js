@@ -1327,7 +1327,52 @@
         : (STREAK_BREAK_LABELS[streak.break_reason] || '无法继续累计');
       return '连续季数只累计相邻且可比的财季：' + (boundary ? boundary + ' ' : '') + cause + '，不计入并在此中断。';
     }
+    // ── EPS 的「提供方自己那一对」（Issue #147）─────────────────────────────
+    // 中概股/A 股背景的港股与 ADR：日历预期按挂牌币种（HKD/USD）报价，报表实际值按
+    // 记账币种（CNY）上报，行级规则正确地拒绝相减。提供方自己发布的「一致预期 + 实际」
+    // 是同一币种、同一口径的一对，命中时用它替代本行的 EPS 两侧——营收没有一致预期，
+    // 因此营收保持「—」。
+    // NB: build the object field by field, never as an object literal returned from
+    // a helper here. The frontend contract parser resolves the `...fmt` spread by
+    // taking the FIRST object-literal return after `function useFormatters(`, so a
+    // literal in this position silently redefines the whole exposed API — and even
+    // spelling that pattern out in a comment breaks the brace counting (19 guards
+    // went red twice for exactly this).
+    function epsPair(e) {
+      if (!e || e.eps_pair_estimate == null || e.eps_pair_actual == null) return null;
+      const pair = {};
+      pair.estimate = Number(e.eps_pair_estimate);
+      pair.actual = Number(e.eps_pair_actual);
+      pair.currency = e.eps_pair_currency || null;
+      pair.analysts = e.eps_pair_analysts == null ? null : e.eps_pair_analysts;
+      pair.source = e.eps_pair_source || null;
+      return pair;
+    }
+    function epsEstimate(e) {
+      const pair = epsPair(e);
+      return pair ? pair.estimate : (e ? e.eps_estimate : null);
+    }
+    function epsActual(e) {
+      const pair = epsPair(e);
+      return pair ? pair.actual : (e ? e.eps_actual : null);
+    }
+    // 一对来自同一提供方，比较不再受行级币种/口径门禁约束——门禁本来就是为了防跨来源相减。
+    function epsPairNote(e) {
+      const pair = epsPair(e);
+      if (!pair) return '';
+      const parts = ['EPS 预期/实际取自同一提供方的一致预期与实际（同一币种'
+        + (pair.currency ? ' ' + pair.currency : '') + '）'];
+      if (pair.analysts != null) parts.push(pair.analysts + ' 位分析师');
+      parts.push('营收无一致预期，仍不可比');
+      return parts.join('｜');
+    }
     function epsSurplus(e) {
+      const pair = epsPair(e);
+      if (pair) {
+        const diff = pair.actual - pair.estimate;
+        if (Math.abs(pair.estimate) < 0.0001) return diff > 0 ? 1 : diff < 0 ? -1 : 0;
+        return diff / Math.abs(pair.estimate);
+      }
       if (comparisonUnavailable(e)) return null;
       if (e.eps_estimate == null || e.eps_actual == null) return null;
       const diff = e.eps_actual - e.eps_estimate;
@@ -1352,7 +1397,9 @@
     // A row keeps its "较预期" cell only when both values exist *and* the API did
     // not flag the pair as non-comparable; otherwise the cell shows "—".
     function hasComparison(e, metric) {
-      if (!e || comparisonUnavailable(e)) return false;
+      if (!e) return false;
+      if (metric === 'eps' && epsPair(e)) return true;
+      if (comparisonUnavailable(e)) return false;
       return metric === 'eps'
         ? e.eps_estimate != null && e.eps_actual != null
         : e.revenue_estimate != null && e.revenue_actual != null;
@@ -1513,6 +1560,7 @@
 
     return {
       epsSurplus, epsSurplusClass, revSurplus, revSurplusClass,
+      epsPair, epsPairNote, epsEstimate, epsActual,
       hasComparison, comparisonNote, comparisonUnavailable, attributionNote,
       growthValue, growthReason, growthNote, growthCell, growthSuppressedNote,
       growthSourceLabel, growthTrendPoints, growthBarWidth, growthBarDirection,

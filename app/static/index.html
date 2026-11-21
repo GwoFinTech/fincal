@@ -771,8 +771,8 @@
                     <template v-if="hasComparison(selectedEarning, 'revenue')">{{ fmtBigNum(metricDelta(selectedEarning.revenue_actual, selectedEarning.revenue_estimate)) }}<br>{{ signedPct(revSurplus(selectedEarning)) }}</template>
                     <template v-else>—<br><span style="color:var(--text-muted);">{{ comparisonShortNote(selectedEarning) || '—' }}</span></template>
                   </td></tr>
-                  <tr style="border-top:1px solid var(--border);"><th class="text-left p-2 font-medium">EPS</th><td class="p-2 text-right whitespace-nowrap">{{ fmtNum(selectedEarning.eps_estimate) }}<br><span style="color:var(--text-muted);">—</span></td><td class="p-2 text-right whitespace-nowrap">{{ fmtNum(selectedEarning.eps_actual) }}<br><span style="color:var(--text-muted);" :title="growthNote(decision, 'eps_yoy')">{{ growthCell(decision, 'eps_yoy') }}</span></td><td class="p-2 text-right whitespace-nowrap" :class="epsSurplusClass(selectedEarning)" :title="comparisonNote(selectedEarning)">
-                    <template v-if="hasComparison(selectedEarning, 'eps')">{{ fmtNum(metricDelta(selectedEarning.eps_actual, selectedEarning.eps_estimate)) }}<br>{{ signedPct(epsSurplus(selectedEarning)) }}</template>
+                  <tr style="border-top:1px solid var(--border);"><th class="text-left p-2 font-medium">EPS</th><td class="p-2 text-right whitespace-nowrap" :title="epsPairNote(selectedEarning)">{{ fmtNum(epsEstimate(selectedEarning)) }}<br><span style="color:var(--text-muted);">—</span></td><td class="p-2 text-right whitespace-nowrap" :title="epsPairNote(selectedEarning)">{{ fmtNum(epsActual(selectedEarning)) }}<br><span style="color:var(--text-muted);" :title="growthNote(decision, 'eps_yoy')">{{ growthCell(decision, 'eps_yoy') }}</span></td><td class="p-2 text-right whitespace-nowrap" :class="epsSurplusClass(selectedEarning)" :title="comparisonNote(selectedEarning)">
+                    <template v-if="hasComparison(selectedEarning, 'eps')">{{ fmtNum(metricDelta(epsActual(selectedEarning), epsEstimate(selectedEarning))) }}<br>{{ signedPct(epsSurplus(selectedEarning)) }}</template>
                     <template v-else>—<br><span style="color:var(--text-muted);">{{ comparisonShortNote(selectedEarning) || '—' }}</span></template>
                   </td></tr>
                 </tbody>
@@ -890,10 +890,10 @@
             <button type="button" class="day-row-main day-row-num shrink-0"
                     :aria-label="(e.symbol + ' 查看详情').trim()"
                     @click="selectEarning(e)">
-              <span v-if="e.eps_actual != null" :class="epsSurplusClass(e)" class="block font-medium">{{ fmtNum(e.eps_actual) }}</span>
-              <span v-else-if="e.eps_estimate != null" class="block text-[11px]" style="color:var(--text-muted);">预期 {{ fmtNum(e.eps_estimate) }}</span>
-              <span v-if="hasComparison(e, 'eps')" :class="epsSurplusClass(e)" class="block text-[11px]">{{ epsSurplus(e) > 0 ? '+' : '' }}{{ fmtPct(epsSurplus(e)) }}</span>
-              <span v-else-if="e.eps_actual != null && e.eps_estimate != null" class="block text-[10px]" style="color:var(--text-muted);">预期 {{ fmtNum(e.eps_estimate) }}</span>
+              <span v-if="epsActual(e) != null" :class="epsSurplusClass(e)" class="block font-medium">{{ fmtNum(epsActual(e)) }}</span>
+              <span v-else-if="epsEstimate(e) != null" class="block text-[11px]" style="color:var(--text-muted);">预期 {{ fmtNum(epsEstimate(e)) }}</span>
+              <span v-if="hasComparison(e, 'eps')" :class="epsSurplusClass(e)" class="block text-[11px]" :title="epsPairNote(e)">{{ epsSurplus(e) > 0 ? '+' : '' }}{{ fmtPct(epsSurplus(e)) }}</span>
+              <span v-else-if="epsActual(e) != null && epsEstimate(e) != null" class="block text-[10px]" style="color:var(--text-muted);">预期 {{ fmtNum(epsEstimate(e)) }}</span>
             </button>
             <button v-if="user" type="button" @click="toggleWatchlist(e.symbol, e.market)" class="day-row-action ui-btn ui-btn-ghost shrink-0" :class="isMine(e) ? 'text-amber-400' : ''" :title="isMine(e) ? '从自选移除' : '加入自选'" :aria-label="isMine(e) ? '从自选移除' : '加入自选'">
               {{ isMine(e) ? '★' : '☆' }}

@@ -426,7 +426,37 @@ def init_db():
         # declarations; a pair whose currency or basis changed between the two
         # periods is not comparable, and ``reason`` says why it was withheld.
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS earnings_growth (
+            # ── EPS consensus, provider-native pair (Issue #147) ──────────────────
+    # Why this table exists: the calendar's estimate comes from Longbridge, which
+    # quotes HK names in the *listing* currency (HKD) and US names in USD, possibly
+    # restated; the actual comes from Futu statements in the *reporting* currency
+    # (CNY for a Chinese issuer). Two providers, two currencies, two conventions —
+    # `fiscal.comparison_unavailable_reason` correctly refuses to subtract them, so
+    # every Chinese issuer listed in HK/US showed 「—」 for beat/miss.
+    #
+    # The provider publishes its own EPS consensus *and* its own actual for the same
+    # period in one currency and one unit (per listing unit: per ADS for a US ADR),
+    # so that pair is comparable by construction. Stored per period, not per event,
+    # and only consulted when the row's own pair is blocked.
+    CREATE TABLE IF NOT EXISTS earnings_provider_pairs (
+        symbol          TEXT NOT NULL,
+        market          TEXT NOT NULL,
+        fiscal_year     INTEGER NOT NULL,
+        fiscal_quarter  INTEGER NOT NULL,
+        source          TEXT NOT NULL DEFAULT 'futu',
+        currency        TEXT,
+        eps_consensus   NUMERIC(20, 6),
+        eps_actual      NUMERIC(20, 6),
+        num_analysts    INTEGER,
+        period_type     TEXT,
+        as_of           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (symbol, market, fiscal_year, fiscal_quarter, source)
+    );
+    CREATE INDEX IF NOT EXISTS idx_earnings_provider_pairs_period
+    ON earnings_provider_pairs (fiscal_year, fiscal_quarter);
+
+    CREATE TABLE IF NOT EXISTS earnings_growth (
                 id SERIAL PRIMARY KEY,
                 symbol TEXT NOT NULL,
                 market TEXT NOT NULL,

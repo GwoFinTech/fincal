@@ -708,6 +708,11 @@ def api_export(start: date, end: date, format: Literal["csv", "json"] = "csv", u
             "consensus_eps_adjusted", "consensus_revenue", "consensus_ebit",
             "consensus_net_income", "consensus_normalized_net_income",
             "consensus_fetched_at",
+            # Issue #147: provenance of the EPS pair the beat/miss was computed from,
+            # when it came from the provider's own consensus instead of the row's
+            # estimate/actual columns.
+            "eps_pair_estimate", "eps_pair_actual", "eps_pair_currency",
+            "eps_pair_analysts", "eps_pair_source",
         ]
     writer.writerow(fields)
     for r in data:

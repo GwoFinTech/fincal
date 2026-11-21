@@ -177,6 +177,12 @@ def test_export_csv_headers_include_provenance_and_consensus():
         "consensus_ebit": 12000, "consensus_net_income": 9000,
         "consensus_normalized_net_income": None,
         "consensus_fetched_at": "2026-07-29T00:00:00Z",
+        # Issue #147: the provider-native EPS pair (null on this row — it is only
+        # adopted when the row's own pair is blocked by currency). The export must
+        # carry it either way, because it is part of the EarningItem contract.
+        "eps_pair_estimate": None, "eps_pair_actual": None,
+        "eps_pair_currency": None, "eps_pair_analysts": None,
+        "eps_pair_source": None,
     }]
     with patch.object(db, "db_cursor", lambda: _FakeConn()), \
          patch("app.earnings.fetch_earnings_from_db", return_value=sample):
