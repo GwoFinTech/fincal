@@ -2,7 +2,7 @@
 
 A financial earnings calendar with iCal subscription support.
 
-fincal aggregates earnings report dates from [Longbridge](https://longbridge.com) and [Futu OpenD](https://openapi.futunn.com), predicts future report dates from historical patterns, and lets users manage a personal watchlist with a shareable iCal feed — so earnings dates show up right in your calendar app.
+fincal aggregates earnings report dates from [Longbridge](https://longbridge.com) and the [Futu signed WebAPI](https://openapi.futunn.com), predicts future report dates from historical patterns, and lets users manage a personal watchlist with a shareable iCal feed — so earnings dates show up right in your calendar app.
 
 ## Features
 
@@ -12,7 +12,7 @@ fincal aggregates earnings report dates from [Longbridge](https://longbridge.com
 - **Watchlist** — personal stock list with per-user persistence
 - **iCal Subscription** — one-click `.ics` feed URL for Apple Calendar, Google Calendar, Outlook, etc.
 - **Pluggable Watchlist Source** — read symbols from an external database or any HTTP API ([docs](docs/watchlist-source.md))
-- **Data Sources** — Longbridge CLI (primary) + Futu OpenD (actuals & date confirmation), with automatic fallback
+- **Data Sources** — Longbridge CLI (primary) + Futu signed WebAPI (actuals & date confirmation), with automatic fallback
 
 ## Authentication
 
@@ -118,7 +118,7 @@ access log is ever enabled, keep `/ical/` out of it or apply the same redaction.
 - Docker & Docker Compose
 - PostgreSQL (or use the included `docker-compose.yml` with an external PG instance)
 - [Longbridge CLI](https://github.com/longportapp/openapi-sdk/tree/main/longbridge-cli) (optional, for earnings data sync)
-- [Futu OpenD](https://openapi.futunn.com) (optional, for actual EPS/revenue)
+- [Futu signed WebAPI](https://openapi.futunn.com) credentials (optional; API key + Ed25519 signing key, for actual EPS/revenue)
 
 ### 1. Clone & Configure
 
@@ -150,7 +150,7 @@ The app is now at `https://your-domain`.
 # Sync earnings from Longbridge
 python scripts/sync_earnings.py
 
-# Sync from Futu OpenD (requires Futu OpenD running)
+# Sync from the Futu signed WebAPI (requires FUTU_API_KEY + FUTU_API_SIGN_KEY)
 python scripts/sync_futu.py
 
 # Predict future dates from historical patterns
@@ -305,7 +305,7 @@ and the invariant that both rows of a symbol display the same name.
 
 ```
 ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│  Longbridge  │     │  Futu OpenD  │     │  HTTP API    │
+│  Longbridge  │     │ Futu WebAPI  │     │  HTTP API    │
 │    CLI       │     │              │     │  (watchlist) │
 └──────┬───────┘     └──────┬───────┘     └──────┬───────┘
        │                    │                     │
@@ -364,8 +364,12 @@ All configuration is via environment variables. See [`.env.example`](.env.exampl
 | `KURUMI_API_TIMEOUT` | `5` | Kurumi request timeout (seconds) |
 | `ICAL_BASE_URL` | — | Public URL for iCal feeds |
 | `CALENDAR_FORWARD_DAYS` | `420` | Forward horizon (days) of the iCal feed and the default `/api/earnings` window |
-| `FUTU_HOST` | `127.0.0.1` | Futu OpenD host |
-| `FUTU_PORT` | `11112` | Futu OpenD port |
+| `FUTU_API_KEY` | *(unset)* | Futu WebAPI key (stage skipped when unset) |
+| `FUTU_API_SIGN_KEY` | *(unset)* | Path to the Ed25519 private key the requests are signed with |
+| `FUTU_ENV_FILE` | *(unset)* | Optional dotenv file supplying the two values above |
+| `FUTU_API_BASE` | `https://webapi.futunn.com/api/v1.0/quote` | Signed endpoint base |
+| `FUTU_API_TIMEOUT_SECONDS` | `20` | Per-request HTTP timeout |
+| `FUTU_HTTP_PROXY` | *(unset)* | Optional HTTP forward proxy (`trust_env` is off) |
 | `FUTU_DATES_TIMEOUT_SECONDS` | `15` | Per-symbol earnings-date call watchdog |
 | `FUTU_ACTUALS_TIMEOUT_SECONDS` | `20` | Per-symbol EPS/revenue call watchdog |
 | `SYNC_STAGE_STALE_AFTER_HOURS` | `192` | Sync stage / derived-data staleness threshold (8 days) |
@@ -511,11 +515,12 @@ fiscal year Q4 before Q3").
 
 The Longbridge sync is required. Futu is an optional enrichment source: before
 constructing its client, the script performs a 3-second TCP preflight against
-`FUTU_HOST:FUTU_PORT`. When OpenD is unavailable, the Futu stage is logged as
+`FUTU_API_KEY`/`FUTU_API_SIGN_KEY` (one signed read acts as the preflight). When the
+credential or the route is unavailable, the Futu stage is logged as
 skipped and the Longbridge/prediction stages continue instead of waiting for
-the OpenD client's indefinite reconnect loop.
+the request never becomes a per-symbol failure loop.
 
-Each per-symbol OpenD call is additionally bounded by a wall-clock watchdog
+Each per-symbol WebAPI call is additionally bounded by a wall-clock watchdog
 (`FUTU_DATES_TIMEOUT_SECONDS` / `FUTU_ACTUALS_TIMEOUT_SECONDS`, Issue #48). The
 watchdog raises a catchable `TimeoutError`, so a single wedged symbol is counted
 as a failed symbol and the rest of the batch continues — it no longer kills the
@@ -747,7 +752,7 @@ from inside the container and raises `ACTION REQUIRED (Issue #70)` when
 `KURUMI_API_URL` is unset there or points at FinCal itself.
 
 **Service dependencies vs host tooling (Issue #79).** The probes are split by who
-owns the subject. PostgreSQL, Kurumi, Futu OpenD and sync freshness are things
+owns the subject. PostgreSQL, Kurumi, the Futu WebAPI and sync freshness are things
 *this process* uses, so their verdicts decide the aggregate `status`. The
 Longbridge CLI is not: the pipeline runs it on the **host**
 (`scripts/sync_*.py` under cron) while the image ships only `app/` plus the web
@@ -784,7 +789,7 @@ Run it by hand with `python3 scripts/check_service_health.py`; it is read-only
 - **Frontend:** Vue 3 (vendored prod build, no runtime CDN), single-file HTML SPA
 - **Database:** PostgreSQL 13+
 - **Deployment:** Docker Compose, Traefik v3
-- **Data:** Longbridge CLI, Futu OpenD API
+- **Data:** Longbridge CLI, Futu signed WebAPI
 
 ## License
 
