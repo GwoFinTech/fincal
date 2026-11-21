@@ -151,6 +151,24 @@ class TestCrossCheckTolerance:
     def test_the_tolerance_is_a_tenth_of_a_point(self):
         assert SYNC_FUTU.GROWTH_CROSSCHECK_TOLERANCE_PP == pytest.approx(0.1)
 
+    def test_a_negative_base_is_measured_against_its_magnitude(self):
+        """The provider's convention, pinned with the run that exposed it.
+
+        XPEV FY2026 Q3: prior-year EPS -0.4, this year's -0.9 → the provider says
+        -125% (loss grew by 1.25× the base's magnitude). Dividing by the *signed*
+        base gives +125%, which is how the cross-check first reported 146
+        disagreements that were all the same sign bug.
+        """
+        prior, current = -0.4, -0.9
+        ours = ((current - prior) / abs(prior)) * 100
+        assert ours == pytest.approx(-125.0)
+        assert (current / prior - 1) * 100 == pytest.approx(125.0), (
+            "the signed-base formula is the wrong one; it stays here as the pin")
+
+    def test_the_stage_uses_the_magnitude_convention(self):
+        source = (ROOT / "scripts" / "sync_futu.py").read_text(encoding="utf-8")
+        assert "/ abs(prior_read.value)) * 100" in source
+
     def test_the_callers_count_a_disagreement_against_the_statements(self):
         """The stage compares the provider's ``yoy`` with the two statements' ratio.
 

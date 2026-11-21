@@ -1023,7 +1023,15 @@ def sync_actuals(ctx, run_id: int, symbols: list[str],
                         if read.yoy is None or prior_read is None or not prior_read.value:
                             continue
                         try:
-                            ours = (read.value / prior_read.value - 1) * 100
+                            # Sign convention: growth over a **negative** base is
+                            # measured against its magnitude, exactly like the
+                            # provider and like ``phase3._growth`` — dividing by the
+                            # signed base flips the sign of every loss-making
+                            # quarter (XPEV base -0.4: -125% instead of +125%).
+                            # The first version of this check did that and reported
+                            # 146 false disagreements in one run.
+                            ours = ((read.value - prior_read.value)
+                                    / abs(prior_read.value)) * 100
                         except (TypeError, ZeroDivisionError):
                             continue
                         if abs(ours - read.yoy) > GROWTH_CROSSCHECK_TOLERANCE_PP:
