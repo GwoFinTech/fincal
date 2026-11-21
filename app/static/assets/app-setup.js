@@ -1253,11 +1253,22 @@
       if (value == null || !isFinite(value) || value === 0) return 0;
       return value > 0 ? 1 : -1;
     }
-    function growthTrendMaxAbs(points) {
-      const values = points.flatMap(point => [point.revenue, point.eps])
-        .filter(value => value != null && isFinite(value))
+    // Each row is scaled on its own, and values beyond this cap do not set the
+    // scale: a base-effect quarter (FISV EPS -865% off a near-zero base) would
+    // otherwise shrink every other bar to a hairline. The cap only decides bar
+    // *length*; the number beside the bar is always the real one.
+    const GROWTH_TREND_OUTLIER_CAP = 3; // 300%
+    function growthTrendMaxAbs(points, series) {
+      // `series` ('revenue' | 'eps') scales that row alone; without it both rows
+      // share one scale.
+      const raw = series
+        ? points.map(point => point[series])
+        : points.flatMap(point => [point.revenue, point.eps]);
+      const values = raw.filter(value => value != null && isFinite(value))
         .map(value => Math.abs(value));
-      return values.length ? Math.max(...values) : 0;
+      if (!values.length) return 0;
+      const inRange = values.filter(value => value <= GROWTH_TREND_OUTLIER_CAP);
+      return inRange.length ? Math.max(...inRange) : Math.max(...values);
     }
     function growthBarClass(value) {
       // 涨绿跌红 follows the panel's own convention, and a withheld period is
@@ -1505,7 +1516,7 @@
       hasComparison, comparisonNote, comparisonUnavailable, attributionNote,
       growthValue, growthReason, growthNote, growthCell, growthSuppressedNote,
       growthSourceLabel, growthTrendPoints, growthBarWidth, growthBarDirection,
-      growthTrendMaxAbs, growthBarClass, fqShort,
+      growthTrendMaxAbs, growthBarClass, fqShort, 
       beatMissStreak, beatMissStreakText, beatMissStreakNote,
       metricDelta, fmtNum, fmtPct, signedPct, fmtBigNum,
       revisionPair, revisionDirectionLabel, revisionIsComparable,

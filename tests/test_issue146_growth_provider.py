@@ -279,6 +279,13 @@ const points = fmt.growthTrendPoints(decision);
 const out = {{
   labels: points.map(p => p.label),
   max: fmt.growthTrendMaxAbs(points),
+  revenueScale: fmt.growthTrendMaxAbs(points, 'revenue'),
+  epsScale: fmt.growthTrendMaxAbs(points, 'eps'),
+  outlierScale: fmt.growthTrendMaxAbs(
+    points.concat([{{label: '26Q4', revenue: 0.02, eps: -8.65}}]), 'eps'),
+  outlierWidth: fmt.growthBarWidth(
+    -8.65, fmt.growthTrendMaxAbs(
+      points.concat([{{label: '26Q4', revenue: 0.02, eps: -8.65}}]), 'eps')),
   revenueWidths: points.map(p => fmt.growthBarWidth(p.revenue, fmt.growthTrendMaxAbs(points))),
   directions: points.map(p => fmt.growthBarDirection(p.revenue)),
   classes: points.map(p => fmt.growthBarClass(p.revenue)),
@@ -321,6 +328,19 @@ class TestPanelJs:
         assert result["revenueWidths"][0] == pytest.approx(8.3, abs=0.1)
         assert result["revenueWidths"][2] == 0
         assert result["directions"] == [-1, 1, 0]
+        # Each row is scaled on its own, so a big EPS swing does not flatten revenue.
+        assert result["revenueScale"] == pytest.approx(0.3)
+        assert result["epsScale"] == pytest.approx(0.2)
+
+    def test_an_outlier_does_not_flatten_the_rest_of_the_series(self):
+        """FISV EPS -865% (a near-zero base) used to shrink every bar to a hairline.
+
+        Above ±300% the bar saturates at full half-width and the printed number
+        stays the real one; the scale comes from the values below the cap.
+        """
+        result = _run_probe(DECISION)
+        assert result["outlierScale"] == pytest.approx(0.2)
+        assert result["outlierWidth"] == pytest.approx(50.0)
 
     def test_colours_follow_the_panel_convention(self):
         result = _run_probe(DECISION)
@@ -340,7 +360,9 @@ class TestPageMarkup:
     def test_the_trend_section_and_its_styles_are_shipped(self):
         html = INDEX_HTML.read_text(encoding="utf-8")
         assert "营收 / EPS 同比趋势" in html
-        for needle in ("growthTrendPoints(decision)", "growthTrendMaxAbs",
+        assert "两行各自独立缩放" in html
+        for needle in ("growthTrendPoints(decision)", "growthTrendMaxAbs(growthTrendPoints(decision), "
+                       "series.key)",
                        ".growth-trend {", ".growth-bar-up { background: var(--success); }",
                        ".growth-bar-down { background: var(--destructive); }"):
             assert needle in html, needle

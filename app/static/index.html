@@ -832,7 +832,7 @@
                                + (point.reason ? '｜' + attributionNote(point.reason) : '')">
                     <div class="growth-trend-track">
                       <span :class="['growth-bar', growthBarClass(point[series.key])]"
-                            :style="{width: growthBarWidth(point[series.key], growthTrendMaxAbs(growthTrendPoints(decision))) + '%',
+                            :style="{width: growthBarWidth(point[series.key], growthTrendMaxAbs(growthTrendPoints(decision), series.key)) + '%',
                                      [growthBarDirection(point[series.key]) < 0 ? 'right' : 'left']: '50%'}"></span>
                     </div>
                     <span class="growth-trend-label">{{ point.label }}</span>
@@ -840,7 +840,7 @@
                   </div>
                 </div>
               </div>
-              <p class="mt-2 text-[11px] leading-4" style="color:var(--text-muted);">来源：财报提供方在同一报表行上给出的同比（Revenue / EPS）；基数在悬停时显示。口径（币种或会计准则）在两年之间变化时不给出百分比。</p>
+              <p class="mt-2 text-[11px] leading-4" style="color:var(--text-muted);">来源：财报提供方在同一报表行上给出的同比（Revenue / EPS）；基数在悬停时显示。口径（币种或会计准则）在两年之间变化时不给出百分比。营收与 EPS 两行各自独立缩放，超过 ±300% 的柱子按满格画，旁边的数值仍是真实值。</p>
             </div>
             <div v-if="decision" class="section-title">机构评级与业绩指引</div>
             <div v-if="decision" class="surface p-3 mb-3">
