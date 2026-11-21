@@ -216,7 +216,11 @@ def fetch_earning_with_history(earning_id: int) -> tuple[dict | None, list[dict]
         # (Issues #61/#63/#64), so the history query must carry both sides of it:
         # without estimate_* the row-level rule degrades to currency_unknown and
         # every streak would read as unmatched (Issue #64 §4).
-        cur.execute("SELECT id,fiscal_year,fiscal_quarter,report_date,eps_actual,revenue_actual,eps_estimate,estimate_currency,estimate_basis,estimate_source,actual_currency,actual_basis,actual_source FROM earnings WHERE symbol=%s AND market=%s ORDER BY report_date", (earning["symbol"], earning["market"]))
+        # ``symbol``/``market`` are selected as well as filtered on: the provider-pair
+        # lookup keys on them (Issue #147), and a history row without them silently
+        # matched no pair — the panel then printed 「连续 —（币种不同）」 next to an
+        # EPS surplus it had just computed from that very pair.
+        cur.execute("SELECT id,symbol,market,fiscal_year,fiscal_quarter,report_date,eps_actual,revenue_actual,eps_estimate,estimate_currency,estimate_basis,estimate_source,actual_currency,actual_basis,actual_source FROM earnings WHERE symbol=%s AND market=%s ORDER BY report_date", (earning["symbol"], earning["market"]))
         history = [dict(row) for row in cur.fetchall()]
 
     # One clock for both reads: the row's own ``CURRENT_DATE``, the same day the

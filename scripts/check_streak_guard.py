@@ -42,8 +42,11 @@ from app.universe import popular_stocks  # noqa: E402
 #: ``test_the_acceptance_check_reads_what_the_endpoint_reads`` locks the two
 #: together), because a missing attribution column silently turns the rule into
 #: ``currency_unknown``.
+# ``symbol``/``market`` are part of the endpoint's projection because the
+# provider-pair lookup keys on them (Issue #147); the acceptance check reads the
+# same columns, so the guard keeps comparing like with like.
 HISTORY_COLUMNS = (
-    "id,fiscal_year,fiscal_quarter,report_date,eps_actual,revenue_actual,"
+    "id,symbol,market,fiscal_year,fiscal_quarter,report_date,eps_actual,revenue_actual,"
     "eps_estimate,estimate_currency,estimate_basis,estimate_source,"
     "actual_currency,actual_basis,actual_source"
 )

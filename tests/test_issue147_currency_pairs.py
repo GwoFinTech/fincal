@@ -280,6 +280,50 @@ class TestPanelJs:
         assert out["surplus"] is None and out["comparable"] is False
 
 
+class TestStreakUsesThePair:
+    def _period(self, fy, fq, *, estimate, actual, pair):
+        row = {"id": fy * 10 + fq, "symbol": "0700.HK", "market": "HK",
+               "fiscal_year": fy, "fiscal_quarter": fq,
+               "eps_estimate": estimate, "eps_actual": actual,
+               "estimate_currency": "HKD", "actual_currency": "CNY",
+               "estimate_source": "longbridge", "actual_source": "futu"}
+        if pair:
+            row.update({"eps_pair_estimate": 6.2873, "eps_pair_actual": 6.947,
+                        "eps_pair_currency": "CNY", "eps_pair_analysts": 7,
+                        "eps_pair_source": "futu"})
+        return row
+
+    def test_a_blocked_quarter_counts_as_a_beat_once_it_has_a_pair(self):
+        from app import phase3
+
+        rows = [self._period(2026, 3, estimate=7.3713, actual=7.059, pair=True),
+                self._period(2026, 2, estimate=7.2175, actual=7.0504, pair=True)]
+        streak = phase3._beat_miss_streak(rows, 2026, 3)
+        assert streak["kind"] == "beat" and streak["count"] == 2
+        assert streak["reason"] is None and streak["break_reason"] is None
+
+    def test_without_the_pair_the_same_quarter_is_still_withheld(self):
+        from app import phase3
+
+        rows = [self._period(2026, 3, estimate=7.3713, actual=7.059, pair=False)]
+        streak = phase3._beat_miss_streak(rows, 2026, 3)
+        assert streak["kind"] == "unavailable"
+        assert streak["reason"] == fiscal.COMPARISON_CURRENCY_MISMATCH
+
+    def test_the_history_projection_carries_symbol_and_market(self):
+        """Without them the pair lookup keys on (None, None, …) and silently misses.
+
+        Found in production: the panel printed an EPS surplus from the pair while the
+        streak right below it still said 「连续 —（币种不同）」.
+        """
+        source = (ROOT / "app" / "earnings.py").read_text(encoding="utf-8")
+        query = next(line for line in source.splitlines()
+                     if "FROM earnings WHERE symbol=%s AND market=%s" in line)
+        projection = query.split("SELECT", 1)[1].split(" FROM", 1)[0]
+        fields = {field.strip() for field in projection.split(",")}
+        assert {"symbol", "market", "fiscal_year", "fiscal_quarter"} <= fields
+
+
 class TestReadPathWiring:
     def test_the_single_read_entry_point_attaches_pairs(self):
         source = (ROOT / "app" / "earnings.py").read_text(encoding="utf-8")
