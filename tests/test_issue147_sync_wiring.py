@@ -95,6 +95,30 @@ def test_sync_actuals_writes_the_provider_pairs():
     assert stats.pair_errors == 0
 
 
+def test_a_us_symbol_is_written_in_its_canonical_form():
+    """``BABA.US`` in, ``BABA`` stored — the read path joins on the bare symbol.
+
+    Writing the provider form matched only HK names (their suffix is kept) and left
+    every US row without a pair in production, while the HK ones looked fine.
+    """
+    ctx = MagicMock()
+    ctx.get_financials_statements.return_value = (0, _income_response())
+    ctx.get_financials_estimate.return_value = _estimate_response()
+    cursor = _RecordingCursor()
+    stats = _stats()
+
+    with patch.object(sync_futu, "check_cancelled"), \
+         patch.object(sync_futu, "db_cursor", lambda: cursor), \
+         patch.object(sync_futu, "get_rate_limiter", return_value=_FastLimiter()), \
+         patch.object(sync_futu, "HeartbeatThrottle", _NoHeartbeat):
+        sync_futu.sync_actuals(ctx, 1, ["BABA.US"], stats=stats)
+
+    pairs = [params for sql, params in cursor.executed if "earnings_provider_pairs" in sql]
+    assert pairs, "no pair written for a US symbol"
+    assert pairs[0][0] == "BABA", pairs[0][:2]
+    assert pairs[0][1] == "US"
+
+
 def test_a_raising_estimate_read_is_counted_not_swallowed_silently():
     ctx = MagicMock()
     ctx.get_financials_statements.return_value = (0, _income_response())

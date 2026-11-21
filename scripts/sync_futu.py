@@ -1153,7 +1153,11 @@ def sync_actuals(ctx, run_id: int, symbols: list[str],
             if pair_outcome == OUTCOME_UNSUPPORTED:
                 stats.pair_unsupported += 1
             elif pair_outcome == OUTCOME_OK and pair_rows:
-                flush_provider_pairs(source_symbol, market, pair_rows, stats)
+                # The canonical symbol, not the provider's ``BABA.US`` form: the read
+                # path joins this table on ``earnings.symbol``, which is bare. Writing
+                # the provider form matched only HK names (whose suffix is kept) and
+                # left every US row without a pair.
+                flush_provider_pairs(symbol, market, pair_rows, stats)
         except Exception as e:  # noqa: BLE001 - enrichment must not fail the stage
             # Never silent: a raised exception here is a defect in this hook (a
             # misspelled client, a schema drift), not a provider answer, so it is
