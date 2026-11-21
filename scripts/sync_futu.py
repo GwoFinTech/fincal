@@ -380,11 +380,14 @@ class FutuStageStats:
     #: were not comparable (currency or accounting basis changed).
     growth_rows: int = 0
     growth_incomparable: int = 0
-    #: Provider-native consensus/actual pairs written this run (Issue #147) and
-    #: symbols whose estimate read came back empty/unsupported.
+    #: Provider-native consensus/actual pairs written this run (Issue #147), the
+    #: symbols whose estimate read came back empty/unsupported, and — the counter
+    #: that exists because the first version of this hook was silently broken — how
+    #: many symbols raised instead of answering.
     pair_rows: int = 0
     pair_symbols: int = 0
     pair_unsupported: int = 0
+    pair_errors: int = 0
 
     #: Periods where the provider's own ``yoy`` disagreed with the ratio of the
     #: two statements by more than ``GROWTH_CROSSCHECK_TOLERANCE_PP``. Never
@@ -582,6 +585,10 @@ def futu_audit_details(date_stats: FutuStageStats, actual_stats: FutuStageStats,
         "provider_pairs": actual_stats.pair_rows,
         "provider_pair_symbols": actual_stats.pair_symbols,
         "provider_pair_unsupported": actual_stats.pair_unsupported,
+        # Non-zero means the pair read threw (a wiring bug, not a provider answer) —
+        # the first version passed a name the loop never bound and the broad
+        # `except` made a total outage look like a clean run.
+        "provider_pair_errors": actual_stats.pair_errors,
     }
 
 
@@ -1141,13 +1148,17 @@ def sync_actuals(ctx, run_id: int, symbols: list[str],
         # pair is per-symbol independent of whether the statements landed.
         try:
             pair_rows, pair_outcome = fetch_provider_pairs(
-                client, futu_code, limiter, stats,
+                ctx, futu_code, limiter, stats,
                 timeout_seconds=config.FUTU_ACTUALS_TIMEOUT_SECONDS)
             if pair_outcome == OUTCOME_UNSUPPORTED:
                 stats.pair_unsupported += 1
             elif pair_outcome == OUTCOME_OK and pair_rows:
                 flush_provider_pairs(source_symbol, market, pair_rows, stats)
         except Exception as e:  # noqa: BLE001 - enrichment must not fail the stage
+            # Never silent: a raised exception here is a defect in this hook (a
+            # misspelled client, a schema drift), not a provider answer, so it is
+            # counted into `details` where a run summary shows it.
+            stats.pair_errors += 1
             logger.warning("Provider pairs unavailable for %s: %s", futu_code, e)
 
         if stats.rate_limited:
