@@ -575,10 +575,18 @@ def attach_revenue_pair(row, pair) -> dict:
     return _attach_pair(row, pair, REVENUE_PAIR_FIELDS)
 
 
+#: Sentinels the currency normaliser emits when the provider left the field empty
+#: (``provenance.UNKNOWN_ATTRIBUTION`` is the literal "unknown"). A pair whose currency
+#: is one of these cannot be subtracted: adoption would replace 「—（币种不同）」 with a
+#: percentage computed across an unnamed currency. Production has such pairs (PHUN,
+#: 2600.HK).
+_UNUSABLE_CURRENCIES = (None, "", "unknown", COMPARISON_CURRENCY_UNKNOWN)
+
+
 def _attach_pair(row, pair, prefix_fields) -> dict:
     estimate, actual = pair.get("consensus"), pair.get("actual")
     currency = pair.get("currency")
-    if estimate is None or actual is None or not currency:
+    if estimate is None or actual is None or currency in _UNUSABLE_CURRENCIES:
         return row
     estimate_field, actual_field, currency_field, analysts_field, source_field = prefix_fields
     row[estimate_field] = estimate

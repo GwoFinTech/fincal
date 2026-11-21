@@ -256,6 +256,18 @@ class TestRevenueAdoption:
         assert fiscal.revenue_blocked(blocked) is True
         assert fiscal.revenue_blocked(fiscal.attach_revenue_pair(blocked, REVENUE_PAIR)) is False
 
+    def test_a_pair_whose_currency_is_unknown_is_not_adopted(self):
+        """Production has these (PHUN, 2600.HK): two numbers, no currency.
+
+        Adopting would swap an honest 「—（币种不同）」 for a percentage across an
+        unnamed currency — the one thing this whole path exists to avoid.
+        """
+        row = fiscal.attach_revenue_pair(_row(), dict(REVENUE_PAIR, currency="unknown"))
+        assert fiscal.row_revenue_pair(row) is None
+        assert fiscal.revenue_blocked(row) is True
+        eps_row = fiscal.attach_eps_pair(_row(), dict(REVENUE_PAIR, currency="unknown"))
+        assert fiscal.row_eps_pair(eps_row) is None
+
     def test_a_comparable_row_needs_no_revenue_pair(self):
         row = _row(estimate_currency="CNY")
         assert fiscal.needs_revenue_pair(row) is False
