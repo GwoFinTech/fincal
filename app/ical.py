@@ -1,6 +1,8 @@
 """iCal (.ics) feed generation for user watchlist."""
+import math
 import re
 from datetime import date, datetime, time, timedelta, timezone
+from decimal import ROUND_HALF_UP, Decimal
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
@@ -76,6 +78,10 @@ _LABELS = {
     "date_source": {"en": "Date source", "zh": "日期来源"},
     "eps_estimate": {"en": "EPS Est", "zh": "EPS 预期"},
     "eps_actual": {"en": "EPS Actual", "zh": "EPS 实际"},
+    # Issue #144: the site's comparison table prints revenue in the same row
+    # group as EPS, the feed printed only EPS. Same table, same mechanism.
+    "revenue_estimate": {"en": "Revenue Est", "zh": "营收预期"},
+    "revenue_actual": {"en": "Revenue Actual", "zh": "营收实际"},
     "predicted_warning": {"en": "⚠ Predicted date (not confirmed)",
                           "zh": "⚠ 预测日期（未经确认）"},
     "currency_unknown": {"en": "currency unknown", "zh": "币种未知"},
@@ -177,6 +183,50 @@ def _attributed_amount(label: str, value, currency: str | None,
     placeholder = _label("currency_unknown", title_lang)
     separator = _SEPARATOR.get(title_lang, _SEPARATOR["en"])
     return f"{label}{separator}{value} ({currency or placeholder})"
+
+
+#: The magnitude ladder the site's ``fmtBigNum`` uses (T/B two decimals, M/K one).
+#: Order matters: the first scale the value reaches wins, exactly like
+#: ``bigNumberScale`` in ``app-setup.js``.
+_BIG_NUMBER_LADDER: tuple[tuple[float, str, int], ...] = (
+    (1e12, "T", 2),
+    (1e9, "B", 2),
+    (1e6, "M", 1),
+    (1e3, "K", 1),
+)
+
+
+def _display_big_amount(value) -> str:
+    """Render a revenue figure the way the site does: ``108.98B``, ``3.88B``.
+
+    Issue #144: revenue lives in the same magnitudes as market caps, so the raw
+    column cannot be interpolated into the body — a live row would have printed
+    ``营收预期：108976833310.0 (USD)`` beside the panel's ``108.98B``.  This is the
+    Python side of the one rule ``useFormatters().fmtBigNum`` implements; the
+    parity test runs the *served* JS under node and compares, so the two cannot
+    drift apart silently.
+
+    Below 1e3 the bare number is already readable (the served formatter falls
+    through to ``toLocaleString()`` there), so the stored value is printed as-is
+    rather than being forced into a ``K`` unit the site would never show.
+    """
+    if value in (None, ""):
+        return ""
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if not math.isfinite(amount):
+        return ""
+    abs_value = abs(amount)
+    for scale, suffix, decimals in _BIG_NUMBER_LADDER:
+        if abs_value >= scale:
+            # ``ROUND_HALF_UP`` mirrors ``toFixed``: a value that is exactly half
+            # a unit away rounds away from zero instead of to the even digit.
+            quantum = Decimal(1).scaleb(-decimals)
+            rounded = Decimal(str(amount / scale)).quantize(quantum, rounding=ROUND_HALF_UP)
+            return f"{rounded:.{decimals}f}{suffix}"
+    return f"{amount:,.0f}" if amount.is_integer() else f"{amount:,}"
 
 
 def _event_moment(event: dict) -> datetime | None:
@@ -441,6 +491,24 @@ def generate_ical(earnings: list[dict], user_email: str = "", title_lang: str = 
                       _label("predicted_warning", title_lang) if is_pred else "",
                       _labelled("date_source", date_source, title_lang)
                       if date_source and date_source != "unknown" else "",
+                      # Issue #144: revenue sits above EPS in the site's
+                      # comparison table, so the feed keeps the same row order.
+                      # The magnitude ladder is the site's own (``fmtBigNum``),
+                      # not the raw column: a revenue figure is a market-cap-sized
+                      # number and would otherwise print 11 digits.
+                      _attributed_amount(_label("revenue_estimate", title_lang),
+                                         _display_big_amount(e.get("revenue_estimate")),
+                                         fiscal.declared_attribution(e, "estimate_currency"),
+                                         title_lang),
+                      # Issue #111 applies to revenue exactly as it does to EPS: a
+                      # row that states an actual for a report date still ahead has
+                      # not been disclosed, so the actual line is withheld (the
+                      # STATUS stays TENTATIVE via ``unreleased``).
+                      _attributed_amount(_label("revenue_actual", title_lang),
+                                         None if unreleased
+                                         else _display_big_amount(e.get("revenue_actual")),
+                                         fiscal.declared_attribution(e, "actual_currency"),
+                                         title_lang),
                       _attributed_amount(_label("eps_estimate", title_lang), e.get("eps_estimate"),
                                          fiscal.declared_attribution(e, "estimate_currency"),
                                          title_lang),
