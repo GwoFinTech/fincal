@@ -190,13 +190,22 @@ class FutuDepthTests(TestCase):
         self.assertEqual(config.SYNC_FUTU_LOOKBACK_DAYS, 365, "the scheduled default must not change")
 
     def test_the_statement_depth_comes_from_config(self):
-        """``num`` is one call's parameter, so depth costs no extra API budget."""
+        """``num`` is one call's parameter, so depth costs no extra API budget.
+
+        The default is now 8 (was 4, Issue #146): the old 4 was justified by
+        「deeper periods can only land on ``earnings`` rows that already exist」,
+        which stopped being true when growth got its own table — ``earnings_growth``
+        takes every period the statement returns, and the trend needs a year of
+        year-over-year points. It is still the same single request per symbol, so
+        the reason this guard exists (depth must not become extra API budget)
+        still holds.
+        """
         source = SYNC_FUTU.read_text(encoding="utf-8")
         self.assertIn("num=config.SYNC_FUTU_STATEMENT_PERIODS", source)
         self.assertNotIn("financial_type=9, num=4,", source)
 
         from app import config
-        self.assertEqual(config.SYNC_FUTU_STATEMENT_PERIODS, 4, "the scheduled default must not change")
+        self.assertEqual(config.SYNC_FUTU_STATEMENT_PERIODS, 8, "the scheduled default must not change")
 
     def test_the_longbridge_default_stays_at_the_scheduled_window(self):
         """Only an explicit backfill run deepens the window; the cron path does not."""

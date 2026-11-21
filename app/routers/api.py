@@ -315,7 +315,8 @@ def api_earnings(
 def api_earning_decision(earning_id: int, user=Depends(get_current_user)):
     """Decision-support facts with source-specific unavailable states, never synthetic values."""
     from ..earnings import fetch_earning_with_history
-    from ..phase3 import build_decision_metrics, revision_trend
+    from ..phase3 import (build_decision_metrics, growth_trend,
+                          merge_provider_growth, revision_trend)
 
     ensure_user(user["id"], user["email"], user["name"])
     # Issue #118: the row and its history come from the same read boundary as the
@@ -331,12 +332,31 @@ def api_earning_decision(earning_id: int, user=Depends(get_current_user)):
         rating = cur.fetchone()
         cur.execute("SELECT status,reason,source,checked_at FROM earnings_guidance_status WHERE symbol=%s AND market=%s AND source='longbridge'", (earning["symbol"], earning["market"]))
         guidance = cur.fetchone()
+        # Issue #146: the provider stores period-over-period growth per statement
+        # line, which this app's own history cannot reproduce for ~97% of symbols.
+        # The row for *this* period feeds the panel; the last 8 feed the trend.
+        cur.execute("""
+            SELECT fiscal_year, fiscal_quarter, revenue_yoy, eps_yoy, revenue_qoq, eps_qoq,
+                   revenue_base, eps_base, reason, source
+            FROM earnings_growth
+            WHERE symbol=%s AND market=%s
+            ORDER BY fiscal_year DESC, fiscal_quarter DESC
+            LIMIT 8
+        """, (earning["symbol"], earning["market"]))
+        growth_rows = [dict(row) for row in cur.fetchall()]
+    metrics = build_decision_metrics(history, earning_id)
+    provider_row = next(
+        (row for row in growth_rows
+         if row["fiscal_year"] == earning.get("fiscal_year")
+         and row["fiscal_quarter"] == earning.get("fiscal_quarter")), None)
+    metrics["actual_growth"] = merge_provider_growth(metrics["actual_growth"], provider_row)
     return {
         "status": "available", "revision_trend": revision_trend(snapshots),
         "institution_rating": dict(rating) if rating else {"status": "unavailable", "source": "longbridge"},
         "guidance": dict(guidance) if guidance else {"status": "unavailable", "reason": "longbridge_guidance_endpoint_unavailable", "source": "longbridge"},
-        **build_decision_metrics(history, earning_id),
-        "provenance": {"revision_trend": "earnings_estimate_snapshots / Longbridge finance-calendar", "institution_rating": "Longbridge institution-rating", "actual_growth": "earnings actuals (Longbridge/Futu as recorded); a period pair is only compared when both actuals share a declared currency and basis", "price_reaction": "unavailable: no reliable provider configured", "beat_miss_streak": "earnings actuals + the estimate recorded at the time; a quarter is only counted when its own estimate/actual pair is comparably attributed"},
+        **metrics,
+        "actual_growth_trend": growth_trend(growth_rows),
+        "provenance": {"revision_trend": "earnings_estimate_snapshots / Longbridge finance-calendar", "institution_rating": "Longbridge institution-rating", "actual_growth": "earnings actuals (Longbridge/Futu as recorded); a period pair is only compared when both actuals share a declared currency and basis. Where the provider reports its own yoy/qoq for the statement line (Futu), that figure is shown instead of the recomputed ratio — `actual_growth.source` says which one you are looking at", "actual_growth_trend": "earnings_growth (provider yoy per statement line; a period whose currency or basis changed is withheld with a reason)", "price_reaction": "unavailable: no reliable provider configured", "beat_miss_streak": "earnings actuals + the estimate recorded at the time; a quarter is only counted when its own estimate/actual pair is comparably attributed"},
     }
 
 

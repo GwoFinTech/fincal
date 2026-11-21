@@ -61,6 +61,13 @@ FUTU_STATEMENT_INCOME = 1
 FUTU_REVENUE_LABELS = futu_webapi.REVENUE_LABELS
 FUTU_EPS_LABELS = futu_webapi.EPS_LABELS
 
+#: The provider's ``yoy`` is a percent for income-statement rows. The cross-check
+#: allows this much absolute difference (percentage points) between it and the
+#: ratio of the two statements before the run reports a discrepancy: the provider
+#: rounds its inputs, so exact equality is not a fair bar, while 0.1 pp is far
+#: below any difference that would change a displayed sign or digit.
+GROWTH_CROSSCHECK_TOLERANCE_PP = 0.1
+
 #: SQL list of the sources a new Futu actual may replace (Issue #45, extended by
 #: #62 with the retracted label so a wrong actual stays repairable).  Built from
 #: the shared constant rather than repeated in both UPDATEs; the values are
@@ -369,6 +376,17 @@ class FutuStageStats:
     #: the "all symbols lost their fields" check.
     report_symbols: int = 0
 
+    #: ``earnings_growth`` rows this run wrote / withheld because the two periods
+    #: were not comparable (currency or accounting basis changed).
+    growth_rows: int = 0
+    growth_incomparable: int = 0
+    #: Periods where the provider's own ``yoy`` disagreed with the ratio of the
+    #: two statements by more than ``GROWTH_CROSSCHECK_TOLERANCE_PP``. Never
+    #: stored as a discrepancy — the provider value wins — but every one is
+    #: logged and counted, because the two numbers are computed from the same
+    #: payload and a drift means one of them changed meaning.
+    growth_discrepancies: int = 0
+
     def count_symbol(self, outcome: str) -> None:
         """Count one symbol-level outcome (``ok`` outcomes count nothing)."""
         if outcome == OUTCOME_FAILED:
@@ -545,6 +563,13 @@ def futu_audit_details(date_stats: FutuStageStats, actual_stats: FutuStageStats,
         # expected field ids.  Written even when zero so a provider schema change
         # is visible in the run instead of looking like "no HK actuals exist".
         "actual_missing_fields": len(actual_stats.missing_field_symbols),
+        # Provider growth (percent, income statement rows) and its quality counters:
+        # ``growth_discrepancies`` is the cross-check against the ratio of the two
+        # statements, ``growth_incomparable`` the periods withheld because currency
+        # or accounting basis changed between the pair.
+        "growth_rows": actual_stats.growth_rows,
+        "growth_incomparable": actual_stats.growth_incomparable,
+        "growth_discrepancies": actual_stats.growth_discrepancies,
     }
 
 
@@ -720,6 +745,82 @@ def _upsert_date_rows_individually(cur, rows: list[tuple], stats: FutuStageStats
     return written
 
 
+_GROWTH_UPSERT_SQL = """
+    INSERT INTO earnings_growth
+        (symbol, market, fiscal_year, fiscal_quarter, fiscal_type,
+         revenue_yoy, eps_yoy, revenue_qoq, eps_qoq,
+         revenue_base, eps_base, currency, basis, reason, source, as_of, updated_at)
+    VALUES (%s,%s,%s,%s,%s, %s,%s,%s,%s, %s,%s,%s,%s,%s,'futu',NOW(),NOW())
+    ON CONFLICT (symbol, market, fiscal_year, fiscal_quarter) DO UPDATE SET
+        fiscal_type = EXCLUDED.fiscal_type,
+        revenue_yoy = EXCLUDED.revenue_yoy,
+        eps_yoy = EXCLUDED.eps_yoy,
+        revenue_qoq = EXCLUDED.revenue_qoq,
+        eps_qoq = EXCLUDED.eps_qoq,
+        revenue_base = EXCLUDED.revenue_base,
+        eps_base = EXCLUDED.eps_base,
+        currency = EXCLUDED.currency,
+        basis = EXCLUDED.basis,
+        reason = EXCLUDED.reason,
+        source = EXCLUDED.source,
+        as_of = EXCLUDED.as_of,
+        updated_at = NOW()
+"""
+
+
+def growth_row(symbol: str, market: str, fy: int, fq: int, fiscal_type: int,
+               report: dict, prior: dict | None,
+               revenue, eps) -> tuple:
+    """One ``earnings_growth`` row from a statement (and its prior-year peer).
+
+    The provider's percent is kept as-is. The *base* is the prior-year statement's
+    own value, so a base-effect quarter shows the number it grew from. When the
+    pair's currency or accounting basis differs, the percentages are withheld with
+    a reason: a cross-currency or cross-basis ratio is not a growth rate.
+    """
+    currency = normalize_currency(report.get("currency_code"))
+    basis = normalize_basis(report.get("accounting_standards"))
+    reason = None
+    if prior is not None:
+        prior_currency = normalize_currency(prior.get("currency_code"))
+        prior_basis = normalize_basis(prior.get("accounting_standards"))
+        if prior_currency != currency:
+            reason = "currency_changed"
+        elif prior_basis != basis:
+            reason = "basis_changed"
+    revenue_base = prices = None
+    eps_base = None
+    if prior is not None:
+        revenue_base = read_statement_field(prior, FUTU_REVENUE_LABELS).value
+        eps_base = read_statement_field(prior, FUTU_EPS_LABELS).value
+    keep = reason is None
+    return (
+        symbol, market, fy, fq, fiscal_type,
+        revenue.yoy if keep else None,
+        eps.yoy if keep else None,
+        revenue.qoq if keep else None,
+        eps.qoq if keep else None,
+        revenue_base, eps_base, currency, basis, reason,
+    )
+
+
+def flush_growth_rows(rows: list[tuple], stats: FutuStageStats) -> int:
+    """Upsert growth rows; returns how many were written."""
+    written = 0
+    for row in rows:
+        try:
+            with db_cursor() as cur:
+                cur.execute(_GROWTH_UPSERT_SQL, row)
+            written += 1
+            if row[13]:
+                stats.growth_incomparable += 1
+        except Exception as exc:  # noqa: BLE001 - one bad period must not stop the stage
+            logger.warning("growth row skipped for %s FY%s Q%s: %s",
+                           row[0], row[2], row[3], exc)
+    stats.growth_rows = written
+    return written
+
+
 def sync_earnings_dates(ctx, run_id: int, symbols: list[str],
                         stats: FutuStageStats | None = None) -> FutuStageStats:
     """Fetch earnings calendar dates from the Futu WebAPI, one shared client.
@@ -830,6 +931,7 @@ def sync_actuals(ctx, run_id: int, symbols: list[str],
     # Issue #78: heartbeat the actuals loop as well (the phase-level heartbeat in
     # run_sync() is written once, before the loop starts).
     beats = HeartbeatThrottle()
+    growth_batch: list[tuple] = []
 
     for source_symbol in symbols:
         check_cancelled(run_id)
@@ -852,6 +954,13 @@ def sync_actuals(ctx, run_id: int, symbols: list[str],
             if outcome == OUTCOME_OK and income_data.get("report_list"):
                 stats.report_symbols += 1
                 saw_expected_field = False
+                # Prior-year peers for the growth base: the provider's own ``yoy``
+                # is authoritative, but the base it was taken against comes from
+                # the statement one fiscal year earlier in this same payload.
+                by_period = {
+                    (r.get("fiscal_year"), r.get("financial_type")): r
+                    for r in income_data["report_list"]
+                }
                 for report in income_data["report_list"]:
                     fy = report.get("fiscal_year")
                     ft = report.get("financial_type")
@@ -901,6 +1010,29 @@ def sync_actuals(ctx, run_id: int, symbols: list[str],
                                  revenue.value, currency, basis,
                                  symbol, market, fy, fq),
                             )
+                    # Provider growth for this period, plus the base it grew from.
+                    prior = by_period.get((fy - 1, ft))
+                    growth_batch.append(
+                        growth_row(symbol, market, fy, fq, ft, report, prior, revenue, eps))
+                    for name, read, prior_read in (
+                        ("EPS", eps, read_statement_field(prior, FUTU_EPS_LABELS)
+                         if prior is not None else None),
+                        ("Revenue", revenue, read_statement_field(prior, FUTU_REVENUE_LABELS)
+                         if prior is not None else None),
+                    ):
+                        if read.yoy is None or prior_read is None or not prior_read.value:
+                            continue
+                        try:
+                            ours = (read.value / prior_read.value - 1) * 100
+                        except (TypeError, ZeroDivisionError):
+                            continue
+                        if abs(ours - read.yoy) > GROWTH_CROSSCHECK_TOLERANCE_PP:
+                            stats.growth_discrepancies += 1
+                            logger.warning(
+                                "%s: %s yoy disagreement FY%s Q%s — provider %.4f%% vs "
+                                "statement ratio %.4f%% (base %s)",
+                                futu_code, name, fy, fq, read.yoy, ours, prior_read.value,
+                            )
                 if not saw_expected_field:
                     # Issue #115: the report arrived but carried none of the ids
                     # this market's schema defines.  Nothing was written; say so
@@ -929,11 +1061,18 @@ def sync_actuals(ctx, run_id: int, symbols: list[str],
             )
             break
 
+    # Growth is written after the loop so one slow period cannot lengthen a
+    # symbol's watchdog window; the numbers were fetched in the same request.
+    if growth_batch:
+        flush_growth_rows(growth_batch, stats)
+
     logger.info(
         "Futu actuals synced: %s symbols; %s symbol failures "
-        "(%s unsupported, %s rate limited)",
+        "(%s unsupported, %s rate limited); growth rows %s "
+        "(%s withheld as incomparable, %s provider/statement disagreements)",
         stats.total, stats.failed_symbols, stats.unsupported_symbols,
-        stats.rate_limited_symbols,
+        stats.rate_limited_symbols, stats.growth_rows,
+        stats.growth_incomparable, stats.growth_discrepancies,
     )
     return stats
 

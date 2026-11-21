@@ -537,6 +537,14 @@ export interface components {
             revenue_qoq?: string | null;
             /** Revenue Qoq Reason */
             revenue_qoq_reason?: string | null;
+            /** Source */
+            source?: string | null;
+            /** Provider Reason */
+            provider_reason?: string | null;
+            /** Base */
+            base?: {
+                [key: string]: unknown;
+            } | null;
         };
         /** AppConfig */
         AppConfig: {
@@ -664,6 +672,10 @@ export interface components {
                 [key: string]: unknown;
             } | null;
             actual_growth?: components["schemas"]["ActualGrowth"] | null;
+            /** Actual Growth Trend */
+            actual_growth_trend?: {
+                [key: string]: unknown;
+            } | null;
             beat_miss_streak?: components["schemas"]["BeatMissStreak"] | null;
         } & {
             [key: string]: unknown;

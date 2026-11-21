@@ -173,6 +173,12 @@ class ActualGrowth(BaseModel):
     revenue_yoy_reason: str | None = None
     revenue_qoq: Decimal | None = None
     revenue_qoq_reason: str | None = None
+    # Issue #146: where the numbers above came from, and the base they were taken
+    # against. Declared explicitly because FastAPI's ``response_model`` drops any
+    # field it does not know — the panel asked for a source and got a KeyError.
+    source: str | None = None
+    provider_reason: str | None = None
+    base: dict | None = None
 
 
 class BeatMissPeriod(BaseModel):
@@ -212,6 +218,9 @@ class DecisionResponse(BaseModel):
     # generated TypeScript client types the ratio and its reason instead of
     # treating the whole object as opaque.
     actual_growth: ActualGrowth | None = None
+    # Issue #146: up to 8 stored provider periods of revenue/EPS growth, charted
+    # beside the revision trend. Declared so the client types the points.
+    actual_growth_trend: dict | None = None
     # The streak was the last derived metric the client received untrusted
     # (Issue #64): it is declared here for the same reason as actual_growth.
     beat_miss_streak: BeatMissStreak | None = None

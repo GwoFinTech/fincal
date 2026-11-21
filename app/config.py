@@ -238,10 +238,13 @@ SYNC_FUTU_LOOKBACK_DAYS = int(os.getenv("SYNC_FUTU_LOOKBACK_DAYS", "365"))
 #: Report periods requested from one income-statement call. This is a parameter
 #: of a single call, not extra calls, so raising it costs no API budget — it only
 #: returns older periods (measured 2026-11-12: ``num=12`` gave AAPL 2024/Q1…2026/Q4
-#: and 0700.HK 2015/Q1…2026/Q2). The scheduled sync keeps 4 because the deeper
-#: periods can only land on rows that already exist, and the calendar window is
-#: 180 days; a history backfill pairs this with a deeper dates window.
-SYNC_FUTU_STATEMENT_PERIODS = int(os.getenv("SYNC_FUTU_STATEMENT_PERIODS", "4"))
+#: and 0700.HK 2015/Q1…2026/Q2).
+#:
+#: The scheduled sync asks for 8 (was 4): the growth trend needs a year of
+#: year-over-year points, and every period in the payload also carries the
+#: provider's own ``yoy``/``qoq`` — so 8 periods is what fills
+#: ``earnings_growth`` without a second request per symbol.
+SYNC_FUTU_STATEMENT_PERIODS = int(os.getenv("SYNC_FUTU_STATEMENT_PERIODS", "8"))
 
 # The Longbridge calendar is one CLI call per page and the provider rate-limits
 # per window (error ``429002``). Backfilling years of history is ~1 call per

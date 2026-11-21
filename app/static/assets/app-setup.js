@@ -1202,7 +1202,68 @@
       return (growth && growth[key + '_reason']) || '';
     }
     function growthNote(decision, key) {
-      return attributionNote(growthReason(decision, key), '本期与上期');
+      const reason = growthReason(decision, key);
+      if (reason) return attributionNote(reason, '本期与上期');
+      // Issue #146: the panel may be showing the provider's own yoy instead of a
+      // ratio this app computed, and a percentage over a tiny base is a base
+      // effect rather than a trend. The title therefore carries both the base and
+      // which of the two sources produced the number.
+      const growth = (decision && decision.actual_growth) || {};
+      const base = growth.base && growth.base[key.startsWith('eps') ? 'eps' : 'revenue'];
+      const parts = [];
+      if (base != null) parts.push('基期 ' + (key.startsWith('eps') ? fmtNum(base) : fmtBigNum(base)));
+      parts.push('来源 ' + growthSourceLabel(decision));
+      return parts.join('；');
+    }
+    // 「provider」= 提供方在财报行上自带的同比；「statements」= 本服务用两个期间的实际值算的。
+    function growthSourceLabel(decision) {
+      const source = ((decision && decision.actual_growth) || {}).source;
+      if (source === 'provider') return '财报提供方（同一报表行）';
+      if (source === 'statements') return '本服务按已记录实际值计算';
+      if (source === 'mixed') return '两者混用（提供方缺哪期就用自算补）';
+      return '无';
+    }
+    // ── 同比趋势（Issue #146）─────────────────────────────────────────────
+    // Up to 8 stored provider periods. Only periods with a number are charted; a
+    // withheld period keeps its own label and reason so the gap is visible.
+    function growthTrendPoints(decision) {
+      const trend = decision && decision.actual_growth_trend;
+      if (!trend || !Array.isArray(trend.points)) return [];
+      return trend.points.map(point => ({
+        label: fqShort(point.fiscal_year, point.fiscal_quarter),
+        revenue: point.revenue_yoy == null ? null : Number(point.revenue_yoy),
+        eps: point.eps_yoy == null ? null : Number(point.eps_yoy),
+        revenueBase: point.revenue_base == null ? null : Number(point.revenue_base),
+        epsBase: point.eps_base == null ? null : Number(point.eps_base),
+        reason: point.reason || '',
+      }));
+    }
+    function fqShort(year, quarter) {
+      if (!year || !quarter) return '—';
+      return String(year).slice(2) + 'Q' + quarter;
+    }
+    // Bar length as a percentage of the tallest bar, drawn from a centre axis:
+    // `direction` is -1 (left) / 1 (right) / 0 (no value, nothing drawn).
+    function growthBarWidth(value, maxAbs) {
+      if (value == null || !isFinite(value) || !maxAbs) return 0;
+      const width = Math.min(50, Math.abs(value) / maxAbs * 50);
+      return Math.round(width * 10) / 10;
+    }
+    function growthBarDirection(value) {
+      if (value == null || !isFinite(value) || value === 0) return 0;
+      return value > 0 ? 1 : -1;
+    }
+    function growthTrendMaxAbs(points) {
+      const values = points.flatMap(point => [point.revenue, point.eps])
+        .filter(value => value != null && isFinite(value))
+        .map(value => Math.abs(value));
+      return values.length ? Math.max(...values) : 0;
+    }
+    function growthBarClass(value) {
+      // 涨绿跌红 follows the panel's own convention, and a withheld period is
+      // neutral — never coloured as a fall.
+      if (value == null) return 'growth-bar-empty';
+      return value > 0 ? 'growth-bar-up' : value < 0 ? 'growth-bar-down' : 'growth-bar-flat';
     }
     // Second line of the panel's 实际值 column: the ratio, or "不可比" with the
     // reason on the cell's title — never a percentage for an incomparable pair.
@@ -1443,6 +1504,8 @@
       epsSurplus, epsSurplusClass, revSurplus, revSurplusClass,
       hasComparison, comparisonNote, comparisonUnavailable, attributionNote,
       growthValue, growthReason, growthNote, growthCell, growthSuppressedNote,
+      growthSourceLabel, growthTrendPoints, growthBarWidth, growthBarDirection,
+      growthTrendMaxAbs, growthBarClass, fqShort,
       beatMissStreak, beatMissStreakText, beatMissStreakNote,
       metricDelta, fmtNum, fmtPct, signedPct, fmtBigNum,
       revisionPair, revisionDirectionLabel, revisionIsComparable,

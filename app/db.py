@@ -409,6 +409,49 @@ def init_db():
         cur.execute("""
             CREATE INDEX IF NOT EXISTS idx_earnings_report_date ON earnings(report_date);
         """)
+        # Provider-reported period-over-period growth, one row per fiscal period.
+        #
+        # Why a separate table and not four more ``earnings`` columns: growth is a
+        # property of the *statement*, not of one calendar event, and the panel
+        # needs 8 periods of it for the trend chart — including periods the
+        # calendar holds no row for. Keeping it here also means the hot calendar
+        # read (a date-range scan over the universe) does not pay for it.
+        #
+        # ``*_yoy``/``*_qoq`` are stored as the provider's **percent** values
+        # (income statement rows), never recomputed: a recomputation needs the
+        # prior period to be stored, and only ~3% of symbols have one.
+        # ``*_base`` is the prior-year figure the percent was taken against, so a
+        # base effect (a quarter with a one-off charge) is visible instead of
+        # looking like a trend. ``currency``/``basis`` are the statement's own
+        # declarations; a pair whose currency or basis changed between the two
+        # periods is not comparable, and ``reason`` says why it was withheld.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS earnings_growth (
+                id SERIAL PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                market TEXT NOT NULL,
+                fiscal_year INTEGER NOT NULL,
+                fiscal_quarter INTEGER NOT NULL,
+                fiscal_type INTEGER,
+                revenue_yoy NUMERIC,
+                eps_yoy NUMERIC,
+                revenue_qoq NUMERIC,
+                eps_qoq NUMERIC,
+                revenue_base NUMERIC,
+                eps_base NUMERIC,
+                currency TEXT,
+                basis TEXT,
+                reason TEXT,
+                source TEXT NOT NULL DEFAULT 'futu',
+                as_of TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                UNIQUE(symbol, market, fiscal_year, fiscal_quarter)
+            );
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_earnings_growth_symbol
+                ON earnings_growth(symbol, market, fiscal_year DESC, fiscal_quarter DESC);
+        """)
         # CREATE TABLE does not add fields to installations created by older releases.
         # Issue #61: ``estimate_currency``/``estimate_basis`` existed but were never
         # written by any code path, and the actual side had no columns at all — so a

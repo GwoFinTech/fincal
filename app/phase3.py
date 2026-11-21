@@ -56,6 +56,99 @@ GROWTH_METRICS = (
 )
 
 
+# ── Provider-reported growth (Issue #146) ─────────────────────────────────
+#
+# The growth above is computed from two *stored* periods, so it only exists for a
+# symbol whose prior-year quarter this app happens to hold — measured 348 of 9,758
+# symbols (3.3%). The provider returns ``yoy``/``qoq`` on every statement line,
+# and it equals our own ratio wherever both exist (verified on 7 symbols × 4
+# periods, US/HK, incl. a bank statement), so the stored provider value is used
+# first and the computed one only fills the gaps.
+#
+# Unit boundary: ``earnings_growth`` stores the provider's **percent**
+# (``7.50``), while ``actual_growth`` is a **ratio** (``0.075``) because the
+# panel, the export and the JS formatter all speak ratios. The conversion happens
+# exactly here, once.
+
+PROVIDER_GROWTH_COLUMNS = {
+    "eps_yoy": "eps_yoy",
+    "eps_qoq": "eps_qoq",
+    "revenue_yoy": "revenue_yoy",
+    "revenue_qoq": "revenue_qoq",
+}
+
+PROVIDER_GROWTH_BASES = {"eps": "eps_base", "revenue": "revenue_base"}
+
+
+def merge_provider_growth(growth: dict, provider: dict | None) -> dict:
+    """Layer a stored provider row over the computed growth (provider wins).
+
+    ``*_source`` says which number the panel is showing for that key, and
+    ``*_base`` carries the prior-year figure the provider's percentage was taken
+    against — a base effect (a quarter with a one-off charge) is then visible
+    instead of looking like a trend.
+    """
+    merged = dict(growth)
+    bases = {}
+    for metric, column in PROVIDER_GROWTH_BASES.items():
+        bases[metric] = _float_or_none(provider.get(column)) if provider else None
+    merged["base"] = bases
+    sources = set()
+    for key, _metric, _span in GROWTH_METRICS:
+        column = PROVIDER_GROWTH_COLUMNS[key]
+        percent = _float_or_none(provider.get(column)) if provider else None
+        if percent is not None:
+            merged[key] = percent / 100.0
+            merged[f"{key}_reason"] = None
+            sources.add("provider")
+        elif merged.get(key) is not None:
+            sources.add("statements")
+    merged["provider_reason"] = (provider or {}).get("reason")
+    merged["source"] = ("provider" if sources == {"provider"}
+                        else "statements" if sources == {"statements"}
+                        else "mixed" if sources else "unavailable")
+    return merged
+
+
+def _float_or_none(value):
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def growth_trend(rows, limit: int = 8) -> dict:
+    """Shape the last ``limit`` stored growth periods for the panel's chart.
+
+    Only periods the provider actually reported growth for are returned: a period
+    whose percentage was withheld as incomparable keeps its reason and no number,
+    so the chart cannot draw a bar the panel would refuse to print.
+    """
+    points = []
+    for row in rows or []:
+        if len(points) >= limit:
+            break
+        revenue = _float_or_none(row.get("revenue_yoy"))
+        eps = _float_or_none(row.get("eps_yoy"))
+        if revenue is None and eps is None and not row.get("reason"):
+            continue
+        points.append({
+            "fiscal_year": row.get("fiscal_year"),
+            "fiscal_quarter": row.get("fiscal_quarter"),
+            "revenue_yoy": None if revenue is None else revenue / 100.0,
+            "eps_yoy": None if eps is None else eps / 100.0,
+            "revenue_base": _float_or_none(row.get("revenue_base")),
+            "eps_base": _float_or_none(row.get("eps_base")),
+            "reason": row.get("reason"),
+            "source": row.get("source") or "futu",
+        })
+    points.reverse()
+    return {"status": "available" if len(points) >= 2 else "insufficient_history",
+            "sample_count": len(points), "points": points}
+
+
 def _unavailable_growth() -> dict:
     """Every growth key at ``None``, each paired with its own reason key.
 

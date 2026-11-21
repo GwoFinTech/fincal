@@ -193,6 +193,31 @@
        is the first thing a 390px row can live without. */
     @media (max-width: 639px) { .week-row .week-fq { display: none; } }
 
+    /* ── 营收 / EPS 同比趋势 (Issue #146) ── */
+    /* Eight periods share the row; each column keeps its slot even when the period
+       has no number (no bar), so a comparability gap reads as a gap instead of a
+       shorter history. Bars grow from a centre axis: up = right (green), down =
+       left (red), matching the panel's 涨绿跌红 convention. */
+    .growth-trend { display: flex; gap: 2px; align-items: flex-end; }
+    .growth-trend-col { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; align-items: center; }
+    .growth-trend-track { position: relative; width: 100%; height: 26px; background:
+        linear-gradient(to bottom, transparent calc(50% - 0.5px), var(--border) calc(50% - 0.5px),
+                        var(--border) calc(50% + 0.5px), transparent calc(50% + 0.5px)); }
+    .growth-bar { position: absolute; top: 50%; transform: translateY(-50%); height: 12px; border-radius: 2px; }
+    /* The panel's 涨绿跌红 pair is --success / --destructive (the .beat/.miss cells
+       use the same two), so the bars cannot drift from the numbers they mirror. */
+    .growth-bar-up { background: var(--success); }
+    .growth-bar-down { background: var(--destructive); }
+    .growth-bar-flat { background: var(--text-muted); height: 2px; }
+    .growth-bar-empty { background: transparent; }
+    .growth-trend-label { font-size: 10px; color: var(--text-muted); margin-top: 3px; white-space: nowrap; }
+    .growth-trend-value { font-size: 10px; color: var(--text-muted); white-space: nowrap; }
+    @media (max-width: 639px) {
+      /* 390px: eight columns cannot hold a value label, keep the tick marks. */
+      .growth-trend-value { display: none; }
+      .growth-trend-label { font-size: 9px; }
+    }
+
     /* ── Calendar workspace ── */
     .calendar-workspace { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; align-items: start; }
     .calendar-main { min-width: 0; }
@@ -789,6 +814,33 @@
               </template>
               <p v-else class="text-[12px]" style="color:var(--text-muted);">快照历史不足，暂无法判断修正方向。</p>
               <p class="mt-2 text-[11px] leading-4" style="color:var(--text-muted);">来源：Longbridge 财报日历快照；比较首笔与最新已采集一致预期。</p>
+            </div>
+            <div v-if="decision && growthTrendPoints(decision).length" class="section-title">营收 / EPS 同比趋势</div>
+            <div v-if="decision && growthTrendPoints(decision).length" class="surface p-3 mb-3">
+              <!-- Issue #146: the same number the panel prints above, over 8 periods.
+                   Withheld periods keep their slot (no bar) so a comparability gap
+                   is a visible gap, not a shorter history. -->
+              <div v-for="series in [{key: 'revenue', label: '营收'}, {key: 'eps', label: 'EPS'}]" :key="series.key" class="mb-2">
+                <div class="flex justify-between text-[11px]" style="color:var(--text-muted);">
+                  <span>{{ series.label }}同比</span>
+                </div>
+                <div class="growth-trend">
+                  <div v-for="point in growthTrendPoints(decision)" :key="series.key + point.label"
+                       class="growth-trend-col"
+                       :title="point.label + ' ' + series.label + '同比 ' + fmtPct(point[series.key])
+                               + (point[series.key + 'Base'] != null ? '（基期 ' + fmtBigNum(point[series.key + 'Base']) + '）' : '')
+                               + (point.reason ? '｜' + attributionNote(point.reason) : '')">
+                    <div class="growth-trend-track">
+                      <span :class="['growth-bar', growthBarClass(point[series.key])]"
+                            :style="{width: growthBarWidth(point[series.key], growthTrendMaxAbs(growthTrendPoints(decision))) + '%',
+                                     [growthBarDirection(point[series.key]) < 0 ? 'right' : 'left']: '50%'}"></span>
+                    </div>
+                    <span class="growth-trend-label">{{ point.label }}</span>
+                    <span class="growth-trend-value">{{ point[series.key] == null ? '—' : signedPct(point[series.key]) }}</span>
+                  </div>
+                </div>
+              </div>
+              <p class="mt-2 text-[11px] leading-4" style="color:var(--text-muted);">来源：财报提供方在同一报表行上给出的同比（Revenue / EPS）；基数在悬停时显示。口径（币种或会计准则）在两年之间变化时不给出百分比。</p>
             </div>
             <div v-if="decision" class="section-title">机构评级与业绩指引</div>
             <div v-if="decision" class="surface p-3 mb-3">

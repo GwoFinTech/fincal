@@ -112,15 +112,35 @@ EPS_LABELS = (
 
 @dataclass(frozen=True)
 class StatementField:
-    """One statement value resolved from a labelled item (see module docstring)."""
+    """One statement value resolved from a labelled item (see module docstring).
+
+    ``yoy``/``qoq`` are the provider's own period-over-period changes for that
+    line item, in **percent** for the income-statement rows this module selects
+    (a ratio row such as ``Gross Margin`` reports percentage *points* instead, so
+    callers must not mix statement types). They are carried here rather than
+    recomputed from two periods because the provider has both, and because a
+    recomputation needs a stored prior period this app may not have.
+    """
 
     value: float | None = None
     field_id: int | None = None
     label: str = ""
+    yoy: float | None = None
+    qoq: float | None = None
 
     @property
     def labelled(self) -> bool:
         return bool(self.label)
+
+
+def _as_float(value: Any) -> float | None:
+    """``value`` as a float, or ``None`` — the provider uses null, not 0, for 「no comparison」."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _normalize_label(label: Any) -> str:
@@ -146,8 +166,13 @@ def select_statement_field(report: dict, labels: tuple[str, ...]) -> StatementFi
                 value = float(item["data"])
             except (TypeError, ValueError):
                 continue
-            return StatementField(value=value, field_id=item.get("field_id"),
-                                  label=str(item.get("display_name") or ""))
+            return StatementField(
+                value=value,
+                field_id=item.get("field_id"),
+                label=str(item.get("display_name") or ""),
+                yoy=_as_float(item.get("yoy")),
+                qoq=_as_float(item.get("qoq")),
+            )
     return StatementField()
 
 

@@ -799,9 +799,14 @@ class DecisionGrowthContractTests(TestCase):
         from app.schemas import ActualGrowth, DecisionResponse
 
         self.assertIn("actual_growth", DecisionResponse.model_fields)
+        # Issue #146 added the provenance of those numbers: which source produced
+        # them (`source`), the provider's own withholding reason, and the base each
+        # percentage was taken against. Undeclared keys are dropped by
+        # `response_model`, so this list is the contract the panel can rely on.
         self.assertEqual(set(ActualGrowth.model_fields), {
             "eps_yoy", "eps_yoy_reason", "eps_qoq", "eps_qoq_reason",
             "revenue_yoy", "revenue_yoy_reason", "revenue_qoq", "revenue_qoq_reason",
+            "source", "provider_reason", "base",
         })
 
     def test_the_endpoint_reads_the_attribution_it_judges(self):
