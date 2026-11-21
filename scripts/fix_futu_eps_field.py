@@ -20,22 +20,22 @@ Re-reading the same field cannot repair those values, so the script:
 3. **refills** through the corrected pipeline: ``sync_futu.sync_actuals`` runs for
    exactly the affected symbols under its own ``sync_runs`` row and the Futu
    advisory lock, so the real 基本每股收益 is written under the normal source
-   precedence and ``actual_source`` returns to ``futu`` wherever OpenD answers.
-   Symbols OpenD no longer answers for stay retracted — and stay *replaceable*,
+   precedence and ``actual_source`` returns to ``futu`` wherever the provider answers.
+   Symbols the provider no longer answers for stay retracted — and stay *replaceable*,
    which is why ``futu_invalid_field`` is part of
    ``app.provenance.REPLACEABLE_ACTUAL_SOURCES``.
 
 Only ``--apply`` writes.  ``--verify`` is a read-only production check that
 compares every Futu-sourced ``eps_actual`` with the provider's own
 基本每股收益 (acceptance 1): exit ``0`` when every row matches, ``1`` on a real
-difference, ``2`` when the check could not cover every row (OpenD down, or the
+difference, ``2`` when the check could not cover every row (provider down, or the
 provider refused a symbol) — a quota rejection is reported as unverified, never
 as a data difference.
 
 Usage::
 
     python scripts/fix_futu_eps_field.py                    # dry run (read-only)
-    python scripts/fix_futu_eps_field.py --verify            # read-only OpenD check
+    python scripts/fix_futu_eps_field.py --verify            # read-only provider check
     python scripts/fix_futu_eps_field.py --apply             # retract + refill
     python scripts/fix_futu_eps_field.py --apply --no-refill # retract only
 """
@@ -122,7 +122,7 @@ def retract(ids: list[int]) -> tuple[int, int]:
 
 
 def statement_eps_map(payload: dict) -> dict[tuple[int, int], float]:
-    """Read 基本每股收益 per fiscal period from one OpenD statement response.
+    """Read 基本每股收益 per fiscal period from one provider statement response.
 
     Uses the same field ids and label check as the sync, so a fixture that would
     be refused there is not treated as a reference value here either.
