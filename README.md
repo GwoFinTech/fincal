@@ -11,6 +11,7 @@ fincal aggregates earnings report dates from [Longbridge](https://longbridge.com
 - **Prediction Engine** — predicts future earnings dates by projecting the company's own historical report dates for that quarter onto the target year (nearest to the median month/day expectation, never a weekend the company does not use)
 - **Watchlist** — personal stock list with per-user persistence
 - **iCal Subscription** — one-click `.ics` feed URL for Apple Calendar, Google Calendar, Outlook, etc.
+- **CSV Export** — the calendar toolbar downloads the range on screen (the whole month, or the seven days of the week view) as a UTF-8 CSV, byte for byte what `GET /api/export` returns
 - **Pluggable Watchlist Source** — read symbols from an external database or any HTTP API ([docs](docs/watchlist-source.md))
 - **Data Sources** — Longbridge CLI (primary) + Futu signed WebAPI (actuals & date confirmation), with automatic fallback
 

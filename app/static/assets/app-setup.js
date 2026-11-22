@@ -787,6 +787,105 @@
              updateIcalUrl, copyIcal, openIcal, markScopeChosen };
   }
 
+  // ── useExport: 把屏幕上那段区间导出成 CSV（Issue #150）─────────────
+  // `/api/export` 从 #47 起就在跑（55 列、UTF-8 BOM、attachment 文件名），README
+  // 和系统自选页的文案都承诺了「导出」，但站点上没有任何入口——用户只能自己拼
+  // start/end 再手写带 forwardAuth 会话的请求，等于不存在。
+  //
+  // 导出的是**当前视图显示的区间**，不是日历的数据窗（那个是显示月份 ±1，用来
+  // 让相邻月份的格子有数据）。月视图 = 当月 1 日→月末；周视图 = 那 7 天，锚点
+  // 算法与 `calendarRangeLabel` / `calendarCells` 逐字一致（周日为周首），否则
+  // 导出的日期和用户盯着的那一排格子不是同一段。
+  function exportRange(viewMode, currentDate) {
+    const d = currentDate.value;
+    const year = d.getFullYear();
+    const month = d.getMonth();
+    if (viewMode.value !== 'week') {
+      return { start: localYmd(new Date(year, month, 1)), end: localYmd(new Date(year, month + 1, 0)) };
+    }
+    const dayOfWeek = d.getDay();
+    return {
+      start: localYmd(new Date(year, month, d.getDate() - dayOfWeek)),
+      end: localYmd(new Date(year, month, d.getDate() + (6 - dayOfWeek))),
+    };
+  }
+
+  // 文件名跟随服务端的 `Content-Disposition`：接口自己写着
+  // `fincal-earnings-<start>-<end>.csv`，客户端再拼一份同样的名字迟早会分叉。
+  // 头缺失或浏览器拿不到（反代裁掉）时才按同一规则拼一个。
+  // 手写解析而不是正则：`tests/frontend_contract.mask_code` 按字符串/注释扫源码，
+  // 正则字面量里的引号会被它当成字符串开头，返回值集合就解析歪了。
+  function exportFilename(disposition, start, end) {
+    const fallback = `fincal-earnings-${start}-${end}.csv`;
+    const header = String(disposition || '');
+    const at = header.toLowerCase().indexOf('filename');
+    if (at < 0) return fallback;
+    let raw = header.slice(at + 'filename'.length);
+    if (raw.startsWith('*')) raw = raw.slice(1); // RFC 5987: filename*=UTF-8''…
+    raw = raw.trim();
+    if (raw.startsWith('=')) raw = raw.slice(1).trim();
+    if (raw.startsWith('"')) {
+      const close = raw.indexOf('"', 1);
+      raw = close > 0 ? raw.slice(1, close) : raw.slice(1);
+    } else {
+      const semi = raw.indexOf(';');
+      if (semi >= 0) raw = raw.slice(0, semi);
+      raw = raw.trim();
+    }
+    if (!raw) return fallback;
+    try { return decodeURIComponent(raw); } catch (e) { return raw; }
+  }
+
+  function useExport(viewMode, currentDate, showToast, onUnauthorized) {
+    const exporting = ref(false);
+    const exportRangeLabel = computed(() => {
+      const { start, end } = exportRange(viewMode, currentDate);
+      return start + ' → ' + end;
+    });
+
+    async function downloadExport() {
+      // 双击 / 连点不排队：第二次请求会在第一次的 Blob 落地后再生一个文件。
+      if (exporting.value) return;
+      const { start, end } = exportRange(viewMode, currentDate);
+      exporting.value = true;
+      try {
+        // 不能走 `window.location`：forwardAuth 下未登录会被**导航**到一页 JSON，
+        // 日历连同当前月份一起消失。fetch + Blob 让失败停在一条 toast 里。
+        const res = await fetch(`/api/export?start=${start}&end=${end}&format=csv`);
+        if (res.status === 401) {
+          onUnauthorized();
+          showToast('登录状态已失效，未导出（HTTP 401），请重新登录后重试');
+          return;
+        }
+        if (res.status === 422) {
+          showToast('导出失败：当前区间不被接口接受（HTTP 422）');
+          return;
+        }
+        if (!res.ok) {
+          showToast(`导出失败：HTTP ${res.status}`);
+          return;
+        }
+        const blob = await res.blob();
+        const href = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = href;
+        link.download = exportFilename(res.headers.get('content-disposition'), start, end);
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        // 读取 Blob 是异步的，立刻 revoke 会让部分浏览器落一个空文件。
+        setTimeout(() => URL.revokeObjectURL(href), 1000);
+        showToast(`已导出 ${start} → ${end}`);
+      } catch (e) {
+        showToast('导出失败：' + ((e && e.message) || e));
+      } finally {
+        exporting.value = false;
+      }
+    }
+
+    return { exporting, exportRangeLabel, downloadExport };
+  }
+
   // ── useAdmin: admin panel + managed watchlist ───────────────────
   function useAdmin(apiFetch, showToast) {
     const showAdmin = ref(false);
@@ -1821,6 +1920,11 @@
       // 5. iCal (its default scope follows the watchlist — Issue #109)
       const ical = useIcal(user, wl.watchlist, wl.watchlistLoaded);
 
+      // 5b. CSV export of the displayed range (Issue #150). A 401 clears `user`
+      // like `apiFetch` does, so the button disappears and 登录 comes back
+      // instead of a stale button that keeps failing.
+      const exp = useExport(cal.viewMode, cal.currentDate, showToast, () => { user.value = null; });
+
       // 6. Admin
       const admin = useAdmin(apiFetch, showToast);
 
@@ -2174,6 +2278,9 @@
         // the empty-watchlist hint in the markup reads `watchlistLoaded` too.
         openIcal: ical.openIcal, markScopeChosen: ical.markScopeChosen,
         watchlistLoaded: wl.watchlistLoaded,
+        // CSV export of the displayed range (Issue #150)
+        downloadingExport: exp.exporting, exportRangeLabel: exp.exportRangeLabel,
+        downloadExport: exp.downloadExport,
         // Admin
         showAdmin: admin.showAdmin, adminLoading: admin.adminLoading, adminSource: admin.adminSource,
         managedWatchlist: admin.managedWatchlist, syncRuns: admin.syncRuns, managedForm: admin.managedForm,

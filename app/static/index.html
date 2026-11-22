@@ -333,6 +333,16 @@
         <span v-if="watchlistOnly && watchlist.length === 0" class="text-amber-500 text-[11px]">⚠ 空</span>
       </label>
 
+      <!-- Issue #150: /api/export 早已在跑，站点上却没有入口——说明文案里的
+           「导出」点了没有。按钮导出当前视图的区间（月=当月、周=那 7 天），
+           失败只留一条 toast，不导航。 -->
+      <button v-if="user" @click="downloadExport" :disabled="downloadingExport"
+              :title="'导出 ' + exportRangeLabel + ' 的财报 CSV'"
+              class="ui-btn ui-btn-outline" style="font-size:12px;padding:4px 10px;">
+        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5 5-5M12 4v11"/></svg>
+        {{ downloadingExport ? '导出中…' : '导出 CSV' }}
+      </button>
+
       <button v-if="user" @click="openIcal()" class="ui-btn ui-btn-outline" style="font-size:12px;padding:4px 10px;">
         <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
         订阅日历
