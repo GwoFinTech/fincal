@@ -37,10 +37,14 @@ def test_the_page_lists_the_same_fields_as_the_detail_panel():
     for heading in ("财季", "公布日", "EPS 预期", "EPS 实际", "较预期",
                     "营收预期", "营收实际", "不可比原因"):
         assert heading in html, heading
-    # The values come from the panel's own formatters, not a second rule.
-    for helper in ("fqLabel(row.fiscal_year", "fmtNum(row.eps_estimate)",
-                   "fmtNum(row.eps_actual)", "signedPct(epsSurplus(row))",
-                   "fmtBigNum(row.revenue_estimate)", "comparisonShortNote(row)"):
+    # The values come from the panel's own formatters, not a second rule. The
+    # four numeric cells go through the *pair-aware* accessors (Issue #147/#148):
+    # the raw row fields would print Longbridge's listing-currency estimate next
+    # to a surplus computed from the provider's reporting-currency pair — 0700.HK
+    # 26Q3 read `7.37 → 7.06` beside `+10.5%`.
+    for helper in ("fqLabel(row.fiscal_year", "fmtNum(epsEstimate(row))",
+                   "fmtNum(epsActual(row))", "signedPct(epsSurplus(row))",
+                   "fmtBigNum(revenueEstimate(row))", "comparisonShortNote(row)"):
         assert helper in html, helper
 
 

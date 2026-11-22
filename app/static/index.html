@@ -433,22 +433,25 @@
                 <tr v-for="row in historyPeriods" :key="row.id" class="border-t" style="border-color:var(--border);">
                   <td class="px-4 py-2.5">
                     <div class="font-semibold text-[13px]">{{ fqLabel(row.fiscal_year, row.fiscal_quarter) || '待确认' }}</div>
-                    <div class="text-[10px] text-zinc-500">{{ row.report_type === 'Q' ? '季报' : '年报 / 中报' }}<span v-if="row.is_predicted" class="predicted-tag ml-1" title="算法预测日期">预</span></div>
+                    <div class="text-[10px] text-zinc-500">{{ row.report_type === 'Q' ? '季报' : '年报 / 中报' }}<span v-if="row.is_predicted" class="predicted-tag ml-1" title="算法预测日期">预</span><span v-if="rowCurrencyLabel(row)" class="ccy" :title="'这一行数字的币种：' + rowCurrencyLabel(row)">&nbsp;{{ rowCurrencyLabel(row) }}</span></div>
                   </td>
-                  <td class="px-3 py-2.5 tabular-nums">{{ row.report_date }}</td>
-                  <td class="px-3 py-2.5 text-right tabular-nums">{{ fmtNum(row.eps_estimate) }}</td>
-                  <td class="px-3 py-2.5 text-right tabular-nums">{{ fmtNum(row.eps_actual) }}</td>
-                  <td class="px-3 py-2.5 text-right tabular-nums" :class="epsSurplusClass(row)">{{ signedPct(epsSurplus(row)) }}</td>
-                  <td class="hidden sm:table-cell px-3 py-2.5 text-right tabular-nums">{{ fmtBigNum(row.revenue_estimate) }}</td>
-                  <td class="hidden sm:table-cell px-3 py-2.5 text-right tabular-nums">{{ fmtBigNum(row.revenue_actual) }}</td>
-                  <td class="px-3 py-2.5 text-[11px]" style="color:var(--text-muted);">{{ comparisonShortNote(row) || '—' }}</td>
+                  <td class="px-3 py-2.5 tabular-nums whitespace-nowrap">{{ row.report_date }}</td>
+                  <td class="px-3 py-2.5 text-right tabular-nums" :title="epsPairNote(row)">{{ fmtNum(epsEstimate(row)) }}</td>
+                  <td class="px-3 py-2.5 text-right tabular-nums" :title="epsPairNote(row)">{{ fmtNum(epsActual(row)) }}</td>
+                  <td class="px-3 py-2.5 text-right tabular-nums" :class="epsSurplusClass(row)" :title="epsPairNote(row) || comparisonNote(row)">{{ signedPct(epsSurplus(row)) }}</td>
+                  <td class="hidden sm:table-cell px-3 py-2.5 text-right tabular-nums" :title="revenuePairNote(row)">{{ fmtBigNum(revenueEstimate(row)) }}</td>
+                  <td class="hidden sm:table-cell px-3 py-2.5 text-right tabular-nums" :title="revenuePairNote(row)">{{ fmtBigNum(revenueActual(row)) }}</td>
+                  <!-- The reason explains a 「—」 in 较预期, so a row that HAS a
+                       percentage (from the provider's own pair) leaves it empty:
+                       printing 币种不同 beside a number reads as a contradiction. -->
+                  <td class="px-3 py-2.5 text-[11px]" style="color:var(--text-muted);">{{ epsSurplus(row) == null ? (comparisonShortNote(row) || '—') : '—' }}</td>
                 </tr>
               </tbody>
             </table>
           </div>
         </section>
 
-        <p class="mt-3 text-[11px] leading-4" style="color:var(--text-muted);">「较预期」只在预期与实际都标明币种且相同时计算；币种缺失、两币种不同或双方声明了不同会计口径时显示「—」并在「不可比原因」列出原因（「—」不是数据缺失）。预期来源为 Longbridge 分析师一致预期，不同供应商口径与更新时间可能有偏差；不构成投资建议。</p>
+        <p class="mt-3 text-[11px] leading-4" style="color:var(--text-muted);">「较预期」只在预期与实际都标明币种且相同时计算；币种缺失、两币种不同或双方声明了不同会计口径时显示「—」并在「不可比原因」列出原因（「—」不是数据缺失）。EPS 与营收例外：提供方自带同币种的一对「一致预期 + 实际」时用那一对；这一格算得出来，「不可比原因」便留空——它只解释没算出来的「较预期」。每一行在财季下面标出该行数字的币种；同一家公司的相邻季度可能不是同一种货币（0700.HK 的 26Q3 以人民币报表，其余季度按港币列示），预期与实际不同时写成「预期 → 实际」。预期来源为 Longbridge 分析师一致预期，不同供应商口径与更新时间可能有偏差；不构成投资建议。</p>
       </template>
     </main>
 

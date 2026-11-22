@@ -1651,6 +1651,38 @@
       return fqLabel(e.fiscal_year, e.fiscal_quarter) || '待确认';
     }
 
+    // The currency that belongs beside a value: the pair's when the pair is what
+    // the cell shows (Issue #147/#148), the row's own column otherwise.
+    function cellCurrency(e, metric, side) {
+      const pair = metricPair(e, metric);
+      if (pair) return currencyOf(pair.currency);
+      if (!e) return '';
+      if (side === 'actual') return currencyOf(e.actual_currency);
+      return currencyOf(metric === 'ebit' || metric === 'net_income'
+        ? e.consensus_currency : e.estimate_currency);
+    }
+
+    // One company's quarters do not all share a unit: 0700.HK reports 26Q3 in CNY
+    // while the quarters around it are listed in HKD, so a history table with no
+    // currency header cannot be read without one label per row.  Stated once per
+    // row (under 季报) instead of on all four cells: the same fact, and the table
+    // still fits a 390 px screen.  `预期 → 实际` only when the two sides differ.
+    function rowCurrencyLabel(e) {
+      const estimated = new Set();
+      const actual = new Set();
+      for (const metric of ['eps', 'revenue']) {
+        const estimate = cellCurrency(e, metric, 'estimate');
+        const actualValue = cellCurrency(e, metric, 'actual');
+        if (estimate) estimated.add(estimate);
+        if (actualValue) actual.add(actualValue);
+      }
+      const left = [...estimated].join(' / ');
+      const right = [...actual].join(' / ');
+      if (!left && !right) return '';
+      if (left === right) return left;
+      return (left || '—') + ' → ' + (right || '—');
+    }
+
     return {
       epsSurplus, epsSurplusClass, revSurplus, revSurplusClass,
       epsPair, epsPairNote, epsEstimate, epsActual,
@@ -1658,7 +1690,7 @@
       ebitPair, ebitPairNote, ebitEstimate, ebitActual, ebitSurplus,
       netIncomePair, netIncomePairNote, netIncomeEstimate, netIncomeActual,
       netIncomeSurplus, metricPair, metricEstimate, metricActual, metricSurplus,
-      surplusClass,
+      surplusClass, cellCurrency, rowCurrencyLabel,
       hasComparison, comparisonNote, comparisonUnavailable, attributionNote,
       growthValue, growthReason, growthNote, growthCell, growthSuppressedNote,
       growthSourceLabel, growthTrendPoints, growthBarWidth, growthBarDirection,
