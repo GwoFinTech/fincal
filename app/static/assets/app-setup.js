@@ -1680,7 +1680,12 @@
       const right = [...actual].join(' / ');
       if (!left && !right) return '';
       if (left === right) return left;
-      return (left || '—') + ' → ' + (right || '—');
+      // An arrow means 「这两种货币」, so a row that only has one side states that one.
+      // Seen in production as `— → CNY` on a quarter with no consensus at all and as
+      // `HKD → —` on a forecast with no actual yet: nothing was converted there.
+      if (!left) return right;
+      if (!right) return left;
+      return left + ' → ' + right;
     }
 
     return {

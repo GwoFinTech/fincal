@@ -111,10 +111,12 @@ console.log(JSON.stringify({
   row_only_surplus: (row.eps_actual - row.eps_estimate) / Math.abs(row.eps_estimate),
   blocked_surplus: f.epsSurplus(JSON.parse(process.env.BLOCKED)),
   currencies: {
-    pair_row: f.rowCurrencyLabel(row),
-    plain_row: f.rowCurrencyLabel(JSON.parse(process.env.PLAIN)),
-    blocked_row: f.rowCurrencyLabel(JSON.parse(process.env.BLOCKED)),
-    none_known: f.rowCurrencyLabel({ estimate_currency: 'unknown' }),
+  pair_row: f.rowCurrencyLabel(row),
+  plain_row: f.rowCurrencyLabel(JSON.parse(process.env.PLAIN)),
+  blocked_row: f.rowCurrencyLabel(JSON.parse(process.env.BLOCKED)),
+  none_known: f.rowCurrencyLabel({ estimate_currency: 'unknown' }),
+  estimate_only: f.rowCurrencyLabel({ estimate_currency: 'HKD' }),
+  actual_only: f.rowCurrencyLabel({ actual_currency: 'CNY' }),
   },
 }));
 """
@@ -172,6 +174,11 @@ class TheRowPrintsThePair(TestCase):
         self.assertEqual(currencies["blocked_row"], "USD → CNY")
         # `unknown` is a placeholder, not a currency: print nothing.
         self.assertEqual(currencies["none_known"], "")
+        # An arrow claims two currencies were in play. A forecast with no actual (and a
+        # quarter with no consensus) has only one — production read `HKD → —` and
+        # `— → CNY`, which suggests a conversion that never happened.
+        self.assertEqual(currencies["estimate_only"], "HKD")
+        self.assertEqual(currencies["actual_only"], "CNY")
 
 
 class TheWiring(TestCase):
