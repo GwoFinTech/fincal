@@ -115,8 +115,9 @@ console.log(JSON.stringify({
   plain_row: f.rowCurrencyLabel(JSON.parse(process.env.PLAIN)),
   blocked_row: f.rowCurrencyLabel(JSON.parse(process.env.BLOCKED)),
   none_known: f.rowCurrencyLabel({ estimate_currency: 'unknown' }),
-  estimate_only: f.rowCurrencyLabel({ estimate_currency: 'HKD' }),
-  actual_only: f.rowCurrencyLabel({ actual_currency: 'CNY' }),
+  estimate_only: f.rowCurrencyLabel({ eps_estimate: 1, estimate_currency: 'HKD' }),
+  actual_only: f.rowCurrencyLabel({ eps_actual: 2, actual_currency: 'CNY' }),
+  no_value: f.rowCurrencyLabel({ estimate_currency: 'HKD', actual_currency: 'CNY' }),
   },
 }));
 """
@@ -179,6 +180,9 @@ class TheRowPrintsThePair(TestCase):
         # `— → CNY`, which suggests a conversion that never happened.
         self.assertEqual(currencies["estimate_only"], "HKD")
         self.assertEqual(currencies["actual_only"], "CNY")
+        # A currency beside a 「—」 cell states a unit for a number that is not there;
+        # EBIT's actual would then look like it were in the EPS reporting currency.
+        self.assertEqual(currencies["no_value"], "")
 
 
 class TheWiring(TestCase):

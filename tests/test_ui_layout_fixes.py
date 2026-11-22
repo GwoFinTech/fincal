@@ -112,15 +112,23 @@ def test_every_figure_cell_stays_on_one_line():
 
 # ── 3. the unit is part of the number ──────────────────────────────────────
 
-def test_the_comparison_headers_name_the_currency_of_each_side():
+def test_every_comparison_cell_names_the_currency_it_is_in():
+    """The four metrics can each be in a different currency, so no header can hold it.
+
+    TSM is the standing example: revenue consensus is TWD, EPS consensus is USD. A
+    header that names one unit is wrong for at least one row (0700.HK read
+    「预期值 HKD / 实际值 CNY」 above four CNY pairs), so the unit rides on the cell.
+    """
     html = page()
     section = html[html.index("业绩对比"):html.index("Longbridge 一致预期")]
 
-    assert "selectedEarning.estimate_currency" in section
-    assert "selectedEarning.actual_currency" in section
-    assert "currenciesDiffer(selectedEarning)" in section, (
-        "a mismatch is the reason the comparison is withheld — it must be visible"
-    )
+    for metric in ("revenue", "eps", "ebit", "net_income"):
+        for side in ("estimate", "actual"):
+            assert f"cellCurrency(selectedEarning, '{metric}', '{side}')" in section, (
+                metric, side)
+    # The header must not claim a single unit again.
+    assert "selectedEarning.estimate_currency" not in section
+    assert "selectedEarning.actual_currency" not in section
 
 
 def test_a_currency_mismatch_has_its_own_emphasis():
@@ -147,11 +155,13 @@ def test_the_unknown_sentinel_never_renders_as_a_currency():
     assert "text.toLowerCase() === 'unknown'" in normalizer, (
         "the sync stores the literal 'unknown'; as a unit it is noise, not a currency"
     )
-    html = page()
-    section = html[html.index("业绩对比"):html.index("Longbridge 一致预期")]
-    assert "currencyOf(selectedEarning.estimate_currency) || '—'" in section
-    assert "currencyOf(selectedEarning.actual_currency) || '—'" in section
     assert "currencyOf," in js, "the template can only call exported helpers"
+    # Every currency the panel prints goes through that normalizer, so the sentinel
+    # cannot leak into a cell now that the cells (not the header) carry the unit.
+    helper = js[js.index("function cellCurrency(e, metric, side)"):]
+    helper = helper[:helper.index("\n    function rowCurrencyLabel")]
+    assert "currencyOf(" in helper
+    assert "=== 'unknown'" not in helper  # normalisation lives in one place only
 
 
 # ── 4. the footnote has to describe the rule the code applies ──────────────

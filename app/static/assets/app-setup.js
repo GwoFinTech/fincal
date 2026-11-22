@@ -1654,9 +1654,13 @@
     // The currency that belongs beside a value: the pair's when the pair is what
     // the cell shows (Issue #147/#148), the row's own column otherwise.
     function cellCurrency(e, metric, side) {
-      const pair = metricPair(e, metric);
-      if (pair) return currencyOf(pair.currency);
       if (!e) return '';
+      const pair = metricPair(e, metric);
+      // A 「—」 cell has no unit: printing one beside an empty value is how a reader
+      // ends up assuming EBIT's actual is in the EPS reporting currency.
+      const value = side === 'actual' ? metricActual(e, metric) : metricEstimate(e, metric);
+      if (value == null) return '';
+      if (pair) return currencyOf(pair.currency);
       if (side === 'actual') return currencyOf(e.actual_currency);
       return currencyOf(metric === 'ebit' || metric === 'net_income'
         ? e.consensus_currency : e.estimate_currency);
