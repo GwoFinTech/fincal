@@ -183,7 +183,7 @@ The entrypoint runs the pipeline and then the freshness gate:
    | Stage (`sync_runs.stage`) | Script | Default budget |
    |---|---|---|
    | `longbridge` | `scripts/sync_earnings.py` | 900s |
-   | `futu` | `scripts/sync_futu.py` | 1500s |
+   | `futu` | `scripts/sync_futu.py` | 2100s |
    | `stock_names` | `scripts/sync_stock_names.py` | 900s |
    | `consensus` | `scripts/sync_consensus.py` | 2400s |
    | `prediction` | `scripts/predict_earnings.py` | 600s |
@@ -200,6 +200,16 @@ The entrypoint runs the pipeline and then the freshness gate:
    The shell defaults and `app/config.py::STAGE_TIMEOUT_SECONDS` are the same
    table, and `tests/test_issue78_stage_timeouts.py` fails when one side is
    changed alone.
+
+   When the caller has not set `FUTU_ENV_FILE` and `<app dir>/.env` exists, the
+   pipeline points it at that file (Issue #152). The host scheduler has no
+   `env_file:` (only the container gets one from compose), so without the
+   pointer every weekly `futu` stage recorded `skipped` /
+   `opend_unavailable` while the credentials in `/opt/fincal/.env` were fine.
+   The file is read for its `FUTU_*` keys only — it is never `source`d, because
+   its `DB_HOST` / `KURUMI_API_URL` are container-network names that do not
+   resolve on the host. An explicit `FUTU_ENV_FILE` always wins, and the image
+   (no `.env`) keeps compose as the credential source.
 
    A stage records what it really did (Issue #52, #104). `longbridge` writes
    `status=failed` with `error_code=longbridge_batch_failed` when every batch
