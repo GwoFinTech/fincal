@@ -27,6 +27,23 @@ APP_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 cd "${APP_DIR}"
 export DB_HOST=localhost
 
+# Host-side scheduling entrypoint: the deployed `.env` is the only place the
+# Futu WebAPI credentials live (Issue #152).  The container gets them from
+# `env_file: .env` in compose; a cron run on the host has no such mechanism, so
+# before this line every weekly Futu stage recorded
+# `skipped / opend_unavailable` while the credentials themselves were fine.
+#
+# Point `FUTU_ENV_FILE` at the file and let `app/futu_webapi._env_file_settings()`
+# read just the `FUTU_*` keys out of it.  Deliberately not `source`-ing the
+# file: it is written in container-network dialect (`DB_HOST=host.docker.internal`,
+# `KURUMI_API_URL=http://tsummt-api:8000`) and sourcing it would replace the
+# host-reachable `localhost` defaults above with names that do not resolve here.
+# An explicit FUTU_ENV_FILE in the environment always wins; in the image there is
+# no `.env`, so the variable stays empty and compose keeps supplying the values.
+if [[ -z "${FUTU_ENV_FILE:-}" && -f "${APP_DIR}/.env" ]]; then
+    export FUTU_ENV_FILE="${APP_DIR}/.env"
+fi
+
 # Per-stage wall-clock budget in seconds.  `consensus` is the slowest stage
 # (133 symbols × 3 Longbridge CLI calls with pacing), so it gets the widest
 # budget; a timeout only leaves partial upserts, which are idempotent.
