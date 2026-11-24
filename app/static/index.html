@@ -798,6 +798,12 @@
                   </td></tr>
                 </tbody>
               </table>
+              <!-- Issue #153: the expected column is a snapshot from the weekly
+                   sync, but it looked exactly like a number fetched this morning.
+                   Below the table (before the disclosure paragraph) the row's own
+                   `estimate_as_of` is spelled out as an age; past 8 days the same
+                   line turns warning-coloured and admits the sync has been failing. -->
+              <p v-if="estimateFreshnessNote(selectedEarning.estimate_as_of)" class="px-3 pb-1 text-[11px] leading-4" :style="estimateIsStale(selectedEarning.estimate_as_of) ? 'color:var(--warning);' : 'color:var(--text-muted);'">{{ estimateFreshnessNote(selectedEarning.estimate_as_of) }}</p>
               <p class="px-3 pb-3 text-[11px] leading-4" style="color:var(--text-muted);">预期来源：{{ estimateSourceLabel(selectedEarning) }}。「较预期」需要两侧<strong style="color:var(--text-secondary);">都标明币种且相同</strong>：币种缺失、两币种不同，或双方都声明了会计口径而口径不同时显示「—」（数值仍按各自来源原样列出），避免把不同单位的两个数相减。EPS、营收、EBIT、净利润例外：当提供方自带的「一致预期 + 实际」同币种同口径时，用那一对（悬停可看币种与分析师数）；EBIT 与净利润没有 Longbridge 的实际值，只在提供方给出那一对时才有「较预期」。同比只基于已披露实际值，两侧币种或口径不一致时显示「不可比」（「—」不是数据缺失）。本期与上期的实际值沿用同一规则。</p>
             </div>
 
@@ -813,7 +819,11 @@
               <div class="detail-row"><span class="detail-label">EBIT</span><span class="detail-value">{{ fmtBigNum(selectedEarning.consensus_ebit) }}</span></div>
               <div class="detail-row"><span class="detail-label">净利润</span><span class="detail-value">{{ fmtBigNum(selectedEarning.consensus_net_income) }}</span></div>
               <div class="detail-row"><span class="detail-label">币种</span><span class="detail-value">{{ selectedEarning.consensus_currency || '—' }}</span></div>
-              <div class="detail-row"><span class="detail-label">采集时间</span><span class="detail-value">{{ fmtDateTime(selectedEarning.consensus_fetched_at) }}</span></div>
+              <div class="detail-row"><span class="detail-label">采集时间</span><span class="detail-value">{{ fmtDateTime(selectedEarning.consensus_fetched_at) }}<span v-if="estimateAgeSuffix(selectedEarning.consensus_fetched_at)" :style="estimateIsStale(selectedEarning.consensus_fetched_at) ? 'color:var(--warning);' : 'color:var(--text-muted);'"> {{ estimateAgeSuffix(selectedEarning.consensus_fetched_at) }}</span></span></div>
+              <!-- Issue #153: the block's own timestamp now carries its age, and a
+                   failed weekly sync past the 8-day threshold is stated outright
+                   instead of only in the admin diagnostics pane. -->
+              <p v-if="estimateStaleNote(selectedEarning.consensus_fetched_at)" class="mt-2 text-[11px] leading-4" style="color:var(--warning);">{{ estimateStaleNote(selectedEarning.consensus_fetched_at) }}</p>
               <p class="mt-2 text-[11px] leading-4" style="color:var(--text-muted);">数据来源：Longbridge 季度分析师一致预期；GAAP 与调整后口径不可直接混用。</p>
             </div>
 

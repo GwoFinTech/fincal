@@ -1734,6 +1734,53 @@
       if (e.estimate_source === 'longbridge') return 'Longbridge';
       return '历史来源待确认';
     }
+    // ── 一致预期「多久没更新」（Issue #153）─────────────────────────────
+    // `longbridge` / `consensus` 两个每周同步阶段连续三次失败后，面板上的预期
+    // 仍是三周前的快照，却和当天采集的长得一模一样：只有一个静态时间戳，既没有
+    // 「多久之前」也没有过期样式，而唯一能看出降级的 `/api/admin/health` 只有
+    // 管理员会打开。这里把行上已有的时间戳翻成读者能读出的年龄。
+    // 阈值与后端 `SYNC_STAGE_STALE_AFTER_HOURS`（默认 192h = 8 天）同源，
+    // tests/test_issue153_estimate_freshness.py 钉住两边一致（同 #78 的做法）。
+    const ESTIMATE_STALE_DAYS = 8;
+    // 按日历天算，不按满 24 小时：11-08 21:01 采集的数在 11-24 08:40 读是
+    // 「16 天前」，即使只过了 15 天 11 小时——读者拿日期对，不拿小时数对。
+    // `now` 只为测试注入，模板只传时间戳。
+    function estimateAgeDays(value, now) {
+      if (!value) return null;
+      const then = new Date(value);
+      if (isNaN(then.getTime())) return null;
+      const ref = now instanceof Date ? now : new Date();
+      const startOfDay = d => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+      const days = Math.round((startOfDay(ref) - startOfDay(then)) / 86400000);
+      // 上游时钟稍快时时间戳会落在「未来」：算 0 天，不能说「-1 天前」。
+      return days < 0 ? 0 : days;
+    }
+    function estimateIsStale(value, now) {
+      const days = estimateAgeDays(value, now);
+      return days != null && days >= ESTIMATE_STALE_DAYS;
+    }
+    // 「（16 天前）」。没有时间戳时返回空串——不猜，也不印一个假年龄。
+    function estimateAgeSuffix(value, now) {
+      const days = estimateAgeDays(value, now);
+      return days == null ? '' : '（' + days + ' 天前）';
+    }
+    // 对比表下面那一行小字。阈值以内只是把时间戳换个写法；过期才追加告警，
+    // 否则每次成功同步后都挂一句「可能不是最新的」，读者会学会无视它。
+    function estimateFreshnessNote(value, now) {
+      const days = estimateAgeDays(value, now);
+      if (days == null) return '';
+      const d = new Date(value);
+      const ymd = d.getFullYear() + '/' + (d.getMonth() + 1) + '/' + d.getDate();
+      const note = '预期值采集于 ' + ymd + '（' + days + ' 天前）';
+      if (days < ESTIMATE_STALE_DAYS) return note;
+      return note + '，已 ' + days + ' 天未更新，每周同步近期失败，这个数可能不是最新的';
+    }
+    // 一致预期块尾部独立成行的告警：同一阈值，未过期时返回空串、整行不渲染。
+    function estimateStaleNote(value, now) {
+      const days = estimateAgeDays(value, now);
+      if (days == null || days < ESTIMATE_STALE_DAYS) return '';
+      return '已 ' + days + ' 天未更新：每周同步近期失败，这个数可能不是最新的';
+    }
     function hasLongbridgeConsensus(e) {
       return ['consensus_eps_gaap', 'consensus_eps_adjusted', 'consensus_revenue', 'consensus_ebit', 'consensus_net_income']
         .some(key => e[key] != null);
@@ -1808,6 +1855,8 @@
       revisionPair, revisionDirectionLabel, revisionIsComparable,
       compactSymbol, currenciesDiffer, currencyOf, comparisonShortNote,
       estimateSourceLabel, hasLongbridgeConsensus, fqLabel, periodLabel,
+      estimateAgeDays, estimateIsStale, estimateAgeSuffix,
+      estimateFreshnessNote, estimateStaleNote,
     };
   }
 
