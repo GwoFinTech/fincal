@@ -167,9 +167,14 @@ class CalendarPacingTests(TestCase):
         def fake_run(cmd, **kwargs):
             return _Result(stderr="rate limit exceeded", returncode=1)
 
-        with self.assertRaises(RuntimeError) as ctx:
-            self.mod.fetch_calendar_page("US", "2026-11-01", "2026-11-02",
-                                         interval_seconds=0, max_retries=1, sleep=lambda s: None)
+        # The provider call has to be stubbed: without this patch the case ran the
+        # real ``longbridge`` CLI, so it only "passed" on a host whose quota
+        # happened to refuse — a live API call inside the deploy's test gate.
+        with mock.patch.object(self.mod.subprocess, "run", fake_run):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.mod.fetch_calendar_page("US", "2026-11-01", "2026-11-02",
+                                             interval_seconds=0, max_retries=1,
+                                             sleep=lambda s: None)
         self.assertIn("longbridge_cli_failed", str(ctx.exception))
 
     def test_the_nested_failure_reports_a_fetch_error(self):
