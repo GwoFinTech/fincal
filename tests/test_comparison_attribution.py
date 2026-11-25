@@ -469,8 +469,10 @@ class FeedAndUiTests(TestCase):
     def test_ical_description_labels_each_figure_with_its_currency(self):
         ics = generate_ical([dict(TSM_ROW, report_date=date(2026, 7, 15))])
         flat = self._flat(ics)
-        self.assertIn("EPS Est: 3.94329 (USD)", flat)
-        self.assertIn("EPS Actual: 2.457635 (TWD)", flat)
+        # Issue #154: the body prints the figure the panel prints (fmtNum: two
+        # decimals here), not the raw column's five.
+        self.assertIn("EPS Est: 3.94 (USD)", flat)
+        self.assertIn("EPS Actual: 2.46 (TWD)", flat)
         self.assertIn("Comparability: unavailable (different currencies; currency_mismatch)", flat)
 
     def test_ical_description_marks_an_undeclared_currency(self):

@@ -141,7 +141,11 @@ def test_zh_calendar_name_is_chinese():
 # ── the en body must not move ──────────────────────────────────────────────
 
 def test_en_body_is_byte_identical_to_the_pre_change_wording():
-    """Acceptance 2: the en body is pinned to the exact bytes it always had."""
+    """Acceptance 2: the en body is pinned to the exact bytes it always had.
+
+    The EPS figures read two decimals since #154 (the panel's ``fmtNum``), so a
+    value stored as ``4.0`` now prints ``4.00``; nothing else moved.
+    """
     body = _body(generate_ical([_row()], title_lang="en"))
     assert body == (
         "Company: ASML\n"
@@ -149,7 +153,7 @@ def test_en_body_is_byte_identical_to_the_pre_change_wording():
         "Timing: Pre-market\n"
         "Date source: longbridge\n"
         "EPS Est: 3.34 (USD)\n"
-        "EPS Actual: 4.0 (EUR)\n"
+        "EPS Actual: 4.00 (EUR)\n"
         "Comparability: unavailable (different currencies; currency_mismatch)"
     )
 
@@ -194,4 +198,4 @@ def test_zh_feed_folds_and_parses_with_icalendar():
     parsed = str(events[0]["DESCRIPTION"])
     assert f"公司：{name}" in parsed
     assert "时间：盘后" in parsed
-    assert "EPS 实际：4.0 (EUR)" in parsed
+    assert "EPS 实际：4.00 (EUR)" in parsed

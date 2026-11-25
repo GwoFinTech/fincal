@@ -89,6 +89,13 @@ _LABELS = {
     "after_hours": {"en": "After-hours", "zh": "盘后"},
     "comparability": {"en": "Comparability: unavailable ({wording}; {reason})",
                       "zh": "对比：不可用（{wording}；{reason}）"},
+    # Issue #154: once every printed figure comes from the provider's own pair the
+    # 「不可用」 verdict describes the row's *columns*, not what the body shows.
+    "comparability_provider_pair": {
+        "en": "Comparability: estimate and actual from the same provider, one "
+              "currency ({currency})",
+        "zh": "对比：采用提供方同一币种的一致预期与实际（{currency}）",
+    },
     "open_in_fincal": {"en": "Open in FinCal", "zh": "在 FinCal 打开"},
     "calendar_name": {"en": "FinCal Earnings", "zh": "FinCal 财报日历"},
 }
@@ -227,6 +234,66 @@ def _display_big_amount(value) -> str:
             rounded = Decimal(str(amount / scale)).quantize(quantum, rounding=ROUND_HALF_UP)
             return f"{rounded:.{decimals}f}{suffix}"
     return f"{amount:,.0f}" if amount.is_integer() else f"{amount:,}"
+
+
+def _num_decimals(value: float) -> int:
+    """How many decimals the site's ``numDecimals`` spends on ``value``.
+
+    Two above 0.1, then one more per further decimal place so a sub-cent EPS keeps
+    its significant digits (``-0.015096`` → ``4``), capped at six.
+    """
+    if value == 0 or abs(value) >= 0.1:
+        return 2
+    return min(6, 2 + math.ceil(-math.log10(abs(value))))
+
+
+def _display_eps(value) -> str:
+    """Render an EPS the way the site does: ``7.37``, ``-0.0151`` (Issue #154).
+
+    The body used to interpolate the column, so a subscriber read ``7.371337``
+    beside the panel's ``7.37`` in the same period.  This is the Python side of
+    ``useFormatters().fmtNum``: two decimals, more below 0.1 (Issue #120's rule,
+    which the panel needed for ``-0.00263``).  Rounding follows JavaScript's
+    ``toFixed`` — half away from zero applied to the *binary* value, hence
+    ``Decimal(float)`` (exact) rather than ``Decimal(str(...))``, so the parity
+    test against the served formatter cannot disagree on a tie.
+    """
+    if value in (None, ""):
+        return ""
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if not math.isfinite(amount):
+        return ""
+    decimals = _num_decimals(amount)
+    quantum = Decimal(1).scaleb(-decimals)
+    rounded = Decimal(amount).quantize(quantum, rounding=ROUND_HALF_UP)
+    return f"{rounded:.{decimals}f}"
+
+
+def _provider_pair_note(row, metrics: list[str], title_lang: str = "en") -> str:
+    """The 「对比」 line for a row whose printed figures all come from pairs (#154).
+
+    Says what the subscriber is looking at instead of claiming the row is
+    incomparable: same provider, one currency, and which currency that is.
+    """
+    currencies = fiscal.paired_currencies(row, metrics)
+    currency = "/".join(currencies) if currencies else _label("currency_unknown", title_lang)
+    return _label("comparability_provider_pair", title_lang).format(currency=currency)
+
+
+def _figure(event: dict, metric: str, side: str, unreleased: bool):
+    """The number and declared currency the body prints for one side (Issue #154).
+
+    Pair first, row column second — the panel's own order.  A row whose actual is
+    withheld (#111) keeps its row columns: nothing is comparable yet, and swapping
+    only the estimate's currency would leave the 「币种不同」 note contradicting the
+    figure above it.
+    """
+    use_pair = not unreleased
+    return (fiscal.metric_value(event, metric, side, use_pair=use_pair),
+            fiscal.metric_currency(event, metric, side, use_pair=use_pair))
 
 
 def _event_moment(event: dict) -> datetime | None:
@@ -480,6 +547,14 @@ def generate_ical(earnings: list[dict], user_email: str = "", title_lang: str = 
         # Company names use the cached canonical name; title_lang decides which of
         # the two stored spellings is shown (Issue #55).
         comparison_reason = e.get("comparison_unavailable_reason") or fiscal.comparison_unavailable_reason(e)
+        # Issue #154: every figure below goes through the panel's own rule — the
+        # provider's pair where it was adopted, the row's column otherwise — and the
+        # 「对比」 line follows the figures actually printed, not the row's columns.
+        paired_metrics = None if unreleased else fiscal.paired_figures(e)
+        revenue_estimate, revenue_estimate_currency = _figure(e, fiscal.METRIC_REVENUE, "estimate", unreleased)
+        revenue_actual, revenue_actual_currency = _figure(e, fiscal.METRIC_REVENUE, "actual", unreleased)
+        eps_estimate, eps_estimate_currency = _figure(e, fiscal.METRIC_EPS, "estimate", unreleased)
+        eps_actual, eps_actual_currency = _figure(e, fiscal.METRIC_EPS, "actual", unreleased)
         # Issue #141: where this event lives on the site. Empty when the
         # deployment never declared a public base URL.
         event_url = _event_url(symbol, report_date)
@@ -497,8 +572,8 @@ def generate_ical(earnings: list[dict], user_email: str = "", title_lang: str = 
                       # not the raw column: a revenue figure is a market-cap-sized
                       # number and would otherwise print 11 digits.
                       _attributed_amount(_label("revenue_estimate", title_lang),
-                                         _display_big_amount(e.get("revenue_estimate")),
-                                         fiscal.declared_attribution(e, "estimate_currency"),
+                                         _display_big_amount(revenue_estimate),
+                                         revenue_estimate_currency,
                                          title_lang),
                       # Issue #111 applies to revenue exactly as it does to EPS: a
                       # row that states an actual for a report date still ahead has
@@ -506,17 +581,21 @@ def generate_ical(earnings: list[dict], user_email: str = "", title_lang: str = 
                       # STATUS stays TENTATIVE via ``unreleased``).
                       _attributed_amount(_label("revenue_actual", title_lang),
                                          None if unreleased
-                                         else _display_big_amount(e.get("revenue_actual")),
-                                         fiscal.declared_attribution(e, "actual_currency"),
+                                         else _display_big_amount(revenue_actual),
+                                         revenue_actual_currency,
                                          title_lang),
-                      _attributed_amount(_label("eps_estimate", title_lang), e.get("eps_estimate"),
-                                         fiscal.declared_attribution(e, "estimate_currency"),
+                      _attributed_amount(_label("eps_estimate", title_lang),
+                                         _display_eps(eps_estimate),
+                                         eps_estimate_currency,
                                          title_lang),
                       _attributed_amount(_label("eps_actual", title_lang),
-                                         None if unreleased else e.get("eps_actual"),
-                                         fiscal.declared_attribution(e, "actual_currency"),
+                                         None if unreleased else _display_eps(eps_actual),
+                                         eps_actual_currency,
                                          title_lang),
-                      _comparability_note(comparison_reason, title_lang) if comparison_reason else "",
+                      _provider_pair_note(e, paired_metrics, title_lang)
+                      if paired_metrics and comparison_reason
+                      else _comparability_note(comparison_reason, title_lang) if comparison_reason
+                      else "",
                       _labelled("open_in_fincal", event_url, title_lang) if event_url else ""]
         desc = "\n".join(p for p in desc_parts if p)
 

@@ -275,7 +275,8 @@ class ReadPathTests(TestCase):
         self.assertEqual(ics.count("BEGIN:VEVENT"), 1)   # iCal still emits one event
         # The single event is the surviving row: its date, its reported actual.
         self.assertIn("DTSTART;VALUE=DATE:20260827", ics)
-        self.assertIn("EPS Actual: 0.42703", ics.replace("\r\n ", ""))
+        # Issue #154: two decimals, like the panel's fmtNum.
+        self.assertIn("EPS Actual: 0.43", ics.replace("\r\n ", ""))
 
     def test_growth_uses_the_row_the_user_opened(self):
         """The panel's actual and its growth must come from the same row."""

@@ -149,8 +149,8 @@ class TestDescriptionRevenueLines(TestCase):
     def test_revenue_precedes_eps_like_the_site_table(self):
         """The panel prints 营收 above EPS; the body keeps that order."""
         lines = _lines(generate_ical([_row()], title_lang="zh"))
-        self.assertLess(lines.index("营收预期：108.98B (USD)"), lines.index("EPS 预期：2.49676 (USD)"))
-        self.assertLess(lines.index("营收实际：110.50B (USD)"), lines.index("EPS 实际：2.7 (USD)"))
+        self.assertLess(lines.index("营收预期：108.98B (USD)"), lines.index("EPS 预期：2.50 (USD)"))
+        self.assertLess(lines.index("营收实际：110.50B (USD)"), lines.index("EPS 实际：2.70 (USD)"))
 
     def test_undeclared_currency_is_named_per_language(self):
         zh = _lines(generate_ical(
@@ -179,8 +179,8 @@ class TestDescriptionRevenueLines(TestCase):
             "财季：FY2026 Q3",
             "时间：盘前",
             "日期来源：longbridge",
-            "EPS 预期：2.49676 (USD)",
-            "EPS 实际：2.7 (USD)",
+            "EPS 预期：2.50 (USD)",
+            "EPS 实际：2.70 (USD)",
         ]
         self.assertEqual(lines[:6], expected)
 

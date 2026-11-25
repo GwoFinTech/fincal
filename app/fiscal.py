@@ -701,6 +701,111 @@ def row_net_income_pair(row) -> dict | None:
     return row_metric_pair(row, METRIC_NET_INCOME)
 
 
+# ── Display values: pair first, row columns second (Issue #154) ────────────
+#
+# The panel has read its figures through ``epsPair()``/``revenuePair()`` since
+# #147/#148: where the provider's own pair was adopted, that pair *is* the number
+# the site prints.  The iCal body kept interpolating the row columns, so one
+# period carried two different figures in two outlets — ``7.371337 (HKD)`` in the
+# subscription beside ``7.37 CNY`` in the panel — and 「对比：不可用（币种不同）」
+# for a row whose comparison the site had already computed.  These helpers are the
+# Python side of that one display rule; nothing here decides *whether* to adopt a
+# pair (that stays in :func:`attach_metric_pair`).
+
+#: The row columns a metric's estimate/actual fall back to when no pair exists.
+#: EBIT and net income have no calendar column of their own (only the consensus
+#: ones), which is why their actual side is ``None``.
+_METRIC_ROW_COLUMNS = {
+    METRIC_EPS: ("eps_estimate", "eps_actual"),
+    METRIC_REVENUE: ("revenue_estimate", "revenue_actual"),
+    METRIC_EBIT: ("consensus_ebit", None),
+    METRIC_NET_INCOME: ("consensus_net_income", None),
+}
+
+#: Which attribution column documents each side of the row's own pair.
+_ATTRIBUTION_FIELD = {"estimate": "estimate_currency", "actual": "actual_currency"}
+
+#: The metrics the iCal body prints, in the order the panel's table shows them.
+BODY_METRICS = (METRIC_REVENUE, METRIC_EPS)
+
+
+def metric_pair_values(row, metric: str) -> dict | None:
+    """The adopted provider pair for ``metric``, or ``None``.
+
+    同 ``row_metric_pair``，但名字说明调用方的意图：这是「用来显示的」那一对，
+    不是「行上碰巧有的」字段。Both numbers present is the contract — half a pair is
+    no pair (``_attach_pair`` never writes one).
+    """
+    return row_metric_pair(row, metric)
+
+
+def metric_value(row, metric: str, side: str, use_pair: bool = True):
+    """``estimate``/``actual`` of ``metric`` as the panel shows it (Issue #154).
+
+    Pair first, the row's own column second — exactly ``metricEstimate`` /
+    ``metricActual`` in ``app-setup.js``.  ``use_pair=False`` is for the callers
+    that must keep the row column: a row whose actual is still withheld (#111)
+    has nothing to compare, and mixing the pair's estimate with the row's actual
+    would print two currencies in one sentence.
+    """
+    if side not in _ATTRIBUTION_FIELD:
+        raise ValueError(f"unknown side: {side!r}")
+    if use_pair:
+        pair = metric_pair_values(row, metric)
+        if pair is not None:
+            return pair[side]
+    estimate_field, actual_field = _METRIC_ROW_COLUMNS[metric]
+    return row.get(estimate_field if side == "estimate" else actual_field)
+
+
+def metric_currency(row, metric: str, side: str, use_pair: bool = True) -> str | None:
+    """The currency that belongs to :func:`metric_value`'s number.
+
+    A pair states one currency for both sides; a row column carries its own
+    ``estimate_currency`` / ``actual_currency`` and may legitimately declare none
+    (``None`` then, never the listing's default — Issue #61).
+    """
+    if side not in _ATTRIBUTION_FIELD:
+        raise ValueError(f"unknown side: {side!r}")
+    if use_pair:
+        pair = metric_pair_values(row, metric)
+        if pair is not None:
+            currency = pair.get("currency")
+            return str(currency).upper() if currency else None
+    return declared_attribution(row, _ATTRIBUTION_FIELD[side])
+
+
+def metric_has_figures(row, metric: str) -> bool:
+    """True when ``metric`` has anything to print on this row (pair or column)."""
+    if metric_pair_values(row, metric) is not None:
+        return True
+    estimate_field, actual_field = _METRIC_ROW_COLUMNS[metric]
+    return any(row.get(field) is not None
+               for field in (estimate_field, actual_field) if field)
+
+
+def paired_figures(row, metrics=BODY_METRICS) -> list[str] | None:
+    """The printed metrics that stand entirely on the provider's own pair.
+
+    ``None`` — meaning "do not claim a comparison" — when at least one metric the
+    body prints still reads the row's own columns, or when the row prints nothing.
+    Issue #154: a body that shows the pair's EPS beside the row's cross-currency
+    revenue cannot say 「同一币种」 about the row.
+    """
+    printed = [metric for metric in metrics if metric_has_figures(row, metric)]
+    if not printed:
+        return None
+    if not all(metric_pair_values(row, metric) is not None for metric in printed):
+        return None
+    return printed
+
+
+def paired_currencies(row, metrics) -> list[str]:
+    """Distinct currencies of the pairs behind ``metrics``, sorted for a stable body."""
+    currencies = {metric_currency(row, metric, "estimate") for metric in metrics}
+    return sorted(currency for currency in currencies if currency)
+
+
 # ── Unreleased actuals (Issue #111) ────────────────────────────────────────
 #
 # ``date_status`` answers "has this event been disclosed?".  It used to be derived
