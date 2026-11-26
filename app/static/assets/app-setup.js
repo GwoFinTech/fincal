@@ -1785,8 +1785,20 @@
       return ['consensus_eps_gaap', 'consensus_eps_adjusted', 'consensus_revenue', 'consensus_ebit', 'consensus_net_income']
         .some(key => e[key] != null);
     }
-    function fqLabel(fy, fq) {
-      if (!fy || !fq) return '';
+    // A row's disclosure type decides what the period *is*: Longbridge's annual
+    // ('A') and interim ('H') events carry the whole-year / half-year consensus,
+    // so labelling them "26Q4" put a year's number in a quarter's slot
+    // (Issue #155).  Anything else keeps the quarter label it always had.
+    function disclosureKind(reportType) {
+      if (reportType === 'A') return '年报';
+      if (reportType === 'H') return '中报';
+      return '';
+    }
+    function fqLabel(fy, fq, reportType) {
+      if (!fy) return '';
+      const kind = disclosureKind(reportType);
+      if (kind) return String(fy).slice(-2) + kind;
+      if (!fq) return '';
       return String(fy).slice(-2) + 'Q' + fq;
     }
     // Sub-label of a watchlist "下次财报" cell: the fiscal period when the row
@@ -1794,7 +1806,7 @@
     // Previously an empty insight still rendered "待确认" next to "—".
     function periodLabel(e) {
       if (!e || !e.report_date) return '';
-      return fqLabel(e.fiscal_year, e.fiscal_quarter) || '待确认';
+      return fqLabel(e.fiscal_year, e.fiscal_quarter, e.report_type) || '待确认';
     }
 
     // The currency that belongs beside a value: the pair's when the pair is what

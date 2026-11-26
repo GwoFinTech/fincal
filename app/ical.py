@@ -87,6 +87,10 @@ _LABELS = {
     "currency_unknown": {"en": "currency unknown", "zh": "币种未知"},
     "pre_market": {"en": "Pre-market", "zh": "盘前"},
     "after_hours": {"en": "After-hours", "zh": "盘后"},
+    # Issue #155: an annual ('A') or interim ('H') disclosure carries the
+    # full-year / half-year consensus, so the feed must not call it "Q4".
+    "period_annual": {"en": "Annual", "zh": "年报"},
+    "period_interim": {"en": "Interim", "zh": "中报"},
     "comparability": {"en": "Comparability: unavailable ({wording}; {reason})",
                       "zh": "对比：不可用（{wording}；{reason}）"},
     # Issue #154: once every printed figure comes from the provider's own pair the
@@ -517,7 +521,17 @@ def generate_ical(earnings: list[dict], user_email: str = "", title_lang: str = 
             hour_start, hour_end = None, None
             time_label = ""
 
-        fq_str = f"Q{fq}" if fq else ""
+        # Issue #155: the period word follows the row's own disclosure type.  An
+        # annual / interim event carries the whole-year / half-year consensus, so
+        # "Q4" put a year's number in a quarter's slot; the UID keeps its fiscal
+        # key (a new UID would recreate every subscriber's copy, Issue #40).
+        period_key = {"A": "period_annual", "H": "period_interim"}.get(report_type)
+        if period_key:
+            fq_str = _label(period_key, title_lang)
+        elif fq:
+            fq_str = f"Q{fq}"
+        else:
+            fq_str = ""
         is_pred = e.get("is_predicted", False)
         # Issue #111: a row that states an actual for a report date still ahead has
         # not been disclosed, whatever its stored ``date_status`` says.  It must not
@@ -542,7 +556,10 @@ def generate_ical(earnings: list[dict], user_email: str = "", title_lang: str = 
             summary_parts.append(str(company))
         if fq_str:
             summary_parts.append(fq_str)
-        summary_parts.append("财报" if title_lang == "zh" else "Earnings")
+        # 「年报」 already ends in 报; the English pair still reads as
+        # "Annual Earnings", so only the Chinese feed drops the extra word.
+        if not (period_key and title_lang == "zh"):
+            summary_parts.append("财报" if title_lang == "zh" else "Earnings")
         summary = " ".join(summary_parts) + source_tag
         # Company names use the cached canonical name; title_lang decides which of
         # the two stored spellings is shown (Issue #55).

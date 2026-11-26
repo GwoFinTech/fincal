@@ -442,8 +442,8 @@
               <tbody>
                 <tr v-for="row in historyPeriods" :key="row.id" class="border-t" style="border-color:var(--border);">
                   <td class="px-4 py-2.5">
-                    <div class="font-semibold text-[13px]">{{ fqLabel(row.fiscal_year, row.fiscal_quarter) || '待确认' }}</div>
-                    <div class="text-[10px] text-zinc-500">{{ row.report_type === 'Q' ? '季报' : '年报 / 中报' }}<span v-if="row.is_predicted" class="predicted-tag ml-1" title="算法预测日期">预</span><span v-if="rowCurrencyLabel(row)" class="ccy" :title="'这一行数字的币种：' + rowCurrencyLabel(row)">&nbsp;{{ rowCurrencyLabel(row) }}</span></div>
+                    <div class="font-semibold text-[13px]">{{ fqLabel(row.fiscal_year, row.fiscal_quarter, row.report_type) || '待确认' }}</div>
+                    <div class="text-[10px] text-zinc-500">{{ row.report_type === 'Q' ? '季报' : '' }}<span v-if="row.is_predicted" class="predicted-tag ml-1" title="算法预测日期">预</span><span v-if="rowCurrencyLabel(row)" class="ccy" :title="'这一行数字的币种：' + rowCurrencyLabel(row)">&nbsp;{{ rowCurrencyLabel(row) }}</span></div>
                   </td>
                   <td class="px-3 py-2.5 tabular-nums whitespace-nowrap">{{ row.report_date }}</td>
                   <td class="px-3 py-2.5 text-right tabular-nums" :title="epsPairNote(row)">{{ fmtNum(epsEstimate(row)) }}</td>
@@ -692,7 +692,7 @@
                 <span v-if="e.before_after === 'before'" class="before-tag">盘前</span>
                 <span v-else-if="e.before_after === 'after'" class="after-tag">盘后</span>
                 <span class="sym-full">{{ e.symbol }}</span><span class="sym-short">{{ compactSymbol(e.symbol) }}</span>
-                <span v-if="e.fiscal_year && e.fiscal_quarter" class="fq-tag">{{ fqLabel(e.fiscal_year, e.fiscal_quarter) }}</span>
+                <span v-if="fqLabel(e.fiscal_year, e.fiscal_quarter, e.report_type)" class="fq-tag">{{ fqLabel(e.fiscal_year, e.fiscal_quarter, e.report_type) }}</span>
                 <template v-if="hasComparison(e, 'eps')">
                   <span :class="epsSurplusClass(e)" style="font-size:9px;">{{ epsSurplus(e) > 0 ? '↑' : epsSurplus(e) < 0 ? '↓' : '—' }}</span>
                 </template>
@@ -729,7 +729,7 @@
                 </button>
                 <span class="text-lg font-bold text-zinc-100">{{ selectedEarning.symbol }}</span>
                 <span class="badge" :class="'badge-' + selectedEarning.market" style="font-size:10px;">{{ selectedEarning.market }}</span>
-                <span v-if="selectedEarning.fiscal_year && selectedEarning.fiscal_quarter" class="text-[11px] font-medium" style="color:var(--text-muted);">{{ fqLabel(selectedEarning.fiscal_year, selectedEarning.fiscal_quarter) }}</span>
+                <span v-if="fqLabel(selectedEarning.fiscal_year, selectedEarning.fiscal_quarter, selectedEarning.report_type)" class="text-[11px] font-medium" style="color:var(--text-muted);">{{ fqLabel(selectedEarning.fiscal_year, selectedEarning.fiscal_quarter, selectedEarning.report_type) }}</span>
                 <span v-if="selectedEarning.is_predicted" class="predicted-tag">预测</span>
               </div>
               <button v-if="user" @click="toggleWatchlist(selectedEarning.symbol, selectedEarning.market)" class="ui-btn ui-btn-outline" :class="isMine(selectedEarning) ? 'text-amber-400' : ''" style="padding:4px 10px;font-size:12px;" :title="isMine(selectedEarning) ? '从自选移除' : '加入自选'" aria-label="切换自选">
@@ -756,7 +756,7 @@
               </div>
               <div class="detail-row" v-if="selectedEarning.fiscal_year">
                 <span class="detail-label">财季</span>
-                <span class="detail-value">{{ fqLabel(selectedEarning.fiscal_year, selectedEarning.fiscal_quarter) }}</span>
+                <span class="detail-value">{{ fqLabel(selectedEarning.fiscal_year, selectedEarning.fiscal_quarter, selectedEarning.report_type) }}</span>
               </div>
               <p v-if="selectedEarning.is_predicted" class="mt-2 text-[11px] leading-4" style="color:var(--text-muted);">日期预测：基于历史财报发布日期推算，实际公告时间可能调整。</p>
             </div>
@@ -910,7 +910,7 @@
                 <span class="flex items-center gap-1.5">
                   <span class="text-[13px] font-semibold text-zinc-200">{{ e.symbol }}</span>
                   <span class="badge" :class="'badge-' + e.market" style="font-size:9px;padding:0 4px;">{{ e.market }}</span>
-                  <span v-if="e.fiscal_year && e.fiscal_quarter" class="fq-tag">{{ fqLabel(e.fiscal_year, e.fiscal_quarter) }}</span>
+                  <span v-if="fqLabel(e.fiscal_year, e.fiscal_quarter, e.report_type)" class="fq-tag">{{ fqLabel(e.fiscal_year, e.fiscal_quarter, e.report_type) }}</span>
                   <span v-if="e.before_after === 'before'" class="before-tag">盘前</span>
                   <span v-else-if="e.before_after === 'after'" class="after-tag">盘后</span>
                   <span v-if="e.is_predicted" class="predicted-tag">预测</span>
