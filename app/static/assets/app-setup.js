@@ -1785,6 +1785,17 @@
       return ['consensus_eps_gaap', 'consensus_eps_adjusted', 'consensus_revenue', 'consensus_ebit', 'consensus_net_income']
         .some(key => e[key] != null);
     }
+    // Issue #156: an annual ('A') / interim ('H') row carries the whole-year /
+    // half-year figures, while `earnings_consensus` is keyed by fiscal quarter
+    // (the provider publishes it as quarterly).  The read boundary now attaches
+    // it to quarterly releases only, so on a disclosure row the block is empty —
+    // say why it is not here instead of letting it disappear without a word.
+    function disclosureConsensusNote(e) {
+      const kind = e ? disclosureKind(e.report_type) : '';
+      if (!kind) return '';
+      return '本次为' + kind + '披露；Longbridge 的一致预期按财季发布，期间口径与本次'
+        + kind + '不同，故不在此列出。';
+    }
     // A row's disclosure type decides what the period *is*: Longbridge's annual
     // ('A') and interim ('H') events carry the whole-year / half-year consensus,
     // so labelling them "26Q4" put a year's number in a quarter's slot
@@ -1866,7 +1877,8 @@
       metricDelta, fmtNum, fmtPct, signedPct, fmtBigNum,
       revisionPair, revisionDirectionLabel, revisionIsComparable,
       compactSymbol, currenciesDiffer, currencyOf, comparisonShortNote,
-      estimateSourceLabel, hasLongbridgeConsensus, fqLabel, periodLabel,
+      estimateSourceLabel, hasLongbridgeConsensus, disclosureConsensusNote,
+      fqLabel, periodLabel,
       estimateAgeDays, estimateIsStale, estimateAgeSuffix,
       estimateFreshnessNote, estimateStaleNote,
     };

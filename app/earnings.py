@@ -59,6 +59,14 @@ def fetch_earnings_from_db(
             params.extend(markets)
 
         where = " AND ".join(conditions)
+        # Issue #156: ``earnings_consensus`` is keyed by *fiscal quarter*, while an
+        # annual ('A') / interim ('H') row carries the provider's whole-year /
+        # half-year figures on the same ``(fiscal_year, fiscal_quarter)`` — a
+        # calendar annual result is stored under quarter 4.  Joining without the
+        # disclosure type put the quarter's consensus (revenue ÷ event revenue
+        # ≈ 27%, net income ÷ annual revenue ≈ 3%) beside the year's numbers in
+        # the panel's 「业绩对比」 table and in both exports.  A quarterly release
+        # is the only row whose consensus is the same period as its own figures.
         cur.execute(
             f"""SELECT e.*, CURRENT_DATE AS read_today,
                    sn.company_name AS stock_names_company_name,
@@ -69,6 +77,7 @@ def fetch_earnings_from_db(
                    c.normalized_net_income AS consensus_normalized_net_income, c.fetched_at AS consensus_fetched_at
             FROM earnings e LEFT JOIN earnings_consensus c ON c.symbol=e.symbol AND c.market=e.market
               AND c.fiscal_year=e.fiscal_year AND c.fiscal_quarter=e.fiscal_quarter AND c.source='longbridge'
+              AND e.report_type='Q'
             LEFT JOIN stock_names sn ON sn.symbol=e.symbol AND sn.market=e.market
             WHERE {where} ORDER BY e.report_date, e.market, e.symbol""",
             params,
@@ -176,9 +185,15 @@ def attach_provider_pairs(rows) -> list[dict]:
     """
     from . import fiscal
 
+    # Issue #156, same root cause as the consensus join: ``earnings_provider_metrics``
+    # is keyed by fiscal quarter and the provider publishes it as ``QUARTERLY``
+    # only, so a pair must never land on an annual / interim row whose own figures
+    # are the whole year / half year.  No A or H row hits this today (0 adoptions
+    # in production), which is why it is a threshold rather than a repair.
     candidates = [row for row in rows
-                  if any(fiscal.needs_metric_pair(row, metric)
-                         for metric in fiscal.PROVIDER_METRIC_PREFIX)]
+                  if not fiscal.is_disclosure(row.get("report_type"))
+                  and any(fiscal.needs_metric_pair(row, metric)
+                          for metric in fiscal.PROVIDER_METRIC_PREFIX)]
     if not candidates:
         return rows
     pairs = load_provider_pairs([

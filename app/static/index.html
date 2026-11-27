@@ -827,6 +827,21 @@
               <p class="mt-2 text-[11px] leading-4" style="color:var(--text-muted);">数据来源：Longbridge 季度分析师一致预期；GAAP 与调整后口径不可直接混用。</p>
             </div>
 
+            <!-- Issue #156: an annual / interim row carries the whole-year / half-year
+                 figures while `earnings_consensus` is keyed by fiscal quarter, so the
+                 read boundary attaches it to quarterly releases only.  The block used
+                 to vanish from a disclosure's panel without a word — the same reader
+                 had just seen it on the neighbouring quarter. -->
+            <template v-if="disclosureConsensusNote(selectedEarning)">
+              <div class="section-title flex items-center gap-1.5">
+                <svg class="w-3.5 h-3.5" style="color:var(--text-muted);" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 19V5m0 14h16M8 16v-5m4 5V8m4 8v-3"/></svg>
+                Longbridge 一致预期
+              </div>
+              <div class="surface p-3 mb-3">
+                <p class="text-[12px] leading-5" style="color:var(--text-muted);">{{ disclosureConsensusNote(selectedEarning) }}</p>
+              </div>
+            </template>
+
             <div v-if="decision" class="section-title">财报决策指标</div>
             <div v-if="decision" class="surface p-3 mb-3">
               <div class="detail-row"><span class="detail-label">EPS 同比 / 环比（实际）</span><span class="detail-value" :title="growthNote(decision, 'eps_yoy') || growthNote(decision, 'eps_qoq')">{{ fmtPct(growthValue(decision, 'eps_yoy')) }} / {{ fmtPct(growthValue(decision, 'eps_qoq')) }}</span></div>
