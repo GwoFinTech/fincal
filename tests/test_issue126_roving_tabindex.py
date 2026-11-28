@@ -65,6 +65,17 @@ const initial = {
   anchor: anchorKey(),
 };
 
+// The no-selection anchor is *today* whenever today is in the displayed month, and
+// in the month's last row an ArrowDown steps past the rendered window and moves the
+// view to the next month (e.g. on 2026-11-29, ArrowRight → 11-30, ArrowDown →
+// 12-07). That is correct navigation, but it made every assertion below depend on
+// the calendar day the suite runs: on 11-28 the same keys stayed in November. Seed
+// an explicit mid-month day so the keys are measured against a fixed window; the
+// today-anchored value above is still what `initial` records.
+const seed = cells().find(c => localYmd(c.date) === '2026-11-10');
+cal.selectCell(seed);
+const seeded = anchorKey();
+
 // ArrowRight / ArrowDown / ArrowLeft move the single stop by 1 / 7 / back.
 cal.handleGridKey('ArrowRight');
 const afterRight = anchorKey();
@@ -111,7 +122,7 @@ const enterHandled = cal.handleGridKey('Enter');
 const letterHandled = cal.handleGridKey('a');
 
 console.log(JSON.stringify({
-  initial, afterRight, afterDown, afterBack, afterHome, afterEnd,
+  initial, seeded, afterRight, afterDown, afterBack, afterHome, afterEnd,
   home_weekday: homeWeekday, end_weekday: endWeekday,
   stops_after_keys: stopsAfterKeys,
   afterPageDown, month_after_page_down: monthAfterPageDown,
@@ -157,7 +168,10 @@ class RovingTabindexTests(TestCase):
 
     def test_arrow_keys_move_the_single_stop(self):
         out = _run_grid_probe()
-        start = out["initial"]["anchor"]
+        # From the seeded day (see the probe): the arrow keys are measured against a
+        # fixed window, not against wherever `today` happens to fall.
+        start = out["seeded"]
+        self.assertEqual(start, "2026-11-10")
         self.assertEqual(out["afterRight"], _shift(start, 1))
         self.assertEqual(out["afterDown"], _shift(out["afterRight"], 7))
         self.assertEqual(out["afterBack"], start)
