@@ -603,12 +603,13 @@
                 @click="weekAheadOpen = !weekAheadOpen">
           <span class="flex items-baseline gap-2 min-w-0">
             <span class="text-[13px] font-semibold shrink-0">本周财报</span>
-            <span class="text-[11px] truncate" style="color:var(--text-muted);">{{ weekAhead.rangeLabel }} · {{ weekAhead.mineOnly ? '你的自选' : '全部标的' }}</span>
+            <span class="text-[11px] truncate" style="color:var(--text-muted);">{{ weekAhead.rangeLabel }}<template v-if="weekAheadScopeKnown"> · {{ weekAhead.mineOnly ? '你的自选' : '全部标的' }}</template></span>
           </span>
           <span class="flex items-center gap-2 shrink-0">
             <span v-if="!weekAhead.covered" class="text-[11px]" style="color:var(--text-muted);">不在当前视图</span>
-            <span v-else-if="loading && !earnings.length" class="text-[11px]" style="color:var(--text-muted);">读取中…</span>
             <span v-else-if="error" class="text-[11px]" style="color:#f87171;">读取失败</span>
+            <span v-else-if="!earningsLoaded" class="text-[11px]" style="color:var(--text-muted);">读取中…</span>
+            <span v-else-if="loading && !earnings.length" class="text-[11px]" style="color:var(--text-muted);">读取中…</span>
             <span v-else-if="weekAhead.total" class="text-[12px] font-semibold">{{ weekAhead.total }} 场</span>
             <span v-else class="text-[11px]" style="color:var(--text-muted);">本周无财报</span>
             <svg class="w-3.5 h-3.5" :style="weekAheadOpen ? 'transform:rotate(180deg);' : ''" style="color:var(--text-muted);" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
@@ -617,6 +618,7 @@
         <div v-show="weekAheadOpen" id="week-ahead-body" class="px-3 pb-3" style="border-top:1px solid var(--border);">
           <p v-if="!weekAhead.covered" class="pt-3 text-[12px]" style="color:var(--text-muted);">当前日历视图（{{ monthLabel }}）的取数窗口不包含本周；切回「今天」即可看到最近 7 天的财报。</p>
           <p v-else-if="error" class="pt-3 text-[12px]" style="color:#f87171;">本周财报读取失败：{{ error }}</p>
+          <div v-else-if="!earningsLoaded" class="flex items-center gap-2 pt-3 text-[12px]" style="color:var(--text-muted);"><div class="spinner" style="width:14px;height:14px;"></div> 加载中…</div>
           <div v-else-if="loading && !earnings.length" class="flex items-center gap-2 pt-3 text-[12px]" style="color:var(--text-muted);"><div class="spinner" style="width:14px;height:14px;"></div> 加载中…</div>
           <p v-else-if="!weekAhead.total" class="pt-3 text-[12px]" style="color:var(--text-muted);">本周无财报{{ weekAhead.mineOnly ? '（你的自选）' : '' }}。</p>
           <div v-else>

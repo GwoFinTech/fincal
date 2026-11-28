@@ -99,6 +99,7 @@
   // ── useApi: shared fetch wrapper + toast + error state ──────────
   function useApi() {
     const user = ref(null);
+    const userLoaded = ref(false);
     const appConfig = ref({ auth_login_url: '' });
     const loading = ref(false);
     // Two separate surfaces (Issue #82): a *read* failure is transient — the next
@@ -174,6 +175,9 @@
     async function loadUser() {
       const data = await apiFetch('/api/me');
       if (data) { user.value = data; }
+      // Identity unknown is not the same as anonymous: the calendar's 「本周财报」
+      // digest must not print 「全部标的」 for the half-second before this answers.
+      userLoaded.value = true;
       return data;
     }
 
@@ -184,7 +188,7 @@
       }
     }
 
-    return { user, appConfig, loading, error, writeError, toast, apiFetch, showToast, dismissErrors, loadUser, login };
+    return { user, userLoaded, appConfig, loading, error, writeError, toast, apiFetch, showToast, dismissErrors, loadUser, login };
   }
 
   // ── useCalendar: calendar navigation + cell computation ─────────
@@ -1984,6 +1988,16 @@
       const wl = useWatchlist(apiFetch, showToast, () => loadEarnings());
       cal.watchlist = wl.watchlist; // wire watchlist into calendar
 
+      // A digest that has not heard back from the server yet must not announce a
+      // scope it does not know. Mount order is `loadWatchlist()` → `loadEarnings()`,
+      // so until the watchlist answers `wl.watchlist` is empty and `mineOnly` reads
+      // false: the header printed 「全部标的 · 本周无财报」 (measured at 308ms) and
+      // only flipped to 「你的自选 · 读取中…」 130ms later. On a slow network that
+      // wrong sentence stays for the whole watchlist round-trip. Unknown scope
+      // prints no scope; unknown data prints 「读取中…」.
+      const weekAheadScopeKnown = computed(() => watchlistOnly.value
+        || (api.userLoaded.value && (!user.value || wl.watchlistLoaded.value)));
+
       // 4b. 「本周财报」 digest (Issue #133) — a view of the batch the calendar
       // just loaded, scoped to the account's own symbols when it has any (the
       // issue's 「无自选则列全部」). `covered` is the honesty bit: `earnings` is
@@ -2120,6 +2134,11 @@
         };
       }
 
+      // Data the digest has never heard back about is 「读取中…」, not 「本周无财报」:
+      // `earnings` starts empty and `loading` is only set when the request begins,
+      // so the first paint used to announce an empty week for every visitor.
+      const earningsLoaded = ref(false);
+
       async function loadEarnings() {
         loading.value = true;
         error.value = null;
@@ -2159,6 +2178,9 @@
           }
         } finally {
           loading.value = false;
+          // Settled either way: a failed request has its own error line, and must
+          // not leave the digest claiming 「读取中…」 forever.
+          earningsLoaded.value = true;
         }
       }
 
@@ -2382,6 +2404,8 @@
         calendarWeeks: cal.calendarWeeks, cellTabIndex: cal.cellTabIndex,
         // 「本周财报」 digest (Issue #133)
         weekAhead, weekAheadOpen, selectWeekEarning, selectWeekDay,
+        // 首屏还没听到服务器回答时不宣布范围、不宣布空（Issue #157 的同批修正）
+        weekAheadScopeKnown, earningsLoaded,
         // 摘要里那些 EPS 预期的快照年龄（Issue #157）
         weekAheadSnapshotNote, weekAheadSnapshotStale,
         onGridKeydown: (event) => {
