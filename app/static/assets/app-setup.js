@@ -1781,6 +1781,44 @@
       if (days == null || days < ESTIMATE_STALE_DAYS) return '';
       return '已 ' + days + ' 天未更新：每周同步近期失败，这个数可能不是最新的';
     }
+    // ── 表格级快照年龄（Issue #157）──────────────────────────────────
+    // #153 让详情面板说出预期有多旧；自选页两张表和「本周财报」摘要印的是同一批
+    // 数字，却没有任何日期——同步连败三周时，20 天前的快照在表格里和当天的长得
+    // 一模一样。一页由同一次同步写入，但一次部分失败会留下不同日期的行，所以这里
+    // 报**屏上这些行**的快照区间，只报最新的一天会把更旧的行说轻了。
+    // 只统计真的带了预期的行：算法预测日期、没有一致预期的事件不该拉低年龄。
+    function estimateSnapshotStamps(rows, now) {
+      const stamps = [];
+      for (const e of rows || []) {
+        if (!e) continue;
+        if (e.eps_estimate == null && e.revenue_estimate == null) continue;
+        const days = estimateAgeDays(e.estimate_as_of, now);
+        if (days == null) continue;
+        const d = new Date(e.estimate_as_of);
+        stamps.push([days, d.getFullYear() + '/' + (d.getMonth() + 1) + '/' + d.getDate()]);
+      }
+      return stamps;
+    }
+    // 「一致预期为 2026/10/31 至 2026/11/8 的快照（最早 28 天前）」；同一天就印单日。
+    // 没有任何带预期的行时返回空串，整行不渲染——宁可不说话，也不印一个假年龄。
+    function estimateSnapshotNote(rows, now) {
+      const stamps = estimateSnapshotStamps(rows, now);
+      if (!stamps.length) return '';
+      let oldest = stamps[0];
+      let newest = stamps[0];
+      for (const s of stamps) {
+        if (s[0] > oldest[0]) oldest = s;
+        if (s[0] < newest[0]) newest = s;
+      }
+      const span = oldest[1] === newest[1] ? newest[1] : oldest[1] + ' 至 ' + newest[1];
+      const age = oldest[1] === newest[1] ? oldest[0] + ' 天前' : '最早 ' + oldest[0] + ' 天前';
+      const note = '一致预期为 ' + span + ' 的快照（' + age + '）';
+      if (oldest[0] < ESTIMATE_STALE_DAYS) return note;
+      return note + '：每周同步近期失败，这些数可能不是最新的';
+    }
+    function estimateSnapshotIsStale(rows, now) {
+      return estimateSnapshotStamps(rows, now).some(s => s[0] >= ESTIMATE_STALE_DAYS);
+    }
     function hasLongbridgeConsensus(e) {
       return ['consensus_eps_gaap', 'consensus_eps_adjusted', 'consensus_revenue', 'consensus_ebit', 'consensus_net_income']
         .some(key => e[key] != null);
@@ -1881,6 +1919,7 @@
       fqLabel, periodLabel,
       estimateAgeDays, estimateIsStale, estimateAgeSuffix,
       estimateFreshnessNote, estimateStaleNote,
+      estimateSnapshotNote, estimateSnapshotIsStale,
     };
   }
 
@@ -2014,6 +2053,17 @@
 
       // 7. Formatters
       const fmt = useFormatters();
+
+      // 7b. 一致预期的快照年龄（Issue #157）——#153 只覆盖了详情面板。自选页两张
+      // 表和「本周财报」摘要印的是同一批数字，读者却在没有日期的情况下把它们当
+      // 当天采集的。两个 computed 都只看**屏上那些行**：自选表渲染 `wl.nextBySymbol`
+      // 每个标的第一条未来事件，摘要渲染 `weekAhead` 分组里的行。
+      const watchlistSnapshotRows = computed(() => [...wl.nextBySymbol.value.values()]);
+      const watchlistSnapshotNote = computed(() => fmt.estimateSnapshotNote(watchlistSnapshotRows.value));
+      const watchlistSnapshotStale = computed(() => fmt.estimateSnapshotIsStale(watchlistSnapshotRows.value));
+      const weekAheadSnapshotRows = computed(() => weekAhead.value.groups.flatMap(g => g.rows));
+      const weekAheadSnapshotNote = computed(() => fmt.estimateSnapshotNote(weekAheadSnapshotRows.value));
+      const weekAheadSnapshotStale = computed(() => fmt.estimateSnapshotIsStale(weekAheadSnapshotRows.value));
 
       // ── Dialog focus management ──────────────────────────────
       // A dialog needs a focus owner: without one Esc never reaches its handler, Tab
@@ -2332,6 +2382,8 @@
         calendarWeeks: cal.calendarWeeks, cellTabIndex: cal.cellTabIndex,
         // 「本周财报」 digest (Issue #133)
         weekAhead, weekAheadOpen, selectWeekEarning, selectWeekDay,
+        // 摘要里那些 EPS 预期的快照年龄（Issue #157）
+        weekAheadSnapshotNote, weekAheadSnapshotStale,
         onGridKeydown: (event) => {
           // The cell keeps its own Enter/Space handler; this one owns navigation.
           if (event.metaKey || event.ctrlKey || event.altKey) return;
@@ -2344,6 +2396,8 @@
         doSearch: wl.doSearch, addToWatchlist: wl.addToWatchlist, removeFromWatchlist: wl.removeFromWatchlist,
         toggleWatchlist: wl.toggleWatchlist, isMine: wl.isMine,
         watchlistInsight: wl.watchlistInsight,
+        // 两张表里 EPS / 营收预期的快照年龄（Issue #157）
+        watchlistSnapshotNote, watchlistSnapshotStale,
         // iCal
         showIcalModal: ical.showIcalModal, icalUrl: ical.icalUrl, icalOptions: ical.icalOptions,
         copied: ical.copied, popularSuggestions: ical.popularSuggestions, copyIcal: ical.copyIcal,
